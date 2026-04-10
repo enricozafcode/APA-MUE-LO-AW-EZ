@@ -1,0 +1,20 @@
+pandas
+numpy
+scikit-learn
+matplotlib
+pyyaml
+tqdm
+
+# LLM client
+openai
+ollama
+
+# Deep learning
+torch
+torchaudio
+torchvision
+tensorflow
+
+# Audio processing (BirdCLEF track)
+librosa
+soundfile
