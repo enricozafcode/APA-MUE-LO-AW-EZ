@@ -16,8 +16,10 @@ env/
 # Environment / secrets
 .env
 
-# Local data, artifacts, and outputs
-data/
+# Local data: keep `data/` in git via `.gitkeep`, ignore everything else under it
+data/*
+!data/.gitkeep
+
 logs/
 models/
 submission/*.csv

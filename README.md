@@ -12,10 +12,11 @@ autonomous-research-agent/
 ├── CONTRIBUTING.md
 ├── requirements.txt
 ├── .env.example
-├── data/
+├── data/              # folder in git; contents are gitignored (see below)
 ├── configs/
 ├── logs/
 ├── notebooks/
+├── scripts/
 ├── src/
 └── submission/
 ```
@@ -23,7 +24,10 @@ autonomous-research-agent/
 ## What Goes Where
 
 - `.gitignore`  
-  Ignore local-only and heavy files (`data/`, `logs/`, `models/`, `.env`, caches).
+  Ignores local-only files: everything under `data/` **except** `data/.gitkeep`, plus `logs/`, `models/`, `.env`, caches.
+
+- `data/`  
+  **Committed as an empty folder** (`data/.gitkeep`). Each developer **copies or extracts** the BirdCLEF competition files here locally (or sets `BIRDCLEF_DATA_DIR` in `.env` to another path). Nothing large is pushed to git.
 
 - `README.md`  
   Main documentation: setup, architecture, and run instructions.
@@ -35,11 +39,7 @@ autonomous-research-agent/
   Python dependencies for LLM orchestration, training, and audio processing.
 
 - `.env.example`  
-  Template for local environment variables. Copy to `.env` and edit locally.
-
-- `data/`  
-  Local Kaggle files and other local datasets.  
-  For BirdCLEF, place downloaded competition data here (or add a subfolder like `data/birdclef/`).
+  Template for optional local variables. Copy to `.env` and edit locally (never commit `.env`).
 
 - `configs/`  
   Runtime settings and prompt templates:
@@ -47,55 +47,74 @@ autonomous-research-agent/
   - `agent_config.json`: iteration limits, budget, and loop controls.
 
 - `logs/`  
-  Experiment memory and observability:
-  - generated code snapshots,
-  - run metadata,
-  - metrics history,
-  - error traces,
-  - LLM reasoning summaries.
+  Experiment memory and observability (snapshots, metrics, errors, LLM summaries).
 
 - `notebooks/`  
   EDA and manual baseline experiments (outside the autonomous loop).
 
+- `scripts/`  
+  `setup_project.py`: create `.venv` and install dependencies.
+
 - `src/`  
   Core Python application:
-  - `agent.py`: autonomous control loop (plan -> generate -> execute -> evaluate -> iterate).
+  - `paths.py`: `repo_root()` and `birdclef_data_dir()` (optional `BIRDCLEF_DATA_DIR` in `.env`; default `data/`).
+  - `agent.py`: autonomous control loop (plan → generate → execute → evaluate → iterate).
   - `llm_client.py`: provider-agnostic LLM interface (Ollama/OpenAI-compatible).
   - `code_executor.py`: isolated execution of generated training code.
-  - `evaluator.py`: metric extraction and feedback payloads for the next iteration.
+  - `evaluator.py`: metric extraction and feedback for the next iteration.
 
 - `submission/`  
-  Kaggle-ready outputs (`submission.csv`, notebooks for competition constraints, etc.).
+  Kaggle-ready outputs (`submission.csv`, notebooks, etc.).
 
 ## Quick Start
 
-### 1) Create environment and install dependencies
+### 1) Add the dataset locally (team)
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+Download the competition from [Kaggle](https://www.kaggle.com/) (browser or your own tooling) and place the extracted files in the repo’s **`data/`** directory (same layout as on Kaggle).  
+The **`data/`** directory is **in the repository**; **only** `data/.gitkeep` is tracked—your files stay on your machine.
+
+
+In code, use:
+
+```python
+from src.paths import birdclef_data_dir
+
+root = birdclef_data_dir()
 ```
 
-### 2) Configure environment variables
+### 2) Optional: `.env` for LLM settings
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` based on your local LLM setup (for example, Ollama at `http://localhost:11434`).
+Edit `.env` if you use non-default LLM URLs (see `src/llm_client.py`).
 
-### 3) Start local LLM
+### 3) Python environment
+
+From the repo root (Python **3.9+**):
+
+```bash
+python3 scripts/setup_project.py
+```
+
+Windows (example): `py -3 scripts\setup_project.py`
+
+Then activate:
+
+```bash
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+```
+
+**Manual equivalent:** `python -m venv .venv`, activate, `pip install -r requirements.txt`.
+
+### 4) Local LLM (when you use the agent)
 
 Example with Ollama:
 
 ```bash
 ollama run qwen3-coder
 ```
-
-### 4) Place BirdCLEF data
-
-Download competition data and place it under `data/` (recommended: `data/birdclef/`).
 
 ### 5) Run the agent (starter path)
 
