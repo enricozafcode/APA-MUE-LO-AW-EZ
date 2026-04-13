@@ -1,28 +1,38 @@
-from __future__ import annotations
-
 import os
-from dataclasses import dataclass
-
-
-@dataclass
-class LLMResponse:
-    content: str
-
+from openai import OpenAI
 
 class LLMClient:
-    """Provider-agnostic local LLM client (starter implementation)."""
-
-    def __init__(self, provider: str = "ollama", model: str = "qwen3-coder") -> None:
+    def __init__(self, provider: str = "ollama", model: str = "gemma4"):
+        """Initializes the client pointing to the local LLM server."""
+        self.model_name = model
         self.provider = provider
-        self.model = model
-        self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-
-    def generate_experiment(self, prompt: str) -> LLMResponse:
-        # TODO: Replace with real provider calls (ollama/openai-compatible).
-        # This stub keeps the project runnable before integration.
-        content = (
-            "EXPERIMENT_PROPOSAL\n"
-            "Hypothesis: A compact CNN on mel-spectrograms improves signal robustness.\n"
-            "Code: # TODO generate executable training code\n"
+        
+        # Determine the base URL depending on the provider from the config
+        if provider.lower() == "ollama":
+            base_url = "http://localhost:11434/v1"
+        else:
+            # Fallback if using LM Studio or others
+            base_url = "http://localhost:1234/v1" 
+            
+        self.client = OpenAI(
+            base_url=base_url,
+            api_key="local-dummy-key" # Local servers require a string here, but ignore it
         )
-        return LLMResponse(content=content)
+
+    def generate_code(self, system_prompt: str, user_prompt: str, temperature: float = 0.2) -> str:
+        """
+        Sends a prompt to the local LLM and returns the response.
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=temperature
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"Error communicating with local LLM: {e}")
+            return ""
