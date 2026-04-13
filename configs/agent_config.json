@@ -6,13 +6,13 @@
   "time_budget_minutes": 180,
   "random_seed": 42,
   "llm": {
-    "provider": "ollama",
-    "model": "qwen3-coder",
+    "provider": "ollama", 
+    "model": "deepseek-r1:8b",
     "temperature": 0.2
   },
   "execution": {
     "timeout_seconds": 1800,
-    "python_executable": "python"
+    "python_executable": "python3"
   },
   "logging": {
     "log_dir": "logs",
