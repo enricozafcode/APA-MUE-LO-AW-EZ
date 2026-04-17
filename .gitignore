@@ -30,3 +30,6 @@ submission/*.ipynb
 .DS_Store
 .idea/
 .vscode/
+
+# Claude Code
+.claude/
