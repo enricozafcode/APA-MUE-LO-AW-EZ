@@ -1,18 +1,18 @@
 {
   "project_name": "apa-birdclef-autonomous-agent",
   "track": "birdclef",
-  "max_iterations": 10,
+  "max_iterations": 5,
   "max_failures_before_stop": 3,
   "time_budget_minutes": 180,
   "random_seed": 42,
   "llm": {
     "provider": "ollama", 
-    "model": "deepseek-r1:8b",
+    "model": "qwen2.5-coder:3b",
     "temperature": 0.2
   },
   "execution": {
     "timeout_seconds": 1800,
-    "python_executable": "python3"
+    "python_executable": ".venv/Scripts/python.exe"
   },
   "logging": {
     "log_dir": "logs",
