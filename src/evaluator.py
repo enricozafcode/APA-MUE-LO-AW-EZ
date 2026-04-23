@@ -1,27 +1,48 @@
+"""Reads and summarises experiment metrics produced by generated training code."""
+
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any, Dict
 
 
-@dataclass
-class EvaluationSummary:
-    metrics: Dict[str, Any]
-    analysis_prompt: str
+def load_metrics(metrics_path: Path) -> Dict[str, Any]:
+    """
+    Reads metrics.json written by the generated training script.
 
-
-class Evaluator:
-    """Converts run outputs into structured feedback for the LLM."""
-
-    def build_summary(self, stdout: str, stderr: str) -> EvaluationSummary:
-        # TODO: parse real training logs/JSON artifacts to extract metrics.
-        metrics = {
-            "status": "ok" if not stderr else "warning",
-            "stdout_chars": len(stdout),
-            "stderr_chars": len(stderr),
+    Returns a failure dict if the file is missing or cannot be parsed.
+    """
+    if not metrics_path.exists():
+        return {
+            "success": False,
+            "error_type": "missing_metrics",
+            "error_message": "metrics.json was not written by the training script",
         }
-        analysis_prompt = (
-            "Analyze this run and propose the next experiment.\n"
-            f"Metrics: {metrics}\n"
-        )
-        return EvaluationSummary(metrics=metrics, analysis_prompt=analysis_prompt)
+    try:
+        with metrics_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        return {
+            "success": False,
+            "error_type": "invalid_metrics",
+            "error_message": f"Could not parse metrics.json: {e}",
+        }
+
+
+def summarize_metrics(metrics: Dict[str, Any]) -> str:
+    """Returns a one-block human-readable summary of a metrics dict."""
+    if not metrics.get("success", False):
+        error_type = metrics.get("error_type", "unknown")
+        error_msg = metrics.get("error_message", "")
+        return f"FAILED [{error_type}]: {error_msg}"
+
+    lines = [
+        f"  Model:    {metrics.get('model_type', '?')}",
+        f"  Epochs:   {metrics.get('epochs_completed', '?')}",
+        f"  Train loss: {metrics.get('train_loss', '?')}",
+        f"  Val loss:   {metrics.get('val_loss', '?')}",
+        f"  Val AUC:    {metrics.get('val_auc', '?')}",
+        f"  Runtime:  {metrics.get('runtime_seconds', 0):.1f}s",
+    ]
+    return "\n".join(lines)

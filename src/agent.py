@@ -1,76 +1,100 @@
+"""Main orchestrator for one BirdCLEF experimentation cycle."""
+
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from code_executor import CodeExecutor
+from dataset_manager import load_birdclef_summary
+from evaluator import load_metrics, summarize_metrics
 from llm_client import LLMClient
+from paths import birdclef_data_dir, get_next_experiment_dir, repo_root
+
 
 def load_config(path: Path) -> dict:
-    """Loads a JSON configuration file."""
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
+
 def main() -> None:
-    # 1. Setup paths based on your project structure
-    project_root = Path(__file__).resolve().parents[1]
-    config_path = project_root / "configs" / "agent_config.json"
-    logs_dir = project_root / "logs"
-    logs_dir.mkdir(exist_ok=True)
+    # --- 1. Config & paths ---
+    config = load_config(repo_root() / "configs" / "agent_config.json")
+    exp_dir = get_next_experiment_dir()
+    data_dir = birdclef_data_dir()
+    print(f"Experiment directory: {exp_dir}")
 
-    print("Loading configuration...")
-    config = load_config(config_path)
+    # --- 2. Dataset summary ---
+    print("Loading dataset summary...")
+    try:
+        summary = load_birdclef_summary(data_dir)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    (exp_dir / "data_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    print(f"  {summary['total_samples']} samples, {summary['num_species']} species")
 
-    print(f"Initializing LLM Client with model: {config['llm']['model']}...")
-    
-    # 2. Instantiate the client using config instead of .env
+    # --- 3. LLM client ---
     llm = LLMClient(
-        provider=config["llm"]["provider"], 
-        model=config["llm"]["model"]
-    ) 
+        provider=config["llm"]["provider"],
+        model=config["llm"]["model"],
+    )
+    temperature = config["llm"].get("temperature", 0.2)
 
-    # 3. Instantiate the Code Executor
+    # --- 4. Generate experiment plan ---
+    print("Generating experiment plan...")
+    plan = llm.generate_plan(
+        data_summary=summary,
+        instructions=(
+            "Propose a minimal BirdCLEF baseline experiment. "
+            "Use mel-spectrograms, a small CNN, sigmoid output with binary cross-entropy. "
+            "Train on a tiny subset (max 200 samples, max 3 epochs). Keep it simple and fast."
+        ),
+        temperature=temperature,
+    )
+    if not plan:
+        print("ERROR: LLM returned an empty plan.")
+        sys.exit(1)
+    (exp_dir / "plan.txt").write_text(plan, encoding="utf-8")
+    print("  Plan saved.")
+
+    # --- 5. Generate training code ---
+    print("Generating training code...")
+    code = llm.generate_code(
+        plan=plan,
+        data_dir=data_dir,
+        exp_dir=exp_dir,
+        temperature=temperature,
+    )
+    if not code:
+        print("ERROR: LLM returned empty code.")
+        sys.exit(1)
+    script_path = exp_dir / "generated_train.py"
+    script_path.write_text(code, encoding="utf-8")
+    print(f"  Script saved: {script_path}")
+
+    # --- 6. Execute generated code ---
+    print("\n--- EXECUTING GENERATED CODE ---")
     executor = CodeExecutor(
         python_executable=config["execution"]["python_executable"],
         timeout_seconds=config["execution"]["timeout_seconds"],
     )
+    result = executor.run_file(script_path)
+    (exp_dir / "stdout.txt").write_text(result.stdout, encoding="utf-8")
+    (exp_dir / "stderr.txt").write_text(result.stderr, encoding="utf-8")
 
-    print("Generating code... (this might take a few seconds)")
+    # --- 7. Evaluate ---
+    metrics = load_metrics(exp_dir / "metrics.json")
 
-    # 4. Define our test prompts
-    system_prompt = (
-        "You are an expert Python developer. Write clean, working code. "
-        "Do NOT output markdown formatting like ```python. Just output the raw code. and nothing alese"
-    )
-    user_prompt = "Write a simple Python script that prints 'Hello from the autonomous agent!' and defines a function to calculate the factorial of 5, then prints the result. Do not include any explanations or comments, just the code.  "
+    # --- 8. Print summary ---
+    print("\n--- EXPERIMENT RESULTS ---")
+    print(f"Execution success: {result.success}  (return code {result.return_code})")
+    print(summarize_metrics(metrics))
+    print(f"\nFull experiment saved to: {exp_dir}")
 
-    # 5. Ask the LLM to generate the code
-    generated_code = llm.generate_code(
-        system_prompt=system_prompt, 
-        user_prompt=user_prompt,
-        temperature=config["llm"].get("temperature", 0.2)
-    )
-
-    # 6. Save the output to a file so we can run it
-    output_file = logs_dir / "generated_test_script.py"
-    output_file.write_text(generated_code, encoding="utf-8")
-    print(f"Code saved to {output_file}")
-
-    # 7. Execute the generated code
-    print("\n--- EXECUTING GENERATED CODE ---")
-    result = executor.run_file(output_file)
-
-    # 8. Print Results
-    print("\n--- EXECUTION RESULTS ---")
-    print(f"Success: {result.success}")
-    print(f"Return Code: {result.return_code}")
-    
-    print("\nStandard Output:")
-    print(result.stdout if result.stdout else "(None)")
-    
-    if result.stderr:
-        print("\nStandard Error:")
-        print(result.stderr)
 
 if __name__ == "__main__":
     main()

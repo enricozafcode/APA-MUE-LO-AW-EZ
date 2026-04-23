@@ -7,12 +7,12 @@
   "random_seed": 42,
   "llm": {
     "provider": "ollama", 
-    "model": "deepseek-r1:8b",
+    "model": "gemma3:4b",
     "temperature": 0.2
   },
   "execution": {
-    "timeout_seconds": 1800,
-    "python_executable": "python3"
+    "timeout_seconds": 300,
+    "python_executable": "python"
   },
   "logging": {
     "log_dir": "logs",
