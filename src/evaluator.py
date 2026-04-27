@@ -1,143 +1,145 @@
-"""Reads and summarises experiment metrics; manages the cross-run registry."""
-
 from __future__ import annotations
 
-import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import pandas.api.types
+import sklearn.metrics
 
 
-def load_metrics(metrics_path: Path) -> Dict[str, Any]:
+@dataclass
+class EvaluationSummary:
+    metrics: dict[str, Any]
+    analysis_prompt: str
+
+
+class ParticipantVisibleError(Exception):
+    """Competition-style visible error for invalid submissions."""
+
+
+def score(solution: pd.DataFrame, submission: pd.DataFrame, row_id_column_name: str) -> float:
     """
-    Reads metrics.json written by the generated training script.
-
-    Returns a failure dict if the file is missing or cannot be parsed.
+    Version of macro-averaged ROC-AUC score that ignores all classes
+    that have no true positive labels.
     """
-    if not metrics_path.exists():
-        return {
-            "success": False,
-            "error_type": "missing_metrics",
-            "error_message": "metrics.json was not written by the training script",
+    solution = solution.copy()
+    submission = submission.copy()
+
+    del solution[row_id_column_name]
+    del submission[row_id_column_name]
+
+    if not pandas.api.types.is_numeric_dtype(submission.values):
+        bad_dtypes = {
+            column: submission[column].dtype
+            for column in submission.columns
+            if not pandas.api.types.is_numeric_dtype(submission[column])
         }
+        raise ParticipantVisibleError(f"Invalid submission data types found: {bad_dtypes}")
+
+    solution_sums = solution.sum(axis=0)
+    scored_columns = list(solution_sums[solution_sums > 0].index.values)
+    if len(scored_columns) == 0:
+        raise ParticipantVisibleError("No classes with positive labels were found.")
+
     try:
-        with metrics_path.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError as e:
-        return {
-            "success": False,
-            "error_type": "invalid_metrics",
-            "error_message": f"Could not parse metrics.json: {e}",
-        }
+        return sklearn.metrics.roc_auc_score(
+            solution[scored_columns].values,
+            submission[scored_columns].values,
+            average="macro",
+        )
+    except Exception as exc:
+        raise ParticipantVisibleError(f"ROC-AUC computation failed: {exc}") from exc
 
 
-def load_registry() -> List[Dict[str, Any]]:
-    """Loads the cross-run experiment registry, returning an empty list if missing."""
-    from paths import registry_path
-    path = registry_path()
-    if not path.exists():
-        return []
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+class Evaluator:
+    """Computes competition-aligned metrics from prediction artifacts."""
 
+    def __init__(self, row_id_column_name: str = "row_id") -> None:
+        self.row_id_column_name = row_id_column_name
 
-def append_to_registry(entry: Dict[str, Any]) -> None:
-    """Appends one experiment record to the shared registry."""
-    from paths import registry_path
-    path = registry_path()
-    registry = load_registry()
-    registry.append(entry)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(registry, f, indent=2)
+    def evaluate_from_files(self, y_true_path: Path, y_pred_path: Path) -> EvaluationSummary:
+        y_true = np.load(y_true_path)
+        y_pred = np.load(y_pred_path)
+        return self.evaluate_arrays(y_true=y_true, y_pred=y_pred)
 
+    def evaluate_arrays(self, y_true: np.ndarray, y_pred: np.ndarray) -> EvaluationSummary:
+        y_true = np.asarray(y_true)
+        y_pred = np.asarray(y_pred)
 
-# ---------------------------------------------------------------------------
-# Registry helpers
-# ---------------------------------------------------------------------------
+        if y_true.ndim != 2 or y_pred.ndim != 2:
+            metrics = {
+                "status": "error",
+                "reason": "Expected 2D arrays for y_true and y_pred.",
+                "y_true_shape": list(y_true.shape),
+                "y_pred_shape": list(y_pred.shape),
+            }
+            return EvaluationSummary(
+                metrics=metrics,
+                analysis_prompt=(
+                    "The experiment ran, but evaluation failed because predictions/labels are not 2D. "
+                    "Ensure y_train and model.predict(X_train) produce shape (n_samples, n_classes)."
+                ),
+            )
 
-def _entry_status(entry: Dict[str, Any]) -> str:
-    """Backward-compatible status: new entries have 'status', old have metrics.success."""
-    if "status" in entry:
-        return entry["status"]
-    return "success" if entry.get("metrics", {}).get("success") else "failed"
+        if y_true.shape != y_pred.shape:
+            metrics = {
+                "status": "error",
+                "reason": "Shape mismatch between y_true and y_pred.",
+                "y_true_shape": list(y_true.shape),
+                "y_pred_shape": list(y_pred.shape),
+            }
+            return EvaluationSummary(
+                metrics=metrics,
+                analysis_prompt=(
+                    "The experiment ran, but evaluation failed because predictions and labels have "
+                    "different shapes. Fix the output layer/label dimensions."
+                ),
+            )
 
+        row_count, class_count = y_true.shape
+        columns = [f"class_{idx}" for idx in range(class_count)]
 
-def _entry_metric(entry: Dict[str, Any]) -> float:
-    """Backward-compatible main metric: new entries have 'main_metric', old have metrics.val_auc."""
-    if "main_metric" in entry:
-        return float(entry["main_metric"])
-    return float(entry.get("metrics", {}).get("val_auc", 0.0))
+        solution = pd.DataFrame(y_true, columns=columns)
+        submission = pd.DataFrame(y_pred, columns=columns)
+        solution.insert(0, self.row_id_column_name, np.arange(row_count))
+        submission.insert(0, self.row_id_column_name, np.arange(row_count))
 
-
-def get_best_experiment(registry: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Returns the registry entry with the highest main_metric among successful runs."""
-    successful = [e for e in registry if _entry_status(e) == "success"]
-    if not successful:
-        return None
-    return max(successful, key=_entry_metric)
-
-
-def count_consecutive_failures(registry: List[Dict[str, Any]]) -> int:
-    """Counts how many consecutive failed entries appear at the end of the registry."""
-    count = 0
-    for entry in reversed(registry):
-        if _entry_status(entry) == "failed":
-            count += 1
-        else:
-            break
-    return count
-
-
-def compute_strategy(registry: List[Dict[str, Any]]) -> str:
-    """
-    Returns a strategy label for the next experiment based on recent history.
-
-    exploration            – no history, try anything
-    last_failed_fix        – last run failed, minimal fix
-    multiple_failures_simplify – 2+ consecutive failures, simplify
-    improved_continue      – metric improved, continue direction
-    succeeded_weak_change  – success but weak metric, tweak 1-2 params
-    no_improvement_switch  – flat metrics across last 3 runs, try new arch
-    """
-    if not registry:
-        return "exploration"
-
-    if count_consecutive_failures(registry) >= 2:
-        return "multiple_failures_simplify"
-
-    last = registry[-1]
-    if _entry_status(last) == "failed":
-        return "last_failed_fix"
-
-    best = get_best_experiment(registry)
-    last_metric = _entry_metric(last)
-    best_metric = _entry_metric(best) if best else 0.0
-
-    if len(registry) > 1 and last_metric >= best_metric:
-        return "improved_continue"
-
-    recent = registry[-3:]
-    recent_metrics = [_entry_metric(e) for e in recent if _entry_status(e) == "success"]
-    if len(recent_metrics) >= 2 and max(recent_metrics) - min(recent_metrics) < 0.02:
-        return "no_improvement_switch"
-
-    return "succeeded_weak_change"
-
-
-# ---------------------------------------------------------------------------
-
-def summarize_metrics(metrics: Dict[str, Any]) -> str:
-    """Returns a one-block human-readable summary of a metrics dict."""
-    if not metrics.get("success", False):
-        error_type = metrics.get("error_type", "unknown")
-        error_msg = metrics.get("error_message", "")
-        return f"FAILED [{error_type}]: {error_msg}"
-
-    lines = [
-        f"  Model:    {metrics.get('model_type', '?')}",
-        f"  Epochs:   {metrics.get('epochs_completed', '?')}",
-        f"  Train loss: {metrics.get('train_loss', '?')}",
-        f"  Val loss:   {metrics.get('val_loss', '?')}",
-        f"  Val AUC:    {metrics.get('val_auc', '?')}",
-        f"  Runtime:  {metrics.get('runtime_seconds', 0):.1f}s",
-    ]
-    return "\n".join(lines)
+        try:
+            macro_roc_auc = score(
+                solution=solution,
+                submission=submission,
+                row_id_column_name=self.row_id_column_name,
+            )
+            error_metric = 1.0 - float(macro_roc_auc)
+            scored_columns = int((solution.drop(columns=[self.row_id_column_name]).sum(axis=0) > 0).sum())
+            metrics = {
+                "status": "success",
+                "macro_roc_auc": float(macro_roc_auc),
+                "error_metric": error_metric,
+                "num_scored_columns": scored_columns,
+                "num_classes": class_count,
+                "num_samples": row_count,
+            }
+            analysis_prompt = (
+                "The experiment succeeded and was externally evaluated with the competition metric. "
+                f"Metrics: {metrics}. Analyze this result, propose a small architectural improvement, "
+                "and provide a complete updated script."
+            )
+            return EvaluationSummary(metrics=metrics, analysis_prompt=analysis_prompt)
+        except ParticipantVisibleError as exc:
+            metrics = {
+                "status": "error",
+                "reason": str(exc),
+                "num_classes": class_count,
+                "num_samples": row_count,
+            }
+            return EvaluationSummary(
+                metrics=metrics,
+                analysis_prompt=(
+                    "The experiment ran, but external evaluation failed with this metric error: "
+                    f"{exc}. Fix the script so outputs are valid probabilities aligned with labels."
+                ),
+            )
