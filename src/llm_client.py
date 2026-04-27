@@ -1,4 +1,3 @@
-import os
 from openai import OpenAI
 
 class LLMClient:
@@ -19,20 +18,26 @@ class LLMClient:
             api_key="local-dummy-key" # Local servers require a string here, but ignore it
         )
 
+    def generate_from_messages(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
+        """Sends full chat history to the local LLM and returns the reply."""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=temperature,
+            )
+            return response.choices[0].message.content or ""
+        except Exception as e:
+            return f"Error communicating with local LLM: {e}"
+
     def generate_code(self, system_prompt: str, user_prompt: str, temperature: float = 0.2) -> str:
         """
         Sends a prompt to the local LLM and returns the response.
         """
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=temperature
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"Error communicating with local LLM: {e}")
-            return ""
+        return self.generate_from_messages(
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature,
+        )
