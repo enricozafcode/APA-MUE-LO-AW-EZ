@@ -63,7 +63,8 @@ def _default_load_mel(audio_path, sample_rate, clip_seconds, n_mels, n_frames):
     else:
         wav = wav[:target_len]
     mel = librosa.feature.melspectrogram(
-        y=wav, sr=sample_rate, n_mels=n_mels, n_fft=1024, hop_length=512, power=2.0,
+        y=wav, sr=sample_rate, n_mels=n_mels, n_fft=2048, hop_length=512, power=2.0,
+        fmin=20, fmax=16000,
     )
     mel_db = librosa.power_to_db(mel, ref=np.max)
     mel_resized = tf.image.resize(mel_db[..., np.newaxis], (n_mels, n_frames)).numpy()
@@ -129,7 +130,18 @@ def main():
         except Exception:
             continue
         yv = np.zeros(num_species, dtype=np.float32)
-        yv[sp2i[label]] = 1.0
+        if label in sp2i:
+            yv[sp2i[label]] = 1.0
+        try:
+            import ast as _ast
+            sec = getattr(row, "secondary_labels", "[]")
+            sec_list = _ast.literal_eval(str(sec)) if isinstance(sec, str) else []
+            for sl in sec_list:
+                sl = str(sl).strip()
+                if sl and sl in sp2i:
+                    yv[sp2i[sl]] = 1.0
+        except Exception:
+            pass
         X_items.append(mel)
         y_items.append(yv)
         if max_samples and len(X_items) >= max_samples:
@@ -173,7 +185,7 @@ DEFAULT_SLOT_CODE = '''def get_training_config():
         "max_samples": 500,
         "sample_rate": 32000,
         "clip_seconds": 5.0,
-        "n_mels": 64,
+        "n_mels": 128,
         "n_frames": 128,
         "epochs": 5,
         "batch_size": 32,
@@ -183,19 +195,46 @@ DEFAULT_SLOT_CODE = '''def get_training_config():
 
 def build_model(input_shape, num_classes):
     import tensorflow as tf
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=input_shape),
-        tf.keras.layers.Conv2D(16, (3, 3), activation="relu", padding="same"),
-        tf.keras.layers.MaxPooling2D((2, 2)),
-        tf.keras.layers.Conv2D(32, (3, 3), activation="relu", padding="same"),
-        tf.keras.layers.MaxPooling2D((2, 2)),
-        tf.keras.layers.Conv2D(64, (3, 3), activation="relu", padding="same"),
-        tf.keras.layers.MaxPooling2D((2, 2)),
-        tf.keras.layers.GlobalAveragePooling2D(),
-        tf.keras.layers.Dropout(0.3),
-        tf.keras.layers.Dense(num_classes, activation="sigmoid"),
-    ])
-    model.compile(optimizer="adam", loss="binary_crossentropy")
+
+    inputs = tf.keras.Input(shape=input_shape)
+
+    # CNN backbone
+    x = tf.keras.layers.Conv2D(32, (3, 3), padding="same")(inputs)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation("relu")(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+
+    x = tf.keras.layers.Conv2D(64, (3, 3), padding="same")(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation("relu")(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+
+    x = tf.keras.layers.Conv2D(128, (3, 3), padding="same")(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation("relu")(x)
+    x = tf.keras.layers.MaxPooling2D((2, 2))(x)
+
+    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+
+    # Multi-label classification head
+    x = tf.keras.layers.Dense(512)(x)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Activation("relu")(x)
+    x = tf.keras.layers.Dropout(0.4)(x)
+
+    x = tf.keras.layers.Dense(256)(x)
+    x = tf.keras.layers.Activation("relu")(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
+
+    # One sigmoid output per species (independent multi-label)
+    outputs = tf.keras.layers.Dense(num_classes, activation="sigmoid")(x)
+
+    model = tf.keras.Model(inputs, outputs)
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+        loss="binary_crossentropy",
+        metrics=["accuracy"],
+    )
     return model
 '''
 
@@ -221,18 +260,22 @@ SYSTEM_PROMPT = (
 
 SEED_PROMPT = (
     "Write get_training_config() and build_model() for BirdCLEF 2026.\n\n"
-    "Task: multi-label bird species classification from mel spectrograms.\n"
-    "Input: mel spectrogram of shape (n_mels, n_frames, 1), default (64, 128, 1).\n"
-    "Output: 234 species probabilities (sigmoid).\n"
-    "Loss: binary_crossentropy.\n\n"
-    "Data info:\n"
-    "- ~24,000 training audio clips (.ogg) in data/train_audio/\n"
-    "- train.csv columns: primary_label, filename, secondary_labels, latitude, longitude, "
-    "scientific_name, common_name, etc.\n"
-    "- 234 target species defined by sample_submission.csv\n"
-    "- Audio is 5-second clips converted to mel spectrograms\n\n"
-    "Start with a simple CNN baseline (Conv2D blocks + GlobalAveragePooling).\n\n"
-    "Here is the starting code to modify:\n"
+    "Task: MULTI-LABEL classification — predict probability of presence for each of 234 species "
+    "in a 5-second audio window. Multiple species can be active simultaneously.\n\n"
+    "Input: mel spectrogram of shape (n_mels, n_frames, 1), default (128, 128, 1).\n"
+    "Output: 234 independent probabilities via sigmoid (NOT softmax).\n"
+    "Loss: binary_crossentropy (each species treated independently).\n\n"
+    "Key EDA findings to incorporate:\n"
+    "- 35,549 training recordings across 206 species (28 species have no train examples)\n"
+    "- Severe class imbalance: Aves 69%, Reptilia 0.4% — model must handle sparse labels\n"
+    "- Labels include secondary_labels (co-occurring species) — harness already loads both\n"
+    "- Soundscape recordings are nocturnal/crepuscular: domain gap to watch\n"
+    "- Mel params from EDA: SR=32000, N_MELS=128, N_FFT=2048, HOP=512, fmin=20, fmax=16000\n\n"
+    "Architecture requirements:\n"
+    "- CNN backbone: Conv2D blocks with BatchNormalization\n"
+    "- Multi-label head: Dense(512) -> BatchNorm -> ReLU -> Dropout(0.4) -> Dense(256) -> ReLU -> Dropout(0.3) -> Dense(234, sigmoid)\n"
+    "- Avoid softmax — it forces competition between classes\n\n"
+    "Here is the starting code to improve:\n"
     f"```python\n{DEFAULT_SLOT_CODE}```"
 )
 
@@ -257,12 +300,14 @@ def _build_feedback_prompt(*, stdout, stderr, is_error, metrics, current_code):
         f"Results:\n{metrics_str}\n"
         f"Training output:\n{_truncate(stdout, 2000)}\n\n"
         "Propose ONE specific improvement to increase macro_roc_auc. Options:\n"
-        "- More/fewer Conv2D layers or filters\n"
-        "- Add BatchNormalization\n"
-        "- Change dropout, learning rate, epochs, batch size\n"
-        "- Increase max_samples\n"
-        "- Change n_mels, n_frames\n"
-        "- Add data augmentation in build_features()\n\n"
+        "- Deeper CNN backbone or more filters\n"
+        "- Add/tune BatchNormalization in backbone or head\n"
+        "- Improve multi-label head: more Dense layers, stronger Dropout\n"
+        "- Change dropout rate, learning rate, epochs, batch size\n"
+        "- Increase max_samples (more real data = better signal)\n"
+        "- Increase n_mels to 128 (EDA used 128 for best spectrogram quality)\n"
+        "- Add data augmentation in build_features() (time/freq masking)\n"
+        "- Never use softmax — always sigmoid for multi-label\n\n"
         f"Return the complete updated code.\nCurrent code:\n```python\n{current_code}\n```"
     )
 
