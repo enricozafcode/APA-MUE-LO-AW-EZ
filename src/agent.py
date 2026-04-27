@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import ast
+import sys
 import time
 from pathlib import Path
 from datetime import datetime
@@ -317,6 +318,8 @@ def _build_feedback_prompt(*, stdout, stderr, is_error, metrics, current_code):
 # ---------------------------------------------------------------------------
 
 def _truncate(text, max_chars=4000):
+    if not text:
+        return ""
     return text if len(text) <= max_chars else text[:max_chars] + "\n...[truncated]..."
 
 
@@ -349,12 +352,12 @@ def validate_slot_code(code):
 
 def assemble_script(slot_code, *, is_final=False, model_save_path=""):
     suffix = _make_harness_suffix(is_final=is_final, model_save_path=model_save_path)
-    return f"{HARNESS_PREFIX}\n# ── LLM-generated slots ──\n\n{slot_code.strip()}\n\n{suffix}"
+    return f"{HARNESS_PREFIX}\n# -- LLM-generated slots --\n\n{slot_code.strip()}\n\n{suffix}"
 
 
 def _append_eval_wrapper(script, iteration, eval_dir):
-    yt = eval_dir / f"y_true_iter_{iteration}.npy"
-    yp = eval_dir / f"y_pred_iter_{iteration}.npy"
+    yt = str(eval_dir / f"y_true_iter_{iteration}.npy").replace("\\", "/")
+    yp = str(eval_dir / f"y_pred_iter_{iteration}.npy").replace("\\", "/")
     return script + f'''
 
 import numpy as _np
@@ -531,7 +534,7 @@ def agent_loop(config):
 
     llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
     executor = CodeExecutor(
-        python_executable=config["execution"]["python_executable"],
+        python_executable=sys.executable,
         timeout_seconds=config["execution"]["timeout_seconds"],
     )
     evaluator = Evaluator(row_id_column_name="row_id")
@@ -558,7 +561,7 @@ def agent_loop(config):
     print("=" * 60)
 
     for it in range(1, max_iters + 1):
-        print(f"\n{'─'*50}\n  ITERATION {it}/{max_iters}\n{'─'*50}")
+        print(f"\n{'-'*50}\n  ITERATION {it}/{max_iters}\n{'-'*50}")
 
         # 1. Query LLM
         t0 = time.time()
@@ -636,7 +639,7 @@ def agent_loop(config):
         messages = _trim_and_append(messages, "user", fb)
         _save_metrics(metrics_history, logs_dir / "metrics_history.json")
 
-    # ── Summary ──
+    # -- Summary --
     print(f"\n{'='*60}")
     ok = sum(1 for m in metrics_history if m["status"] == "success")
     print(f"  EXPLORATION DONE: {ok}/{len(metrics_history)} successful, best AUC = {best_auc:.6f}")
@@ -644,7 +647,7 @@ def agent_loop(config):
 
     (logs_dir / "conversation_history.json").write_text(json.dumps(messages, indent=2), encoding="utf-8")
 
-    # ── Final run on ALL data ──
+    # -- Final run on ALL data --
     if best_auc > 0:
         _run_final(best_slot_code=best_slot, executor=executor, evaluator=evaluator, project_root=project_root)
     else:

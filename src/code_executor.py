@@ -26,6 +26,8 @@ class CodeExecutor:
                 [self.python_executable, str(script_path)],
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=self.timeout_seconds,
             )
             return ExecutionResult(

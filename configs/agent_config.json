@@ -8,12 +8,12 @@
   "random_seed": 42,
   "llm": {
     "provider": "ollama", 
-    "model": "glm-4.7-flash",
+    "model": "qwen2.5-coder:3b",
     "temperature": 0.2
   },
   "execution": {
     "timeout_seconds": 1800,
-    "python_executable": "python3"
+    "python_executable": "python"
   },
   "logging": {
     "log_dir": "logs",
