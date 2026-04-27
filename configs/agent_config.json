@@ -1,13 +1,14 @@
 {
   "project_name": "apa-birdclef-autonomous-agent",
   "track": "birdclef",
+  "llm_script_mode": "slots",
   "max_iterations": 10,
   "max_failures_before_stop": 3,
   "time_budget_minutes": 180,
   "random_seed": 42,
   "llm": {
     "provider": "ollama", 
-    "model": "deepseek-r1:8b",
+    "model": "gemma4",
     "temperature": 0.2
   },
   "execution": {

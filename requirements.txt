@@ -16,6 +16,6 @@ torchaudio
 torchvision
 tensorflow
 
-# Audio processing (BirdCLEF track)
+# Audio processing
 librosa
 soundfile

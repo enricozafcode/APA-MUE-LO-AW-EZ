@@ -21,15 +21,32 @@ class CodeExecutor:
         self.timeout_seconds = timeout_seconds
 
     def run_file(self, script_path: Path) -> ExecutionResult:
-        completed = subprocess.run(
-            [self.python_executable, str(script_path)],
-            capture_output=True,
-            text=True,
-            timeout=self.timeout_seconds,
-        )
-        return ExecutionResult(
-            success=completed.returncode == 0,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            return_code=completed.returncode,
-        )
+        try:
+            completed = subprocess.run(
+                [self.python_executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_seconds,
+            )
+            return ExecutionResult(
+                success=completed.returncode == 0,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                return_code=completed.returncode,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout or ""
+            stderr = (exc.stderr or "") + f"\nExecution timed out after {self.timeout_seconds} seconds."
+            return ExecutionResult(
+                success=False,
+                stdout=stdout,
+                stderr=stderr.strip(),
+                return_code=-1,
+            )
+        except Exception as exc:
+            return ExecutionResult(
+                success=False,
+                stdout="",
+                stderr=f"Executor failed before script completion: {exc}",
+                return_code=-1,
+            )
