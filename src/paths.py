@@ -40,3 +40,7 @@ def get_next_experiment_dir() -> Path:
     exp_dir = experiments_dir / f"exp_{next_num:03d}"
     exp_dir.mkdir(parents=True, exist_ok=True)
     return exp_dir
+
+
+def registry_path() -> Path:
+    return get_experiments_dir() / "registry.json"

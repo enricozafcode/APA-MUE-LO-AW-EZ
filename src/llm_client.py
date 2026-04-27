@@ -3,15 +3,89 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from typing import Any, Dict, List
 
 from openai import OpenAI
 
+_PLAN_SCHEMA = """\
+{
+  "search_stage": "exploration" | "refinement",
+  "change_summary": "<what changed vs previous run, or 'first run'>",
+  "reasoning": "<why this choice>",
+  "conv_layers": [
+    {"filters": <int>, "kernel_size": <int>},
+    ...
+  ],
+  "dropout": <float 0.0-0.4>,
+  "learning_rate": <float>,
+  "batch_size": <int>,
+  "epochs": <int>
+}"""
+
+_PLAN_CONSTRAINTS = """\
+Hard constraints (never violate):
+- Input representation: mel-spectrogram (fixed, not negotiable)
+- Model family: 2D CNN only (Conv2D + MaxPooling2D layers)
+- conv_layers: 2 to 4 entries
+- filters per layer: 16 to 256
+- kernel_size: 3 or 5
+- dropout: 0.0 to 0.4
+- learning_rate: 1e-4 to 1e-2
+- batch_size: 8, 16, or 32
+- epochs: 3 (fixed for now)
+- search_stage: must be exactly "exploration" or "refinement"
+- Output ONLY valid JSON — no markdown, no explanation outside the JSON.
+
+Not yet in search space (do not change these, just leave them at defaults):
+- num_mels: 64 (fixed — future extension)
+- spectrogram_resolution: standard/hop_length=512 (fixed — future extension)
+- thresholding_strategy: none (fixed — future extension)"""
+
+_STRATEGY_HINTS: dict = {
+    "exploration": (
+        "This is early-stage exploration. Try a meaningfully different architecture — "
+        "vary filter depth, number of layers, or learning rate significantly. "
+        "Set search_stage to 'exploration'."
+    ),
+    "last_failed_fix": (
+        "The previous run FAILED. Make a minimal, safe change to fix the issue. "
+        "If unsure, use 2 small conv layers, low dropout, LR=0.001. "
+        "Set search_stage to 'exploration'."
+    ),
+    "multiple_failures_simplify": (
+        "Multiple consecutive failures. Simplify drastically: use exactly 2 conv layers "
+        "with small filters (16–32), dropout=0.0, LR=0.001, batch_size=16. "
+        "Set search_stage to 'exploration'."
+    ),
+    "improved_continue": (
+        "The last run improved on the best result so far. Continue in the same direction — "
+        "make only a small refinement (e.g. slightly adjust LR or dropout). "
+        "Set search_stage to 'refinement'."
+    ),
+    "succeeded_weak_change": (
+        "The last run succeeded but performance is weak. Change only 1–2 parameters "
+        "(e.g. increase filters, or lower LR). Do not redesign the whole architecture. "
+        "Set search_stage to 'exploration'."
+    ),
+    "no_improvement_switch": (
+        "No meaningful improvement across the last few runs. Switch to a clearly different "
+        "configuration — change both the architecture depth and the learning rate. "
+        "Set search_stage to 'exploration'."
+    ),
+}
+
+_ANALYSIS_SCHEMA = """\
+{
+  "outcome": "improved" | "regressed" | "failed",
+  "likely_cause": "<capacity | overfitting | underfitting | learning_rate | data | other>",
+  "next_step": "<one concrete hyperparameter suggestion>"
+}"""
+
 
 class LLMClient:
-    """Wraps the local LLM server (Ollama / LM Studio) with two focused methods."""
+    """Wraps the local LLM server (Ollama / LM Studio)."""
 
-    def __init__(self, provider: str = "ollama", model: str = "deepseek-r1:8b") -> None:
+    def __init__(self, provider: str = "ollama", model: str = "gemma3:4b") -> None:
         self.model_name = model
         base_url = (
             "http://localhost:11434/v1" if provider.lower() == "ollama"
@@ -20,7 +94,6 @@ class LLMClient:
         self.client = OpenAI(base_url=base_url, api_key="local-dummy-key", timeout=1800.0)
 
     def _call(self, system: str, user: str, temperature: float) -> str:
-        """Single point of contact with the LLM server."""
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -36,137 +109,122 @@ class LLMClient:
             return ""
 
     @staticmethod
-    def _strip_markdown(text: str) -> str:
-        """Removes markdown code fences that some models add despite instructions."""
+    def _extract_json(text: str) -> str:
+        """Strips markdown fences and extracts the first JSON object."""
         lines = text.splitlines()
+        # Remove leading ``` fence
         if lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
+        # Remove trailing ``` fence
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
-        return "\n".join(lines)
+        return "\n".join(lines).strip()
 
     def generate_plan(
         self,
-        data_summary: dict,
-        instructions: str,
+        data_summary: Dict[str, Any],
+        history: List[Dict[str, Any]],
+        strategy: str = "exploration",
         temperature: float = 0.2,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """
-        Asks the LLM to propose a free-text experiment plan given a data summary.
+        Asks the LLM to propose CNN hyperparameters for the next experiment.
 
-        Returns a plain-text string describing what to try and why.
+        Returns a validated plan dict. Falls back to a safe default on parse failure.
         """
+        history_block = ""
+        if history:
+            recent = history[-3:]
+            rows = []
+            for h in recent:
+                m = h.get("metrics", {})
+                p = h.get("plan", {})
+                exp_id = h.get("experiment_id", h.get("exp_id", "?"))
+                metric = h.get("main_metric", m.get("val_auc", "n/a"))
+                status = h.get("status", "success" if m.get("success") else "failed")
+                rows.append(
+                    f"  - {exp_id}: layers={p.get('conv_layers')}, "
+                    f"lr={p.get('learning_rate')}, dropout={p.get('dropout')}, "
+                    f"val_auc={metric}, status={status}, "
+                    f"stage={p.get('search_stage', 'exploration')}"
+                )
+            history_block = "Previous experiments (most recent last):\n" + "\n".join(rows) + "\n\n"
+
+        strategy_instruction = _STRATEGY_HINTS.get(strategy, _STRATEGY_HINTS["exploration"])
+
         system = (
-            "You are an expert ML researcher specialising in audio classification. "
-            "Propose a concise, focused experiment plan. Be specific about model architecture, "
-            "audio preprocessing, and training setup. Max 200 words."
+            "You are an ML researcher designing a CNN for BirdCLEF audio classification. "
+            "Your job is to choose hyperparameters for the next experiment. "
+            + _PLAN_CONSTRAINTS
         )
         user = (
-            f"Data summary:\n{json.dumps(data_summary, indent=2)}\n\n"
-            f"Instructions:\n{instructions}"
+            f"Dataset: {data_summary['total_samples']} samples, "
+            f"{data_summary['num_species']} species.\n\n"
+            + history_block
+            + f"Search strategy for this run: {strategy_instruction}\n\n"
+            + "Propose the next experiment as JSON matching this schema exactly:\n"
+            + _PLAN_SCHEMA
         )
-        return self._call(system, user, temperature)
 
-    def generate_code(
+        raw = self._call(system, user, temperature)
+        try:
+            plan = json.loads(self._extract_json(raw))
+            # Migrate old 'rationale' key to 'reasoning'
+            if "rationale" in plan and "reasoning" not in plan:
+                plan["reasoning"] = plan.pop("rationale")
+            elif "rationale" in plan:
+                del plan["rationale"]
+            # Ensure all required keys exist
+            plan.setdefault("search_stage", "exploration")
+            plan.setdefault("change_summary", "")
+            plan.setdefault("reasoning", "")
+            plan.setdefault("conv_layers", [{"filters": 32, "kernel_size": 3}])
+            plan.setdefault("dropout", 0.0)
+            plan.setdefault("learning_rate", 0.001)
+            plan.setdefault("batch_size", 16)
+            plan.setdefault("epochs", 3)
+            return plan
+        except (json.JSONDecodeError, ValueError):
+            print("WARNING: LLM returned invalid JSON for plan — using safe default.")
+            return {
+                "search_stage": "exploration",
+                "change_summary": "safe default (LLM parse failed)",
+                "reasoning": "LLM returned invalid JSON",
+                "conv_layers": [
+                    {"filters": 32, "kernel_size": 3},
+                    {"filters": 64, "kernel_size": 3},
+                ],
+                "dropout": 0.0,
+                "learning_rate": 0.001,
+                "batch_size": 16,
+                "epochs": 3,
+            }
+
+    def analyze_result(
         self,
-        plan: str,
-        data_dir: Path,
-        exp_dir: Path,
+        plan: Dict[str, Any],
+        metrics: Dict[str, Any],
+        history: List[Dict[str, Any]],
         temperature: float = 0.2,
-    ) -> str:
+    ) -> Dict[str, Any]:
         """
-        Asks the LLM to generate the CNN model block only; the rest is a fixed skeleton.
+        Asks the LLM to interpret the experiment result and suggest next steps.
 
-        The script must write a metrics.json file to exp_dir before it exits.
+        Returns a structured dict {outcome, likely_cause, next_step}.
+        Falls back to a text-only dict if JSON parsing fails.
         """
-        metrics_path = exp_dir / "metrics.json"
-        audio_dir = data_dir / "train_audio"
-        train_csv = data_dir / "train.csv"
-
         system = (
-            "You are an expert Python/Keras developer. "
-            "Output ONLY raw Python code — no markdown fences, no explanations."
+            "You are an ML researcher reviewing a BirdCLEF CNN experiment. "
+            "Respond with ONLY a JSON object matching this schema — no markdown, no extra text:\n"
+            + _ANALYSIS_SCHEMA
         )
-
-        skeleton = (
-            f"import time, json, os\n"
-            f"import librosa\n"
-            f"import numpy as np\n"
-            f"import pandas as pd\n"
-            f"from sklearn.model_selection import train_test_split\n"
-            f"from sklearn.preprocessing import LabelEncoder\n"
-            f"import tensorflow as tf\n"
-            f"from tensorflow.keras import layers, models\n"
-            f"\n"
-            f"DATA_CSV   = r'{train_csv}'\n"
-            f"AUDIO_DIR  = r'{audio_dir}'\n"
-            f"METRICS_PATH = r'{metrics_path}'\n"
-            f"N_MELS, HOP_LENGTH, TIME_STEPS = 64, 512, 216\n"
-            f"DURATION, BATCH_SIZE, EPOCHS = 5.0, 16, 3\n"
-            f"\n"
-            f"start_time = time.time()\n"
-            f"try:\n"
-            f"    df = pd.read_csv(DATA_CSV).head(50)\n"
-            f"    X, y_labels = [], []\n"
-            f"    for _, row in df.iterrows():\n"
-            f"        try:\n"
-            f"            audio, sr = librosa.load(os.path.join(AUDIO_DIR, row['filename']), sr=22050, duration=DURATION)\n"
-            f"            mel = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=N_MELS, hop_length=HOP_LENGTH)\n"
-            f"            mel = librosa.power_to_db(mel, ref=np.max)  # shape: (N_MELS, T)\n"
-            f"            if mel.shape[1] < TIME_STEPS:\n"
-            f"                mel = np.pad(mel, ((0, 0), (0, TIME_STEPS - mel.shape[1])))\n"
-            f"            else:\n"
-            f"                mel = mel[:, :TIME_STEPS]\n"
-            f"            X.append(mel.T)  # shape: (TIME_STEPS, N_MELS)\n"
-            f"            y_labels.append(row['primary_label'])\n"
-            f"        except Exception as load_err:\n"
-            f"            print(f'Skip {{row[\"filename\"]}}: {{load_err}}')\n"
-            f"            continue\n"
-            f"    X = np.array(X)[..., np.newaxis]  # (N, TIME_STEPS, N_MELS, 1)\n"
-            f"    le = LabelEncoder()\n"
-            f"    y = le.fit_transform(y_labels)\n"
-            f"    n_classes = len(le.classes_)\n"
-            f"    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42)\n"
-            f"\n"
-            f"    # === YOUR MODEL HERE ===\n"
-            f"    # Input shape: (TIME_STEPS={216}, N_MELS={64}, 1)\n"
-            f"    # Output: Dense(n_classes, activation='softmax')\n"
-            f"    # Loss: sparse_categorical_crossentropy\n"
-            f"    # INSERT model = models.Sequential([...]) HERE\n"
-            f"\n"
-            f"    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])\n"
-            f"    history = model.fit(X_train, y_train, epochs=EPOCHS, batch_size=BATCH_SIZE,\n"
-            f"                        validation_data=(X_val, y_val), verbose=1)\n"
-            f"    _, val_acc = model.evaluate(X_val, y_val, verbose=0)\n"
-            f"    metrics = {{\n"
-            f'        "success": True, "model_type": "small_cnn",\n'
-            f'        "train_loss": float(history.history["loss"][-1]),\n'
-            f'        "val_loss": float(history.history["val_loss"][-1]),\n'
-            f'        "val_auc": float(val_acc),\n'
-            f'        "epochs_completed": EPOCHS,\n'
-            f'        "runtime_seconds": float(time.time() - start_time)\n'
-            f"    }}\n"
-            f"except Exception as e:\n"
-            f"    metrics = {{\n"
-            f'        "success": False, "error_type": type(e).__name__, "error_message": str(e)\n'
-            f"    }}\n"
-            f"with open(METRICS_PATH, 'w') as f:\n"
-            f"    json.dump(metrics, f, indent=2)\n"
-        )
-
         user = (
-            f"Experiment plan for context:\n{plan}\n\n"
-            f"Complete the following Python training script by replacing the "
-            f"'# INSERT model = models.Sequential([...]) HERE' comment with a working Keras model.\n\n"
-            f"CRITICAL: Copy the script EXACTLY as given. Do NOT modify any line outside the model block. "
-            f"Do NOT add or change any parameters to librosa.load(), melspectrogram(), or any other call.\n\n"
-            f"Rules for the model block only:\n"
-            f"- Use Conv2D layers (input shape is (TIME_STEPS, N_MELS, 1) = (216, 64, 1))\n"
-            f"- 2-3 Conv2D layers, each followed by MaxPooling2D\n"
-            f"- GlobalAveragePooling2D before the output\n"
-            f"- Final layer: Dense(n_classes, activation='softmax')\n"
-            f"- You choose the filter counts and kernel sizes\n\n"
-            f"Output the COMPLETE script with your model inserted. Change NOTHING else.\n\n"
-            f"{skeleton}"
+            f"Plan used: {json.dumps(plan, indent=2)}\n\n"
+            f"Result: {json.dumps(metrics, indent=2)}\n\n"
+            f"Number of previous runs: {len(history)}\n"
         )
-        return self._strip_markdown(self._call(system, user, temperature))
+        raw = self._call(system, user, temperature)
+        try:
+            return json.loads(self._extract_json(raw))
+        except (json.JSONDecodeError, ValueError):
+            return {"outcome": "unknown", "likely_cause": raw.strip(), "next_step": ""}
