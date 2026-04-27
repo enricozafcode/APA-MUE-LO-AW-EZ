@@ -8,7 +8,7 @@
   "random_seed": 42,
   "llm": {
     "provider": "ollama", 
-    "model": "gemma4",
+    "model": "glm-4.7-flash",
     "temperature": 0.2
   },
   "execution": {
