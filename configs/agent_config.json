@@ -1,19 +1,33 @@
 {
   "project_name": "apa-birdclef-autonomous-agent",
   "track": "birdclef",
-  "llm_script_mode": "slots",
-  "max_iterations": 10,
-  "max_failures_before_stop": 3,
-  "time_budget_minutes": 180,
   "random_seed": 42,
   "llm": {
-    "provider": "ollama", 
+    "provider": "ollama",
     "model": "gemma4",
     "temperature": 0.2
   },
   "execution": {
     "timeout_seconds": 1800,
+    "final_timeout_seconds": null,
     "python_executable": "python3"
+  },
+  "search": {
+    "cheap": {
+      "max_samples": 300,
+      "epochs": 3
+    },
+    "medium": {
+      "max_samples": 2000,
+      "epochs": 10
+    },
+    "final": {
+      "max_samples": null,
+      "epochs": 20
+    },
+    "linear_budget": 75,
+    "random_budget": 50,
+    "random_seed": 42
   },
   "logging": {
     "log_dir": "logs",
