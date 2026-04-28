@@ -14,8 +14,9 @@
   },
   "search": {
     "cheap": {
-      "max_samples": 300,
-      "epochs": 3
+      "max_samples": 1500,
+      "epochs": 3,
+      "val_split": 0.2
     },
     "medium": {
       "max_samples": 2000,
@@ -23,9 +24,10 @@
     },
     "final": {
       "max_samples": null,
-      "epochs": 20
+      "epochs": 20,
+      "val_split": 0.1
     },
-    "linear_budget": 75,
+    "linear_budget": 2,
     "random_budget": 50,
     "random_seed": 42
   },

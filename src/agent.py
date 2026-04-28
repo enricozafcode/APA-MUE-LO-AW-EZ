@@ -636,7 +636,7 @@ import time
 from pathlib import Path
  
 import numpy as np
- 
+
 if __package__:
     from .code_executor import CodeExecutor
     from .evaluator import Evaluator
@@ -645,7 +645,7 @@ else:
     from code_executor import CodeExecutor
     from evaluator import Evaluator
     from llm_client import LLMClient
- 
+
  
 # ═══════════════════════════════════════════════════════════════════════════
 # DEFAULT PARAMETERS & SEARCH SPACE
@@ -655,32 +655,28 @@ DEFAULT_PARAMS = {
     "depth": 3,
     "filters_base": 32,
     "filter_pattern": "doubling",
-    "dropout": 0.3,
-    "batch_norm": False,
-    "residuals": False,
+    "dropout": 0.0,
+    "batch_norm": True,
+    "pooling_type": "global_avg",
+    "residuals": None,  # None = auto (enable for depth>=6, disable otherwise)
+    "weight_decay": 1e-4,
+    "classifier_hidden_units": 256,
     "optimizer": "adam",
     "learning_rate": 1e-3,
     "batch_size": 32,
     "n_mels": 64,
     "n_frames": 128,
+    "val_split": 0.2,
 }
  
 # Ordered by impact tier (Tier 1 searched first)
 SEARCH_DIMENSIONS = [
-    # --- Tier 1: High impact ---
     {"name": "depth",          "coarse": [1, 2, 3, 4, 6, 8, 12, 15, 20], "type": "int",         "zoom": True},
     {"name": "filters_base",   "coarse": [8, 16, 32, 64, 128],           "type": "int",         "zoom": True},
-    {"name": "filter_pattern", "coarse": ["constant", "doubling"],        "type": "categorical", "zoom": False},
-    {"name": "learning_rate",  "coarse": [1e-1, 5e-2, 1e-2, 5e-3, 1e-3, 5e-4, 1e-4], "type": "log_float", "zoom": True},
-    # --- Tier 2: Medium impact ---
+    {"name": "learning_rate",  "coarse": [1e-2, 5e-3, 1e-3, 5e-4, 1e-4], "type": "log_float", "zoom": True},
+    {"name": "weight_decay",   "coarse": [0.0, 1e-4, 1e-3, 1e-2],        "type": "log_float", "zoom": False},
+    {"name": "classifier_hidden_units", "coarse": [0, 128, 256, 512],    "type": "int",       "zoom": False},
     {"name": "residuals",      "coarse": [False, True],                   "type": "bool",        "zoom": False},
-    {"name": "batch_norm",     "coarse": [False, True],                   "type": "bool",        "zoom": False},
-    {"name": "optimizer",      "coarse": ["adam", "sgd_momentum"],        "type": "categorical", "zoom": False},
-    {"name": "n_mels",         "coarse": [32, 64, 128],                   "type": "int",         "zoom": True},
-    {"name": "n_frames",       "coarse": [64, 128, 256],                  "type": "int",         "zoom": True},
-    # --- Tier 3: Lower impact ---
-    {"name": "dropout",        "coarse": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5], "type": "float",       "zoom": False},
-    {"name": "batch_size",     "coarse": [8, 16, 32, 64, 128],            "type": "int",         "zoom": False},
 ]
  
  
@@ -736,23 +732,44 @@ def _default_load_mel(audio_path, sample_rate, clip_seconds, n_mels, n_frames):
 def _make_harness_suffix(*, is_final=False, model_save_path=""):
     if is_final:
         max_line = "    max_samples = None  # FINAL RUN: use ALL data"
+        val_line = "    val_split = float(cfg.get('val_split', 0.1))  # FINAL RUN: checkpoint on validation"
+        ckpt_line = "    checkpoint_best = True"
         save_block = (
             f'\n    _mp = Path("{model_save_path}")\n'
             "    _mp.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    print(f\"PHASE3_DEBUG: final_save_target={{_mp}}\")\n"
+            "    if checkpoint_best and has_validation and (_ckpt is not None) and _ckpt.exists():\n"
+            "        print(f\"PHASE3_DEBUG: restoring_best_checkpoint=True path={{_ckpt}}\")\n"
+            "        model = tf.keras.models.load_model(_ckpt)\n"
+            '        print(f"MODEL_RESTORED_FROM_BEST: {_ckpt}")\n'
+            "    else:\n"
+            "        print(\n"
+            "            f\"PHASE3_DEBUG: restoring_best_checkpoint=False \"\n"
+            "            f\"checkpoint_best={{checkpoint_best}} has_validation={{has_validation}} \"\n"
+            "            f\"ckpt_exists={{(_ckpt is not None and _ckpt.exists())}}\"\n"
+            "        )\n"
             "    model.save(_mp)\n"
             '    print(f"MODEL_SAVED: {_mp}")\n'
         )
     else:
-        max_line = '    max_samples = cfg.get("max_samples", 300)'
+        max_line = '    max_samples = cfg.get("max_samples", 1500)'
+        val_line = "    val_split = float(cfg.get('val_split', 0.2))"
+        ckpt_line = "    checkpoint_best = False"
         save_block = ""
  
     return f"""
 def main():
-    global model, X_train, y_train
+    global model, X_train, y_train, X_val, y_val
     tf.keras.utils.set_random_seed(42)
     cfg = get_training_config()
     cfg.setdefault("optimizer", "adam")
 {max_line}
+{val_line}
+{ckpt_line}
+    print(
+        f"PHASE3_DEBUG: config max_samples={{max_samples}} "
+        f"val_split_requested={{val_split}} checkpoint_best={{checkpoint_best}}"
+    )
     sample_rate   = cfg.get("sample_rate", 32000)
     clip_seconds  = cfg.get("clip_seconds", 5.0)
     n_mels        = cfg.get("n_mels", 64)
@@ -789,7 +806,8 @@ def main():
         except Exception:
             pass
  
-    X_items, y_items = [], []
+    # 1) First pass: collect candidate files quickly (no audio decode yet)
+    candidates = []
     total = len(train_df)
     for i, row in enumerate(train_df.itertuples(index=False)):
         label = str(getattr(row, lcol))
@@ -799,6 +817,46 @@ def main():
         ap = paths.train_audio_dir / str(rel)
         if not ap.exists():
             continue
+        candidates.append((label, ap))
+
+    if not candidates:
+        raise RuntimeError("No candidate audio files found after path/label filtering.")
+
+    # 2) Stratified sampler: at least 2 samples/species when available, then fill randomly.
+    rng = np.random.default_rng(42)
+    by_label = dict()
+    for label, ap in candidates:
+        by_label.setdefault(label, []).append(ap)
+    for paths_list in by_label.values():
+        rng.shuffle(paths_list)
+
+    budget = len(candidates) if (max_samples is None) else min(int(max_samples), len(candidates))
+    selected = []
+    leftovers = []
+    min_per_species = 2
+    for label, paths_list in by_label.items():
+        take = min(len(paths_list), min_per_species)
+        for ap in paths_list[:take]:
+            if len(selected) < budget:
+                selected.append((label, ap))
+        for ap in paths_list[take:]:
+            leftovers.append((label, ap))
+
+    if len(selected) < budget:
+        rng.shuffle(leftovers)
+        selected.extend(leftovers[: budget - len(selected)])
+
+    represented_species = len(set(label for label, _ap in selected))
+    print(
+        "  Candidate files=", len(candidates),
+        "selected=", len(selected),
+        "budget=", budget,
+        "represented_species=", represented_species,
+    )
+
+    # 3) Decode selected audio files and build tensors.
+    X_items, y_items = [], []
+    for i, (label, ap) in enumerate(selected, start=1):
         try:
             mel = mel_fn(ap, sample_rate, clip_seconds, n_mels, n_frames)
         except Exception:
@@ -807,21 +865,71 @@ def main():
         yv[sp2i[label]] = 1.0
         X_items.append(mel)
         y_items.append(yv)
-        if max_samples and len(X_items) >= max_samples:
-            break
         if len(X_items) % 500 == 0:
-            print(f"  Loaded {{len(X_items)}} samples (row {{i+1}}/{{total}})...")
+            print(f"  Loaded {{len(X_items)}}/{{len(selected)}} selected samples...")
  
     if not X_items:
         raise RuntimeError("No samples loaded.")
-    X_train = np.stack(X_items, dtype=np.float32)
-    y_train = np.stack(y_items, dtype=np.float32)
-    print(f"DATA: X_train={{X_train.shape}}, y_train={{y_train.shape}}")
+    X_all = np.stack(X_items, dtype=np.float32)
+    y_all = np.stack(y_items, dtype=np.float32)
+
+    # 4) Split into train/val for honest evaluation (except final run val_split=0.0).
+    val_split = min(max(float(val_split), 0.0), 0.9)
+    n_total = len(X_all)
+    if val_split > 0.0 and n_total >= 2:
+        perm = rng.permutation(n_total)
+        n_val = max(1, int(round(n_total * val_split)))
+        n_val = min(n_val, n_total - 1)
+        val_idx = perm[:n_val]
+        train_idx = perm[n_val:]
+        X_train, y_train = X_all[train_idx], y_all[train_idx]
+        X_val, y_val = X_all[val_idx], y_all[val_idx]
+    else:
+        X_train, y_train = X_all, y_all
+        X_val, y_val = X_all, y_all
+
+    print(
+        f"DATA: X_train={{X_train.shape}}, y_train={{y_train.shape}}, "
+        f"X_val={{X_val.shape}}, y_val={{y_val.shape}}, val_split={{val_split}}"
+    )
+    print(
+        f"PHASE3_DEBUG: split_stats train_n={{len(X_train)}} val_n={{len(X_val)}} "
+        f"unique_species_selected={{represented_species}}"
+    )
  
     model = build_model(X_train.shape[1:], len(species_cols))
     model.compile(optimizer=_opt, loss="binary_crossentropy")
     model.summary()
-    history = model.fit(X_train, y_train, epochs=epochs, batch_size=min(batch_size, len(X_train)), verbose=1)
+    has_validation = bool(val_split > 0.0 and len(X_val) > 0)
+    print(f"PHASE3_DEBUG: has_validation={{has_validation}}")
+    fit_kwargs = {{}}
+    callbacks = []
+    _ckpt = None
+    if has_validation:
+        fit_kwargs["validation_data"] = (X_val, y_val)
+    if checkpoint_best and has_validation:
+        _ckpt = Path("logs") / f"best_{Path(__file__).stem}.keras"
+        print(f"PHASE3_DEBUG: checkpoint_enabled=True checkpoint_path={{_ckpt}}")
+        callbacks.append(
+            tf.keras.callbacks.ModelCheckpoint(
+                filepath=str(_ckpt),
+                monitor="val_loss",
+                mode="min",
+                save_best_only=True,
+                save_weights_only=False,
+                verbose=1,
+            )
+        )
+    else:
+        print("PHASE3_DEBUG: checkpoint_enabled=False")
+    history = model.fit(
+        X_train, y_train,
+        epochs=epochs,
+        batch_size=min(batch_size, len(X_train)),
+        verbose=1,
+        callbacks=callbacks,
+        **fit_kwargs,
+    )
     print(f"TRAIN_LOSS: {{history.history['loss'][-1]:.6f}}")
 {save_block}
     y_pred = model.predict(X_train, verbose=0).astype(np.float32)
@@ -868,10 +976,13 @@ def generate_slot_code(params):
     d = params
     filters_list = _compute_filters_list(d["depth"], d["filters_base"], d["filter_pattern"])
     max_pools = _compute_max_pools(d["depth"], d["n_mels"], d["n_frames"])
+    auto_residuals = d["depth"] >= 6
+    force_residuals = d.get("residuals", None)
+    use_residuals = auto_residuals if force_residuals is None else bool(force_residuals)
  
     return f'''def get_training_config():
     return {{
-        "max_samples": {d.get("max_samples", 300)},
+        "max_samples": {d.get("max_samples", 1500)},
         "sample_rate": 32000,
         "clip_seconds": 5.0,
         "n_mels": {d["n_mels"]},
@@ -880,6 +991,10 @@ def generate_slot_code(params):
         "batch_size": {d["batch_size"]},
         "learning_rate": {d["learning_rate"]},
         "optimizer": "{d["optimizer"]}",
+        "val_split": {d.get("val_split", 0.2)},
+        "weight_decay": {d.get("weight_decay", 0.0)},
+        "classifier_hidden_units": {d.get("classifier_hidden_units", 0)},
+        "pooling_type": "{d.get("pooling_type", "global_avg")}",
     }}
  
  
@@ -888,14 +1003,18 @@ def build_model(input_shape, num_classes):
     filters_list = {filters_list}
     max_pools = {max_pools}
     use_batch_norm = {d["batch_norm"]}
-    use_residuals = {d["residuals"]}
+    use_residuals = {use_residuals}
     dropout_rate = {d["dropout"]}
+    weight_decay = {d.get("weight_decay", 0.0)}
+    classifier_hidden_units = {d.get("classifier_hidden_units", 0)}
+    pooling_type = "{d.get("pooling_type", "global_avg")}"
+    reg = tf.keras.regularizers.l2(weight_decay) if weight_decay > 0 else None
  
     inputs = tf.keras.Input(shape=input_shape)
     x = inputs
     for i, filters in enumerate(filters_list):
         shortcut = x
-        x = tf.keras.layers.Conv2D(filters, (3, 3), padding="same")(x)
+        x = tf.keras.layers.Conv2D(filters, (3, 3), padding="same", kernel_regularizer=reg)(x)
         if use_batch_norm:
             x = tf.keras.layers.BatchNormalization()(x)
         x = tf.keras.layers.Activation("relu")(x)
@@ -908,10 +1027,17 @@ def build_model(input_shape, num_classes):
                 shortcut = tf.keras.layers.MaxPooling2D((2, 2))(shortcut)
             if tf.keras.backend.int_shape(x) == tf.keras.backend.int_shape(shortcut):
                 x = tf.keras.layers.Add()([x, shortcut])
-    x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    if pooling_type == "global_avg":
+        x = tf.keras.layers.GlobalAveragePooling2D()(x)
+    elif pooling_type == "global_max":
+        x = tf.keras.layers.GlobalMaxPooling2D()(x)
+    else:
+        x = tf.keras.layers.Flatten()(x)
+    if classifier_hidden_units and classifier_hidden_units > 0:
+        x = tf.keras.layers.Dense(classifier_hidden_units, activation="relu", kernel_regularizer=reg)(x)
     if dropout_rate > 0:
         x = tf.keras.layers.Dropout(dropout_rate)(x)
-    x = tf.keras.layers.Dense(num_classes, activation="sigmoid")(x)
+    x = tf.keras.layers.Dense(num_classes, activation="sigmoid", kernel_regularizer=reg)(x)
     model = tf.keras.Model(inputs, x)
     return model
 '''
@@ -922,10 +1048,13 @@ def describe_params(params):
         f"depth={params.get('depth','?')}",
         f"filt={params.get('filters_base','?')}-{params.get('filter_pattern','?')}",
         f"lr={params.get('learning_rate','?')}",
+        f"wd={params.get('weight_decay','?')}",
+        f"hid={params.get('classifier_hidden_units','?')}",
+        f"res={params.get('residuals','auto')}",
         str(params.get("optimizer", "?")),
+        f"pool={params.get('pooling_type','?')}",
         f"drop={params.get('dropout','?')}",
         f"BN={'Y' if params.get('batch_norm') else 'N'}",
-        f"res={'Y' if params.get('residuals') else 'N'}",
         f"mels={params.get('n_mels','?')}",
         f"frames={params.get('n_frames','?')}",
         f"bs={params.get('batch_size','?')}",
@@ -958,15 +1087,15 @@ def _append_eval_wrapper(script, run_id, eval_dir):
     return script + f"""
  
 import numpy as _np
-_yt = _np.asarray(y_train)
-_yp = _np.asarray(model.predict(X_train, verbose=0))
+_yt = _np.asarray(y_val)
+_yp = _np.asarray(model.predict(X_val, verbose=0))
 if _yt.shape != _yp.shape:
-    raise RuntimeError(f"Shape mismatch: y_train={{_yt.shape}} vs y_pred={{_yp.shape}}")
+    raise RuntimeError(f"Shape mismatch: y_val={{_yt.shape}} vs y_pred={{_yp.shape}}")
 _np.save(r\"{yt}\", _yt)
 _np.save(r\"{yp}\", _yp)
 print("EVAL_ARTIFACTS_SAVED")
 """
- 
+
 def extract_python_code(response):
     if not response or not response.strip():
         return ""
@@ -975,7 +1104,7 @@ def extract_python_code(response):
         return blocks[0].strip()
     blocks = re.findall(r"```(?:\w+)?\s*(.*?)```", response, re.DOTALL)
     return blocks[0].strip() if blocks else ""
- 
+
 def validate_slot_code(code):
     try:
         tree = ast.parse(code)
@@ -998,7 +1127,7 @@ def validate_slot_code(code):
             if len(node.args.args) != 5:
                 return ["build_features must have 5 params."]
     return []
- 
+
 GENERATION_SYSTEM_PROMPT = (
     "You are an ML research assistant for BirdCLEF experiments.\n"
     "Return ONLY one ```python``` code block and nothing else.\n"
@@ -1013,7 +1142,7 @@ GENERATION_SYSTEM_PROMPT = (
  
 SAFE_BASELINE_SLOT_CODE = """def get_training_config():
     return {
-        "max_samples": 300,
+        "max_samples": 1500,
         "sample_rate": 32000,
         "clip_seconds": 5.0,
         "n_mels": 64,
@@ -1022,6 +1151,7 @@ SAFE_BASELINE_SLOT_CODE = """def get_training_config():
         "batch_size": 32,
         "learning_rate": 1e-3,
         "optimizer": "adam",
+        "val_split": 0.2,
     }
 
 
@@ -1057,14 +1187,14 @@ def run_experiment(slot_code, run_id, code_dir, eval_dir, executor, evaluator):
     result = executor.run_file(script_path)
     if not result.success:
         return None, result
- 
+
     yt = eval_dir / f"y_true_{run_id}.npy"
     yp = eval_dir / f"y_pred_{run_id}.npy"
     if yt.exists() and yp.exists():
         ev = evaluator.evaluate_from_files(yt, yp)
         return ev.metrics, result
     return None, result
- 
+
 def _clean_error_text(stderr: str) -> str:
     if not stderr:
         return ""
@@ -1131,6 +1261,7 @@ def _run_baseline(executor, evaluator, llm, temperature, dirs, search_cfg):
     params = dict(DEFAULT_PARAMS)
     params["max_samples"] = search_cfg["cheap"]["max_samples"]
     params["epochs"] = search_cfg["cheap"]["epochs"]
+    params["val_split"] = search_cfg["cheap"].get("val_split", 0.2)
     slot_code = generate_slot_code(params)
 
     # Stage A: deterministic generated baseline, no LLM fixes.
@@ -1197,6 +1328,7 @@ def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dir
  
     budget = search_cfg.get("linear_budget", 75)
     s, e = search_cfg["cheap"]["max_samples"], search_cfg["cheap"]["epochs"]
+    vs = search_cfg["cheap"].get("val_split", 0.2)
     current_best = dict(DEFAULT_PARAMS)
     all_results = []
     rc = 0
@@ -1213,7 +1345,7 @@ def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dir
             if rc >= budget:
                 break
             rc += 1
-            p = dict(current_best); p[dn] = val; p["max_samples"] = s; p["epochs"] = e
+            p = dict(current_best); p[dn] = val; p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
             slot = generate_slot_code(p)
             rid = f"L{rc:03d}_{dn}"
             slot, metrics, result, att = run_experiment_until_success(
@@ -1246,7 +1378,7 @@ def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dir
                 if rc >= budget:
                     break
                 rc += 1
-                p = dict(current_best); p[dn] = val; p["max_samples"] = s; p["epochs"] = e
+                p = dict(current_best); p[dn] = val; p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
                 slot = generate_slot_code(p)
                 rid = f"L{rc:03d}_{dn}_zoom"
                 slot, metrics, result, att = run_experiment_until_success(
@@ -1280,31 +1412,39 @@ def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dir
  
 def _sample_random_params(rng):
     return {
-        "depth": int(rng.choice([1,2,3,4,5,6,8,10,12,15,20])),
-        "filters_base": int(rng.choice([8,16,24,32,48,64,96,128])),
-        "filter_pattern": str(rng.choice(["constant","doubling"])),
-        "learning_rate": float(10 ** rng.uniform(-4, -1)),
-        "optimizer": str(rng.choice(["adam","sgd_momentum"])),
-        "dropout": round(float(rng.uniform(0.0, 0.6)), 2),
-        "batch_norm": bool(rng.choice([True, False])),
+        "depth": int(rng.choice([1, 2, 3, 4, 6, 8, 12, 15, 20])),
+        "filters_base": int(rng.choice([8, 16, 32, 64, 128])),
+        "filter_pattern": "doubling",
+        "learning_rate": float(rng.choice([1e-2, 5e-3, 1e-3, 5e-4, 1e-4])),
+        "optimizer": "adam",
+        "dropout": 0.0,
+        "batch_norm": True,
         "residuals": bool(rng.choice([True, False])),
-        "batch_size": int(rng.choice([8,16,32,64,128])),
-        "n_mels": int(rng.choice([32,64,96,128])),
-        "n_frames": int(rng.choice([64,128,192,256])),
+        "weight_decay": float(rng.choice([0.0, 1e-4, 1e-3, 1e-2])),
+        "classifier_hidden_units": int(rng.choice([0, 128, 256, 512])),
+        "pooling_type": "global_avg",
+        "batch_size": 32,
+        "n_mels": 64,
+        "n_frames": 128,
     }
- 
+
 def _tweak_params(base, rng):
     p = dict(base)
-    dims = rng.choice(["depth","filters_base","learning_rate","dropout","batch_size","n_mels","n_frames"],
+    dims = rng.choice(["depth", "filters_base", "learning_rate", "weight_decay", "classifier_hidden_units", "residuals"],
                        size=int(rng.choice([1,2])), replace=False)
     for d in dims:
-        if d == "depth":        p["depth"] = max(1, p["depth"] + int(rng.choice([-2,-1,1,2])))
-        elif d == "filters_base": p["filters_base"] = int(rng.choice([8,16,24,32,48,64,96,128]))
-        elif d == "learning_rate": p["learning_rate"] = float(np.clip(p["learning_rate"] * 10**rng.uniform(-0.5,0.5), 1e-5, 0.5))
-        elif d == "dropout":    p["dropout"] = round(float(np.clip(p["dropout"]+rng.uniform(-0.15,0.15), 0, 0.7)), 2)
-        elif d == "batch_size": p["batch_size"] = int(rng.choice([8,16,32,64,128]))
-        elif d == "n_mels":     p["n_mels"] = int(rng.choice([32,64,96,128]))
-        elif d == "n_frames":   p["n_frames"] = int(rng.choice([64,128,192,256]))
+        if d == "depth":
+            p["depth"] = int(rng.choice([1, 2, 3, 4, 6, 8, 12, 15, 20]))
+        elif d == "filters_base":
+            p["filters_base"] = int(rng.choice([8, 16, 32, 64, 128]))
+        elif d == "learning_rate":
+            p["learning_rate"] = float(rng.choice([1e-2, 5e-3, 1e-3, 5e-4, 1e-4]))
+        elif d == "weight_decay":
+            p["weight_decay"] = float(rng.choice([0.0, 1e-4, 1e-3, 1e-2]))
+        elif d == "classifier_hidden_units":
+            p["classifier_hidden_units"] = int(rng.choice([0, 128, 256, 512]))
+        elif d == "residuals":
+            p["residuals"] = bool(rng.choice([True, False]))
     return p
  
 def _analyze_random_results(results, llm, temperature):
@@ -1320,9 +1460,7 @@ def _analyze_random_results(results, llm, temperature):
         + "\n".join(lines) + "\n\n"
         "Return ONLY a JSON object with narrowed ranges for focused search:\n"
         '{"depth":[min,max],"filters_base":[min,max],"learning_rate":[min,max],'
-        '"dropout":[min,max],"batch_norm":true/false/null,"residuals":true/false/null,'
-        '"optimizer":"adam"/"sgd_momentum"/null,"n_mels":[min,max],"n_frames":[min,max],'
-        '"batch_size":[min,max],"filter_pattern":"constant"/"doubling"/null,'
+        '"weight_decay":[min,max],"classifier_hidden_units":[min,max],"residuals":true/false/null,'
         '"analysis":"brief summary"}'
     )
     resp = llm.generate_from_messages(
@@ -1342,20 +1480,18 @@ def _sample_narrowed(ranges, rng):
             f = [v for v in choices if ranges[key][0] <= v <= ranges[key][1]]
             if f: return int(rng.choice(f))
         return p[key]
-    p["depth"] = _pick("depth", [1,2,3,4,5,6,8,10,12,15,20])
-    p["filters_base"] = _pick("filters_base", [8,16,24,32,48,64,96,128])
-    p["batch_size"] = _pick("batch_size", [8,16,32,64,128])
-    p["n_mels"] = _pick("n_mels", [32,64,96,128])
-    p["n_frames"] = _pick("n_frames", [64,128,192,256])
+    p["depth"] = _pick("depth", [1, 2, 3, 4, 6, 8, 12, 15, 20])
+    p["filters_base"] = _pick("filters_base", [8, 16, 32, 64, 128])
+    p["classifier_hidden_units"] = _pick("classifier_hidden_units", [0, 128, 256, 512])
     if "learning_rate" in ranges and isinstance(ranges["learning_rate"], list) and len(ranges["learning_rate"])==2:
         p["learning_rate"] = float(10**rng.uniform(np.log10(max(ranges["learning_rate"][0],1e-6)),
                                                     np.log10(min(ranges["learning_rate"][1],1.0))))
-    if "dropout" in ranges and isinstance(ranges["dropout"], list) and len(ranges["dropout"])==2:
-        p["dropout"] = round(float(rng.uniform(ranges["dropout"][0], ranges["dropout"][1])), 2)
-    for key in ("batch_norm","residuals"):
+    if "weight_decay" in ranges and isinstance(ranges["weight_decay"], list) and len(ranges["weight_decay"]) == 2:
+        wd_min = max(ranges["weight_decay"][0], 1e-8)
+        wd_max = max(ranges["weight_decay"][1], wd_min)
+        p["weight_decay"] = float(10 ** rng.uniform(np.log10(wd_min), np.log10(wd_max)))
+    for key in ("residuals",):
         if key in ranges and ranges[key] is not None: p[key] = bool(ranges[key])
-    for key in ("optimizer","filter_pattern"):
-        if key in ranges and ranges[key] is not None: p[key] = str(ranges[key])
     return p
  
  
@@ -1366,6 +1502,7 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
  
     budget = search_cfg.get("random_budget", 50)
     s, e = search_cfg["cheap"]["max_samples"], search_cfg["cheap"]["epochs"]
+    vs = search_cfg["cheap"].get("val_split", 0.2)
     explore_count = min(20, budget)
     rng = np.random.default_rng(search_cfg.get("random_seed", 42))
     all_results = []
@@ -1376,7 +1513,7 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
     for _ in range(explore_count):
         if rc >= budget: break
         rc += 1
-        p = _sample_random_params(rng); p["max_samples"] = s; p["epochs"] = e
+        p = _sample_random_params(rng); p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
         slot = generate_slot_code(p)
         rid = f"R{rc:03d}_explore"
         slot, metrics, result, att = run_experiment_until_success(
@@ -1407,7 +1544,7 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         for _ in range(fc):
             if rc >= budget: break
             rc += 1
-            p = _sample_narrowed(narrowed, rng); p["max_samples"] = s; p["epochs"] = e
+            p = _sample_narrowed(narrowed, rng); p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
             slot = generate_slot_code(p)
             rid = f"R{rc:03d}_focused"
             slot, metrics, result, att = run_experiment_until_success(
@@ -1429,7 +1566,7 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         for i in range(tc):
             if rc >= budget: break
             rc += 1
-            p = _tweak_params(ok[i % len(ok)]["params"], rng); p["max_samples"] = s; p["epochs"] = e
+            p = _tweak_params(ok[i % len(ok)]["params"], rng); p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
             slot = generate_slot_code(p)
             rid = f"R{rc:03d}_tweak"
             slot, metrics, result, att = run_experiment_until_success(
@@ -1563,6 +1700,7 @@ def _run_final_training(best_params, executor, evaluator, llm, temperature, proj
     fp = dict(best_params)
     fp["max_samples"] = search_cfg["final"].get("max_samples")
     fp["epochs"] = search_cfg["final"]["epochs"]
+    fp["val_split"] = search_cfg["final"].get("val_split", 0.1)
  
     slot_code = generate_slot_code(fp)
     script = assemble_script(slot_code, is_final=True, model_save_path=model_path)
@@ -1573,6 +1711,9 @@ def _run_final_training(best_params, executor, evaluator, llm, temperature, proj
     (sub_dir / "best_model_code.py").write_text(slot_code, encoding="utf-8")
  
     print(f"  Config: {describe_params(best_params)}")
+    best_epoch = best_params.get("epochs")
+    if best_epoch is not None:
+        print(f"  Best epochs found: {best_epoch}")
     print(f"  Epochs: {fp['epochs']}, Samples: {'ALL' if fp['max_samples'] is None else fp['max_samples']}")
  
     t0 = time.time()
@@ -1670,7 +1811,7 @@ def run_phase3_final_only(
         d.mkdir(parents=True, exist_ok=True)
 
     sc = config.get("search", {})
-    sc.setdefault("final", {"max_samples": None, "epochs": 20})
+    sc.setdefault("final", {"max_samples": None, "epochs": 20, "val_split": 0.1})
 
     best_params = _load_best_params_for_final(root, best_params_path)
 
@@ -1709,9 +1850,9 @@ def agent_loop(config):
         d.mkdir(parents=True, exist_ok=True)
  
     sc = config.get("search", {})
-    sc.setdefault("cheap", {"max_samples": 300, "epochs": 3})
+    sc.setdefault("cheap", {"max_samples": 1500, "epochs": 3, "val_split": 0.2})
     sc.setdefault("medium", {"max_samples": 2000, "epochs": 10})
-    sc.setdefault("final", {"max_samples": None, "epochs": 20})
+    sc.setdefault("final", {"max_samples": None, "epochs": 20, "val_split": 0.1})
     sc.setdefault("linear_budget", 75)
     sc.setdefault("random_budget", 50)
     sc.setdefault("random_seed", config.get("random_seed", 42))
@@ -1777,11 +1918,11 @@ def agent_loop(config):
     else:
         print("\n  No successful experiments — skipping final training.")
  
- 
+
 def main():
     root = Path(__file__).resolve().parents[1]
     config = json.loads((root / "configs" / "agent_config.json").read_text())
     agent_loop(config)
- 
+
 if __name__ == "__main__":
     main()
