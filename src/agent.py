@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 
@@ -40,6 +41,47 @@ def build_system_prompt(active_audio: list[str], active_spec: list[str]) -> str:
     )
 
 
+def strip_markdown(raw: str) -> str:
+    lines = raw.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def generate_with_syntax_fix(
+    llm: LLMClient,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_retries: int = 3,
+) -> str:
+    """Generate code and retry with the syntax error if the LLM produces invalid Python."""
+    current_prompt = user_prompt
+    for attempt in range(1, max_retries + 1):
+        print(f"  Generation attempt {attempt}/{max_retries}...")
+        raw = llm.generate_code(system_prompt=system_prompt, user_prompt=current_prompt, temperature=temperature)
+        code = strip_markdown(raw)
+        try:
+            ast.parse(code)
+            print("  Syntax check passed.")
+            return code
+        except SyntaxError as e:
+            print(f"  Syntax error on line {e.lineno}: {e.msg}")
+            if attempt < max_retries:
+                current_prompt = (
+                    f"The code you generated has a syntax error:\n"
+                    f"  Line {e.lineno}: {e.msg}\n"
+                    f"  Near: {e.text}\n\n"
+                    f"Here is the broken code:\n{code}\n\n"
+                    "Fix the syntax error and return the complete corrected script. "
+                    "Raw Python only — no markdown, no explanations."
+                )
+    print("  Warning: could not produce valid syntax after all retries. Using last attempt.")
+    return code
+
+
 def main() -> None:
     project_root = Path(__file__).resolve().parents[1]
     config_path = project_root / "configs" / "agent_config.json"
@@ -62,7 +104,6 @@ def main() -> None:
 
     evaluator = Evaluator()
 
-    # Build augmenters to know which strategies are active
     audio_aug, spec_aug = build_augmenters(config)
     active_audio = audio_aug.active_strategies()
     active_spec = spec_aug.active_strategies()
@@ -81,18 +122,13 @@ def main() -> None:
     )
 
     print("\nGenerating training script...")
-    raw = llm.generate_code(
+    generated_code = generate_with_syntax_fix(
+        llm=llm,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         temperature=config["llm"].get("temperature", 0.2),
+        max_retries=config.get("max_failures_before_stop", 3),
     )
-    # Strip markdown code fences that some local models add despite instructions
-    lines = raw.splitlines()
-    if lines and lines[0].strip().startswith("```"):
-        lines = lines[1:]
-    if lines and lines[-1].strip() == "```":
-        lines = lines[:-1]
-    generated_code = "\n".join(lines)
 
     output_file = logs_dir / "generated_training_script.py"
     output_file.write_text(generated_code, encoding="utf-8")
@@ -110,7 +146,6 @@ def main() -> None:
         print("\nStandard Error:")
         print(result.stderr)
 
-    # Evaluate and build next-iteration prompt
     summary = evaluator.build_summary(
         stdout=result.stdout,
         stderr=result.stderr,
