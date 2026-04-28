@@ -18,5 +18,19 @@
     "log_dir": "logs",
     "save_generated_code": true,
     "save_metrics_json": true
+  },
+  "augmentation": {
+    "audio": {
+      "time_stretch":    { "enabled": true,  "probability": 0.5, "rate_min": 0.9, "rate_max": 1.1 },
+      "pitch_shift":     { "enabled": false, "probability": 0.3, "steps_min": -2, "steps_max": 2 },
+      "noise_injection": { "enabled": true,  "probability": 0.4, "noise_level": 0.005 },
+      "time_shift":      { "enabled": false, "probability": 0.5, "shift_max_fraction": 0.5 }
+    },
+    "spectrogram": {
+      "time_mask": { "enabled": true,  "max_mask_size": 40, "num_masks": 1 },
+      "freq_mask": { "enabled": true,  "max_mask_size": 20, "num_masks": 1 },
+      "mixup":     { "enabled": false, "alpha": 0.4 },
+      "cutmix":    { "enabled": false, "alpha": 1.0 }
+    }
   }
 }
