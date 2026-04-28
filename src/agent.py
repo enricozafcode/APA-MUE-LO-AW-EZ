@@ -81,11 +81,18 @@ def main() -> None:
     )
 
     print("\nGenerating training script...")
-    generated_code = llm.generate_code(
+    raw = llm.generate_code(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         temperature=config["llm"].get("temperature", 0.2),
     )
+    # Strip markdown code fences that some local models add despite instructions
+    lines = raw.splitlines()
+    if lines and lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    generated_code = "\n".join(lines)
 
     output_file = logs_dir / "generated_training_script.py"
     output_file.write_text(generated_code, encoding="utf-8")
