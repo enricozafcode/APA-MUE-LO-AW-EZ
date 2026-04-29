@@ -686,7 +686,7 @@ SEARCH_DIMENSIONS = [
  
 HARNESS_PREFIX = """
 from __future__ import annotations
-import os, sys, inspect
+import os, sys, inspect, time
 from pathlib import Path
 import numpy as np
 import librosa
@@ -754,7 +754,7 @@ def _make_harness_suffix(*, is_final=False, model_save_path=""):
     else:
         max_line = '    max_samples = cfg.get("max_samples", 1500)'
         val_line = "    val_split = float(cfg.get('val_split', 0.2))"
-        ckpt_line = "    checkpoint_best = False"
+        ckpt_line = "    checkpoint_best = bool(cfg.get('use_best_checkpoint', True))"
         save_block = ""
  
     return f"""
@@ -873,10 +873,30 @@ def main():
     X_all = np.stack(X_items, dtype=np.float32)
     y_all = np.stack(y_items, dtype=np.float32)
 
-    # 4) Split into train/val for honest evaluation (except final run val_split=0.0).
+    # 4) Split into train/val.
+    split_mode = str(cfg.get("split_mode", "random")).strip().lower()
     val_split = min(max(float(val_split), 0.0), 0.9)
     n_total = len(X_all)
-    if val_split > 0.0 and n_total >= 2:
+    if val_split > 0.0 and n_total >= 2 and split_mode == "group_holdout":
+        # Group by recording prefix to reduce train/val leakage.
+        groups = np.array([str(ap.stem).split("_")[0] if "_" in str(ap.stem) else str(ap.stem) for _label, ap in selected])
+        uniq = np.unique(groups)
+        if len(uniq) >= 2:
+            rng.shuffle(uniq)
+            n_val_groups = max(1, int(round(len(uniq) * val_split)))
+            n_val_groups = min(n_val_groups, len(uniq) - 1)
+            val_groups = set(uniq[:n_val_groups].tolist())
+            val_mask = np.array([g in val_groups for g in groups], dtype=bool)
+            if val_mask.any() and (~val_mask).any():
+                train_idx = np.where(~val_mask)[0]
+                val_idx = np.where(val_mask)[0]
+                X_train, y_train = X_all[train_idx], y_all[train_idx]
+                X_val, y_val = X_all[val_idx], y_all[val_idx]
+            else:
+                split_mode = "random"
+        else:
+            split_mode = "random"
+    if val_split > 0.0 and n_total >= 2 and split_mode != "group_holdout":
         perm = rng.permutation(n_total)
         n_val = max(1, int(round(n_total * val_split)))
         n_val = min(n_val, n_total - 1)
@@ -890,7 +910,7 @@ def main():
 
     print(
         f"DATA: X_train={{X_train.shape}}, y_train={{y_train.shape}}, "
-        f"X_val={{X_val.shape}}, y_val={{y_val.shape}}, val_split={{val_split}}"
+        f"X_val={{X_val.shape}}, y_val={{y_val.shape}}, val_split={{val_split}}, split_mode={{split_mode}}"
     )
     print(
         f"PHASE3_DEBUG: split_stats train_n={{len(X_train)}} val_n={{len(X_val)}} "
@@ -904,6 +924,35 @@ def main():
     print(f"PHASE3_DEBUG: has_validation={{has_validation}}")
     fit_kwargs = {{}}
     callbacks = []
+    train_start_ts = time.time()
+    epoch_start_ts = [None]
+    best_val_loss = [None]
+    best_epoch = [None]
+
+    def _on_epoch_begin(epoch, logs=None):
+        epoch_start_ts[0] = time.time()
+
+    def _on_epoch_end(epoch, logs=None):
+        elapsed_total = time.time() - train_start_ts
+        epoch_elapsed = (time.time() - epoch_start_ts[0]) if epoch_start_ts[0] else 0.0
+        done = epoch + 1
+        avg_per_epoch = elapsed_total / max(done, 1)
+        eta = max(0.0, avg_per_epoch * max(epochs - done, 0))
+        print(
+            f"TRAIN_PROGRESS: epoch={{done}}/{{epochs}} "
+            f"epoch_time_s={{epoch_elapsed:.1f}} "
+            f"elapsed_s={{elapsed_total:.1f}} eta_s={{eta:.1f}}"
+        )
+        if logs is not None and ("val_loss" in logs) and (logs["val_loss"] is not None):
+            cur_val = float(logs["val_loss"])
+            if best_val_loss[0] is None or cur_val < best_val_loss[0]:
+                best_val_loss[0] = cur_val
+                best_epoch[0] = done
+
+    callbacks.append(tf.keras.callbacks.LambdaCallback(
+        on_epoch_begin=_on_epoch_begin,
+        on_epoch_end=_on_epoch_end,
+    ))
     _ckpt = None
     if has_validation:
         fit_kwargs["validation_data"] = (X_val, y_val)
@@ -930,6 +979,10 @@ def main():
         callbacks=callbacks,
         **fit_kwargs,
     )
+    if best_epoch[0] is not None:
+        print(f"BEST_EPOCH_BY_VAL_LOSS: epoch={{best_epoch[0]}}/{{epochs}} val_loss={{best_val_loss[0]:.6f}}")
+    else:
+        print("BEST_EPOCH_BY_VAL_LOSS: unavailable (no validation metrics).")
     print(f"TRAIN_LOSS: {{history.history['loss'][-1]:.6f}}")
 {save_block}
     y_pred = model.predict(X_train, verbose=0).astype(np.float32)
@@ -1074,8 +1127,41 @@ def _truncate(text, max_chars=4000):
 def _save_json(data, path):
     path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
  
+def _load_json_file(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _load_saved_search_state(logs_dir):
+    linear_path = logs_dir / "linear.json"
+    linear_best_path = logs_dir / "linear_best_params.json"
+    random_path = logs_dir / "random_results.json"
+    missing = [str(p) for p in (linear_path, linear_best_path, random_path) if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Cannot resume from medium: missing saved search files: "
+            + ", ".join(missing)
+        )
+
+    lin_results = _load_json_file(linear_path)
+    lin_best = _load_json_file(linear_best_path)
+    rnd_results = _load_json_file(random_path)
+    if not isinstance(lin_results, list) or not isinstance(rnd_results, list) or not isinstance(lin_best, dict):
+        raise ValueError("Saved search files have an unexpected format; refusing to resume from medium.")
+
+    rnd_ok = [r for r in rnd_results if r.get("success") and isinstance(r.get("macro_roc_auc"), (int, float))]
+    best_rnd = max(rnd_ok, key=lambda r: r["macro_roc_auc"]) if rnd_ok else None
+    return lin_results, lin_best, rnd_results, best_rnd
+
 def _fmt_score(v):
     return f"{v:.6f}" if isinstance(v, (int, float)) else "N/A"
+
+def _final_config_override_block(base_cfg):
+    safe_cfg = dict(base_cfg)
+    return (
+        "\n\n# --- FINAL OVERRIDE: force final training config ---\n"
+        "def get_training_config():\n"
+        f"    return {repr(safe_cfg)}\n"
+    )
  
 def assemble_script(slot_code, *, is_final=False, model_save_path=""):
     suffix = _make_harness_suffix(is_final=is_final, model_save_path=model_save_path)
@@ -1203,6 +1289,18 @@ def _clean_error_text(stderr: str) -> str:
     text = "\n".join(filtered).strip()
     return text if text else stderr.strip()
 
+
+def _extract_best_epoch(stdout: str) -> int | None:
+    if not stdout:
+        return None
+    m = re.search(r"BEST_EPOCH_BY_VAL_LOSS:\s*epoch=(\d+)/\d+", stdout)
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
  
 def run_experiment_until_success(slot_code, run_id, code_dir, eval_dir,
                                  executor, evaluator, llm, temperature, max_attempts=5, use_llm_fixes=True):
@@ -1213,6 +1311,10 @@ def run_experiment_until_success(slot_code, run_id, code_dir, eval_dir,
             current_slot, f"{run_id}_a{attempt}", code_dir, eval_dir, executor, evaluator
         )
         if metrics and metrics.get("status") == "success":
+            best_epoch = _extract_best_epoch(result.stdout or "")
+            if best_epoch is not None:
+                metrics = dict(metrics)
+                metrics["best_epoch"] = best_epoch
             if attempt > 1:
                 print(f"    Fixed after {attempt} attempts")
             return current_slot, metrics, result, attempt
@@ -1354,6 +1456,7 @@ def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dir
             entry = {"run_id": rid, "dimension": dn, "value": val, "search_type": "coarse",
                      "params": {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
                      "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
+                     "best_epoch": metrics.get("best_epoch") if metrics else None,
                      "description": describe_params(p)}
             all_results.append(entry); dim_results.append(entry)
             print(f"    {dn}={val} → {_fmt_score(auc)} (att={att})")
@@ -1387,6 +1490,7 @@ def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dir
                 entry = {"run_id": rid, "dimension": dn, "value": val, "search_type": "zoom",
                          "params": {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
                          "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
+                         "best_epoch": metrics.get("best_epoch") if metrics else None,
                          "description": describe_params(p)}
                 all_results.append(entry); dim_results.append(entry)
                 print(f"    {dn}={val} (zoom) → {_fmt_score(auc)}")
@@ -1495,6 +1599,400 @@ def _sample_narrowed(ranges, rng):
     return p
  
  
+def _best_successful(results, top_k=4):
+    ok = [r for r in results if r.get("success") and isinstance(r.get("macro_roc_auc"), (int, float))]
+    ok.sort(key=lambda r: r["macro_roc_auc"], reverse=True)
+    return ok[:top_k]
+
+
+def _is_parametric_result(entry):
+    p = entry.get("params", {})
+    return isinstance(p, dict) and "depth" in p and "filters_base" in p and "learning_rate" in p
+
+
+def _best_parametric_successful(results, top_k=4):
+    ok = [r for r in _best_successful(results, len(results) or top_k) if _is_parametric_result(r)]
+    return ok[:top_k]
+
+
+def _save_phase2_results(logs_dir, all_results, top_k):
+    _save_json(all_results, logs_dir / "random_results.json")
+    _save_json(_best_successful(all_results, top_k), logs_dir / "final_results.json")
+
+
+def _generate_ai_free_slot(llm, temperature, best_results, fallback_slot, cheap_cfg):
+    top_lines = []
+    for i, r in enumerate(best_results[:4], start=1):
+        top_lines.append(f"{i}. AUC={r['macro_roc_auc']:.6f} | {r['description']}")
+    top_summary = "\n".join(top_lines) if top_lines else "No successful prior runs yet."
+
+    prompt = (
+        "You are improving a BirdCLEF audio classification model.\n"
+        "Create a stronger architecture than prior runs while keeping training cheap for search.\n\n"
+        f"Top prior results:\n{top_summary}\n\n"
+        f"Current baseline slot code:\n```python\n{fallback_slot}\n```\n\n"
+        "Return ONLY Python code with get_training_config() and build_model(input_shape, num_classes).\n"
+        "Constraints:\n"
+        f"- max_samples must be {cheap_cfg['max_samples']}\n"
+        f"- epochs must be {cheap_cfg['epochs']}\n"
+        f"- val_split must be {cheap_cfg.get('val_split', 0.2)}\n"
+        "- Keep final layer as Dense(num_classes, activation='sigmoid').\n"
+        "- No top-level executable statements.\n"
+    )
+    resp = llm.generate_from_messages(
+        messages=[{"role": "system", "content": GENERATION_SYSTEM_PROMPT},
+                  {"role": "user", "content": prompt}],
+        temperature=temperature,
+    )
+    candidate = extract_python_code(resp)
+    issues = validate_slot_code(candidate) if candidate else ["No code found."]
+    if issues:
+        print(f"    AI-free generation invalid, using fallback slot. Issues: {issues}")
+        return fallback_slot
+    return candidate
+
+
+def _summarize_architectures(results, limit=12):
+    rows = []
+    seen = set()
+    ordered = sorted(
+        [r for r in results if r.get("description")],
+        key=lambda r: (r.get("macro_roc_auc") or -1.0),
+        reverse=True,
+    )
+    for r in ordered:
+        desc = r.get("description", "")
+        key = (r.get("search_type"), desc)
+        if key in seen:
+            continue
+        seen.add(key)
+        auc = r.get("macro_roc_auc")
+        auc_txt = f"{auc:.6f}" if isinstance(auc, (int, float)) else "N/A"
+        rows.append(f"- {r.get('search_type','unknown')}: AUC={auc_txt} | {desc}")
+        if len(rows) >= limit:
+            break
+    return "\n".join(rows) if rows else "- No prior architecture summaries yet."
+
+
+def _has_auc_plateau(results, repeats=3, decimals=6):
+    aucs = [
+        round(float(r["macro_roc_auc"]), decimals)
+        for r in results
+        if isinstance(r.get("macro_roc_auc"), (int, float))
+    ]
+    if len(aucs) < repeats:
+        return False, None
+    tail = aucs[-repeats:]
+    if len(set(tail)) == 1:
+        return True, tail[-1]
+    return False, None
+
+
+def _generate_ai_free_slot_with_context(
+    llm, temperature, best_results, fallback_slot, cheap_cfg, tried_summary, force_novelty=False
+):
+    top_lines = []
+    for i, r in enumerate(best_results[:4], start=1):
+        top_lines.append(f"{i}. AUC={r['macro_roc_auc']:.6f} | {r['description']}")
+    top_summary = "\n".join(top_lines) if top_lines else "No successful prior runs yet."
+    novelty_block = (
+        "IMPORTANT: Recent AI-free attempts plateaued at the same AUC multiple times.\n"
+        "You MUST use a clearly different modeling direction than prior attempts.\n"
+        "Examples of acceptable direction changes: optimizer family change, non-trivial depth/pooling redesign, "
+        "different regularization strategy, or architectural block pattern changes.\n"
+        "Do not return a near-duplicate of previously tried architectures.\n\n"
+    ) if force_novelty else ""
+
+    prompt = (
+        "You are improving a BirdCLEF audio classification model.\n"
+        "Create a stronger architecture than prior runs while keeping training cheap for search.\n\n"
+        f"Top prior results:\n{top_summary}\n\n"
+        f"Previously tried architecture summaries:\n{tried_summary}\n\n"
+        + novelty_block +
+        f"Current baseline slot code:\n```python\n{fallback_slot}\n```\n\n"
+        "Return ONLY Python code with get_training_config() and build_model(input_shape, num_classes).\n"
+        "Constraints:\n"
+        f"- max_samples must be {cheap_cfg['max_samples']}\n"
+        f"- epochs must be {cheap_cfg['epochs']}\n"
+        f"- val_split must be {cheap_cfg.get('val_split', 0.2)}\n"
+        "- Keep final layer as Dense(num_classes, activation='sigmoid').\n"
+        "- No top-level executable statements.\n"
+    )
+    resp = llm.generate_from_messages(
+        messages=[{"role": "system", "content": GENERATION_SYSTEM_PROMPT},
+                  {"role": "user", "content": prompt}],
+        temperature=temperature,
+    )
+    candidate = extract_python_code(resp)
+    issues = validate_slot_code(candidate) if candidate else ["No code found."]
+    if issues:
+        print(f"    AI-free generation invalid, using fallback slot. Issues: {issues}")
+        return fallback_slot
+    return candidate
+
+
+def _generate_medium_slot(llm, temperature, best_results, fallback_slot, medium_cfg, medium_history_summary=""):
+    top_lines = []
+    for i, r in enumerate(best_results[:4], start=1):
+        top_lines.append(f"{i}. AUC={r['macro_roc_auc']:.6f} | {r['description']}")
+    top_summary = "\n".join(top_lines) if top_lines else "No successful prior runs yet."
+
+    history_block = (
+        f"Medium-stage history so far (attempt summaries):\n{medium_history_summary}\n\n"
+        if medium_history_summary else
+        "Medium-stage history so far: none (first generated attempt).\n\n"
+    )
+
+    prompt = (
+        "You are improving a BirdCLEF audio classification model for medium-scale validation.\n"
+        "Problem at hand:\n"
+        "- Multi-label bird species classification from 5s audio clips.\n"
+        "- Input is mel spectrograms; output is sigmoid probabilities for all species.\n"
+        "- Metric is macro ROC-AUC.\n"
+        "- Goal: maximize generalization under this medium training budget before final full training.\n\n"
+        "Use prior best models as inspiration and propose a stronger architecture.\n"
+        "Really try to find a high-performing direction, not small cosmetic edits.\n\n"
+        f"Top prior models:\n{top_summary}\n\n"
+        + history_block +
+        f"Reference slot code:\n```python\n{fallback_slot}\n```\n\n"
+        "Return ONLY Python code with get_training_config() and build_model(input_shape, num_classes).\n"
+        "Constraints:\n"
+        f"- max_samples must be {medium_cfg['max_samples']}\n"
+        f"- epochs must be {medium_cfg['epochs']}\n"
+        f"- val_split must be {medium_cfg.get('val_split', 0.2)}\n"
+        "- Keep final layer as Dense(num_classes, activation='sigmoid').\n"
+        "- No top-level executable statements.\n"
+    )
+    resp = llm.generate_from_messages(
+        messages=[{"role": "system", "content": GENERATION_SYSTEM_PROMPT},
+                  {"role": "user", "content": prompt}],
+        temperature=temperature,
+    )
+    candidate = extract_python_code(resp)
+    issues = validate_slot_code(candidate) if candidate else ["No code found."]
+    if issues:
+        print(f"    Medium LLM generation invalid, using fallback slot. Issues: {issues}")
+        return fallback_slot
+    return candidate
+
+
+def _run_medium_stage(previous_results, executor, evaluator, llm, temperature, dirs, search_cfg):
+    medium_cfg = search_cfg.get("medium", {})
+    ms_cfg = search_cfg.get("medium_stage", {})
+    if not ms_cfg.get("enabled", True):
+        return [], None
+
+    total_runs = int(ms_cfg.get("total_runs", 10))
+    promoted_runs = int(ms_cfg.get("promoted_runs", 4))
+    medium_max_attempts = max(1, int(ms_cfg.get("max_attempts_per_model", 1)))
+    promoted_runs = max(0, min(promoted_runs, total_runs))
+    generated_runs = max(0, total_runs - promoted_runs)
+    s = int(medium_cfg.get("max_samples", 10000))
+    e = int(medium_cfg.get("epochs", 15))
+    vs = float(medium_cfg.get("val_split", 0.2))
+
+    print("\n" + "=" * 60)
+    print("  PHASE 2.5: MEDIUM SCALE VALIDATION")
+    print("=" * 60)
+    print(f"  Runs: {total_runs} total ({promoted_runs} promoted + {generated_runs} LLM-generated)")
+    print(f"  Config: max_samples={s}, epochs={e}, val_split={vs}")
+    print(f"  Attempt policy: max_attempts_per_model={medium_max_attempts}")
+    print("  Checkpoint policy: restore best validation epoch (not last epoch).")
+
+    rng = np.random.default_rng(search_cfg.get("random_seed", 42) + 99)
+    all_results = []
+
+    top_overall = [r for r in _best_successful(previous_results, max(promoted_runs, 1) * 3) if r.get("slot_code")]
+    top_overall = top_overall[:max(promoted_runs, 1)]
+    if promoted_runs > 0:
+        print(f"\n  ── M1: {promoted_runs} promoted models (overall top, scaled as-is) ──")
+    for i in range(promoted_runs):
+        if not top_overall:
+            break
+        base = top_overall[i % len(top_overall)]
+        p = dict(DEFAULT_PARAMS)
+        p.update(base.get("params", {}))
+        p["max_samples"] = s
+        p["epochs"] = e
+        p["val_split"] = vs
+        slot = base["slot_code"] + _final_config_override_block({
+            "max_samples": s,
+            "sample_rate": 32000,
+            "clip_seconds": 5.0,
+            "n_mels": p.get("n_mels", 64),
+            "n_frames": p.get("n_frames", 128),
+            "epochs": e,
+            "batch_size": p.get("batch_size", 32),
+            "learning_rate": p.get("learning_rate", 1e-3),
+            "optimizer": p.get("optimizer", "adam"),
+            "val_split": vs,
+            "weight_decay": p.get("weight_decay", 0.0),
+            "classifier_hidden_units": p.get("classifier_hidden_units", 0),
+            "pooling_type": p.get("pooling_type", "global_avg"),
+            "use_best_checkpoint": True,
+        })
+        rid = f"M{i+1:03d}_promoted"
+        slot, metrics, result, att = run_experiment_until_success(
+            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature,
+            max_attempts=medium_max_attempts, use_llm_fixes=medium_max_attempts > 1
+        )
+        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
+        entry = {
+            "run_id": rid,
+            "search_type": "medium_promoted",
+            "params": {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
+            "macro_roc_auc": auc,
+            "success": auc is not None,
+            "attempts": att,
+            "best_epoch": metrics.get("best_epoch") if metrics else None,
+            "description": describe_params(p),
+            "slot_code": slot,
+        }
+        all_results.append(entry)
+        print(f"    {rid}: {_fmt_score(auc)} | {entry['description']}")
+
+    if generated_runs > 0:
+        print(f"\n  ── M2: {generated_runs} LLM-generated medium models (successful target) ──")
+    medium_history = []
+    gen_success = 0
+    gen_candidates = 0
+    max_gen_candidates = max(generated_runs * 5, generated_runs)
+    while gen_success < generated_runs and gen_candidates < max_gen_candidates:
+        gen_candidates += 1
+        ref_pool = _best_successful(previous_results + all_results, 4)
+        ref_params_pool = _best_parametric_successful(previous_results + all_results, 1)
+        if ref_params_pool:
+            seed_p = dict(ref_params_pool[0]["params"])
+        else:
+            seed_p = _sample_random_params(rng)
+        seed_p["max_samples"] = s
+        seed_p["epochs"] = e
+        seed_p["val_split"] = vs
+        seed_slot = generate_slot_code(seed_p)
+        medium_history_summary = _summarize_architectures(medium_history, limit=10)
+        slot = _generate_medium_slot(
+            llm,
+            temperature,
+            ref_pool,
+            seed_slot,
+            {"max_samples": s, "epochs": e, "val_split": vs},
+            medium_history_summary=medium_history_summary,
+        )
+        rid = f"M{promoted_runs + gen_candidates:03d}_llm"
+        slot, metrics, result, att = run_experiment_until_success(
+            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature,
+            max_attempts=medium_max_attempts, use_llm_fixes=medium_max_attempts > 1
+        )
+        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
+        success = auc is not None
+        if success:
+            gen_success += 1
+        entry = {
+            "run_id": rid,
+            "search_type": "medium_llm",
+            "params": {k: v for k, v in seed_p.items() if k not in ("max_samples", "epochs")},
+            "macro_roc_auc": auc,
+            "success": success,
+            "counts_toward_budget": success,
+            "attempts": att,
+            "best_epoch": metrics.get("best_epoch") if metrics else None,
+            "description": f"Medium LLM generation candidate #{gen_candidates}",
+            "slot_code": slot,
+        }
+        all_results.append(entry)
+        medium_history.append(entry)
+        if success:
+            print(f"    {rid}: {_fmt_score(auc)} | accepted ({gen_success}/{generated_runs})")
+        else:
+            print(f"    {rid}: failed after {att} attempts, does not count toward medium LLM budget. Moving on.")
+    if gen_success < generated_runs:
+        print(f"  Warning: medium LLM generated target not fully reached ({gen_success}/{generated_runs}).")
+
+    _save_json(all_results, dirs["logs"] / "medium_results.json")
+    _save_json(_best_successful(all_results, 4), dirs["logs"] / "medium_top_results.json")
+    all_ok = [r for r in all_results if r.get("success") and r.get("macro_roc_auc")]
+    best = max(all_ok, key=lambda r: r["macro_roc_auc"]) if all_ok else None
+    print(f"\n  Medium stage done: {len(all_results)} iters, {len(all_ok)} successful")
+    if best:
+        print(f"  Best medium: AUC={best['macro_roc_auc']:.6f} | {best['description']}")
+    return all_results, best
+
+
+def _run_reality_check_gate(candidates, executor, evaluator, dirs, search_cfg):
+    gate_cfg = search_cfg.get("reality_gate", {})
+    if not gate_cfg.get("enabled", True):
+        return [], None
+
+    top_k = int(gate_cfg.get("top_k", 5))
+    use_all = bool(gate_cfg.get("use_all_candidates", False))
+    s = int(gate_cfg.get("max_samples", search_cfg.get("medium", {}).get("max_samples", 10000)))
+    e = int(gate_cfg.get("epochs", search_cfg.get("medium", {}).get("epochs", 15)))
+    vs = float(gate_cfg.get("val_split", 0.2))
+    split_mode = str(gate_cfg.get("split_mode", "group_holdout"))
+    eval_candidates = [c for c in candidates if c.get("slot_code")]
+    eval_candidates = sorted(eval_candidates, key=lambda r: (r.get("macro_roc_auc") or -1.0), reverse=True)
+    if not use_all:
+        eval_candidates = eval_candidates[:top_k]
+
+    print("\n" + "=" * 60)
+    print("  PHASE 2.6: REALITY-CHECK GATE")
+    print("=" * 60)
+    print(f"  Candidates: {len(eval_candidates)} ({'all' if use_all else f'top_k={top_k}'})")
+    print(f"  Gate config: samples={s}, epochs={e}, val_split={vs}, split_mode={split_mode}")
+
+    results = []
+    for i, c in enumerate(eval_candidates, start=1):
+        base_params = dict(DEFAULT_PARAMS)
+        base_params.update(c.get("params", {}))
+        gate_cfg_override = {
+            "max_samples": s,
+            "sample_rate": 32000,
+            "clip_seconds": 5.0,
+            "n_mels": base_params.get("n_mels", 64),
+            "n_frames": base_params.get("n_frames", 128),
+            "epochs": e,
+            "batch_size": base_params.get("batch_size", 32),
+            "learning_rate": base_params.get("learning_rate", 1e-3),
+            "optimizer": base_params.get("optimizer", "adam"),
+            "val_split": vs,
+            "weight_decay": base_params.get("weight_decay", 0.0),
+            "classifier_hidden_units": base_params.get("classifier_hidden_units", 0),
+            "pooling_type": base_params.get("pooling_type", "global_avg"),
+            "use_best_checkpoint": True,
+            "split_mode": split_mode,
+        }
+        slot = c["slot_code"] + _final_config_override_block(gate_cfg_override)
+        rid = f"G{i:03d}_{c.get('run_id','cand')}"
+        slot, metrics, _result, att = run_experiment_until_success(
+            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator,
+            llm=None, temperature=0.0, max_attempts=1, use_llm_fixes=False
+        )
+        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
+        entry = {
+            "run_id": rid,
+            "source_run_id": c.get("run_id"),
+            "search_type": "reality_gate",
+            "params": c.get("params"),
+            "macro_roc_auc": auc,
+            "success": auc is not None,
+            "attempts": att,
+            "best_epoch": metrics.get("best_epoch") if metrics else None,
+            "description": c.get("description", ""),
+            "slot_code": c.get("slot_code"),
+        }
+        results.append(entry)
+        print(f"    {rid}: {_fmt_score(auc)} | source={c.get('run_id')}")
+
+    _save_json(results, dirs["logs"] / "reality_check_results.json")
+    ok = [r for r in results if r.get("success") and isinstance(r.get("macro_roc_auc"), (int, float))]
+    best = max(ok, key=lambda r: r["macro_roc_auc"]) if ok else None
+    if best:
+        print(f"  Gate winner: AUC={best['macro_roc_auc']:.6f} | source={best.get('source_run_id')}")
+    else:
+        print("  Gate winner: none (all failed).")
+    return results, best
+
+
 def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dirs, search_cfg):
     print("\n" + "=" * 60)
     print("  PHASE 2: RANDOM SEARCH")
@@ -1503,15 +2001,21 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
     budget = search_cfg.get("random_budget", 50)
     s, e = search_cfg["cheap"]["max_samples"], search_cfg["cheap"]["epochs"]
     vs = search_cfg["cheap"].get("val_split", 0.2)
-    explore_count = min(20, budget)
+    phase2_cfg = search_cfg.get("phase2", {})
+    explore_count = int(phase2_cfg.get("random_experiments", budget))
+    focused_count = int(phase2_cfg.get("focused_experiments", 50))
+    tweak_count = int(phase2_cfg.get("tweak_experiments", 50))
+    ai_free_count = int(phase2_cfg.get("ai_free_experiments", 50))
+    final_tweak_count = int(phase2_cfg.get("final_tweak_experiments", 15))
+    top_keep = int(phase2_cfg.get("top_results_keep", 4))
     rng = np.random.default_rng(search_cfg.get("random_seed", 42))
     all_results = []
     rc = 0
+    current_best_slot = baseline_slot
  
     # Sub-phase A: Pure random
     print(f"\n  ── A: {explore_count} random experiments ──")
     for _ in range(explore_count):
-        if rc >= budget: break
         rc += 1
         p = _sample_random_params(rng); p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
         slot = generate_slot_code(p)
@@ -1522,9 +2026,13 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         entry = {"run_id": rid, "search_type": "explore",
                  "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
                  "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
-                 "description": describe_params(p)}
+                 "best_epoch": metrics.get("best_epoch") if metrics else None,
+                 "description": describe_params(p), "slot_code": slot}
         all_results.append(entry)
+        if entry["success"]:
+            current_best_slot = slot
         print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+    _save_phase2_results(dirs["logs"], all_results, top_keep)
  
     # LLM analysis
     print(f"\n  ── Analyzing results with LLM ──")
@@ -1535,50 +2043,133 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
     else:
         print("  LLM analysis failed. Using top-K exploitation.")
  
-    rem = budget - rc
- 
     # Sub-phase B: Focused
-    fc = min(rem // 2, 15)
-    if fc > 0:
-        print(f"\n  ── B: {fc} focused experiments ──")
-        for _ in range(fc):
-            if rc >= budget: break
-            rc += 1
-            p = _sample_narrowed(narrowed, rng); p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
-            slot = generate_slot_code(p)
-            rid = f"R{rc:03d}_focused"
-            slot, metrics, result, att = run_experiment_until_success(
-                slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
-            auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
-            all_results.append({"run_id": rid, "search_type": "focused",
-                "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
-                "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
-                "description": describe_params(p)})
-            print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+    print(f"\n  ── B: {focused_count} focused experiments ──")
+    for _ in range(focused_count):
+        rc += 1
+        p = _sample_narrowed(narrowed, rng); p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
+        slot = generate_slot_code(p)
+        rid = f"R{rc:03d}_focused"
+        slot, metrics, result, att = run_experiment_until_success(
+            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
+        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
+        entry = {"run_id": rid, "search_type": "focused",
+            "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
+            "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
+            "best_epoch": metrics.get("best_epoch") if metrics else None,
+            "description": describe_params(p), "slot_code": slot}
+        all_results.append(entry)
+        if entry["success"]:
+            current_best_slot = slot
+        print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+    _save_phase2_results(dirs["logs"], all_results, top_keep)
  
-    # Sub-phase C: Tweak top-K
-    rem = budget - rc
-    ok = sorted([r for r in all_results if r.get("success") and r.get("macro_roc_auc")],
-                key=lambda r: r["macro_roc_auc"], reverse=True)[:5]
-    if ok and rem > 0:
-        tc = min(rem, len(ok) * 3)
-        print(f"\n  ── C: {tc} tweaks of top configs ──")
-        for i in range(tc):
-            if rc >= budget: break
-            rc += 1
-            p = _tweak_params(ok[i % len(ok)]["params"], rng); p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
-            slot = generate_slot_code(p)
-            rid = f"R{rc:03d}_tweak"
-            slot, metrics, result, att = run_experiment_until_success(
-                slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
-            auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
-            all_results.append({"run_id": rid, "search_type": "tweak",
-                "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
-                "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
-                "description": describe_params(p)})
-            print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
- 
-    _save_json(all_results, dirs["logs"] / "random_results.json")
+    # Sub-phase C: broad tweak pass
+    print(f"\n  ── C: {tweak_count} tweaks of top configs ──")
+    for i in range(tweak_count):
+        ok = _best_parametric_successful(all_results, 5)
+        if not ok:
+            p = _sample_random_params(rng)
+        else:
+            p = _tweak_params(ok[i % len(ok)]["params"], rng)
+        rc += 1
+        p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
+        slot = generate_slot_code(p)
+        rid = f"R{rc:03d}_tweak"
+        slot, metrics, result, att = run_experiment_until_success(
+            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
+        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
+        entry = {"run_id": rid, "search_type": "tweak",
+            "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
+            "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
+            "best_epoch": metrics.get("best_epoch") if metrics else None,
+            "description": describe_params(p), "slot_code": slot}
+        all_results.append(entry)
+        if entry["success"]:
+            current_best_slot = slot
+        print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+    _save_phase2_results(dirs["logs"], all_results, top_keep)
+
+    # Sub-phase D: AI free experiments
+    print(f"\n  ── D: {ai_free_count} AI freely experiments (successful target) ──")
+    ai_free_history = []
+    ai_success = 0
+    ai_candidates = 0
+    max_ai_candidates = max(ai_free_count * 5, ai_free_count)
+    while ai_success < ai_free_count and ai_candidates < max_ai_candidates:
+        ai_candidates += 1
+        rc += 1
+        top_now = _best_successful(all_results, top_keep)
+        top_param_now = _best_parametric_successful(all_results, 1)
+        seed_slot = current_best_slot
+        tried_summary = _summarize_architectures(all_results, limit=12)
+        plateau, auc_plateau = _has_auc_plateau(ai_free_history, repeats=3, decimals=6)
+        if plateau:
+            print(f"    AI-free plateau detected at AUC={auc_plateau:.6f}; forcing novel direction.")
+        ai_slot = _generate_ai_free_slot_with_context(
+            llm=llm,
+            temperature=temperature,
+            best_results=top_now,
+            fallback_slot=seed_slot,
+            cheap_cfg={"max_samples": s, "epochs": e, "val_split": vs},
+            tried_summary=tried_summary,
+            force_novelty=plateau,
+        )
+        rid = f"R{rc:03d}_ai_free"
+        ai_slot, metrics, result, att = run_experiment_until_success(
+            ai_slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature, max_attempts=7)
+        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
+        success = auc is not None
+        if success:
+            ai_success += 1
+        entry = {
+            "run_id": rid,
+            "search_type": "ai_free",
+            "params": top_param_now[0]["params"] if top_param_now else dict(DEFAULT_PARAMS),
+            "macro_roc_auc": auc,
+            "success": success,
+            "counts_toward_budget": success,
+            "attempts": att,
+            "best_epoch": metrics.get("best_epoch") if metrics else None,
+            "description": f"AI free generation candidate #{ai_candidates}",
+            "slot_code": ai_slot,
+        }
+        all_results.append(entry)
+        ai_free_history.append(entry)
+        if success:
+            current_best_slot = ai_slot
+            print(f"    R{rc:03d}: {_fmt_score(auc)} | accepted ({ai_success}/{ai_free_count})")
+        else:
+            print(f"    R{rc:03d}: failed after {att} attempts, does not count toward AI-free budget. Moving on.")
+    if ai_success < ai_free_count:
+        print(f"  Warning: AI-free target not fully reached ({ai_success}/{ai_free_count}).")
+    _save_phase2_results(dirs["logs"], all_results, top_keep)
+
+    # Final tightening tweaks
+    print(f"\n  ── C: {final_tweak_count} tweaks of top configs ──")
+    for i in range(final_tweak_count):
+        ok = _best_parametric_successful(all_results, 5)
+        if not ok:
+            break
+        rc += 1
+        p = _tweak_params(ok[i % len(ok)]["params"], rng)
+        p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
+        slot = generate_slot_code(p)
+        rid = f"R{rc:03d}_tweak_final"
+        slot, metrics, result, att = run_experiment_until_success(
+            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
+        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
+        entry = {"run_id": rid, "search_type": "tweak_final",
+            "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
+            "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
+            "best_epoch": metrics.get("best_epoch") if metrics else None,
+            "description": describe_params(p), "slot_code": slot}
+        all_results.append(entry)
+        if entry["success"]:
+            current_best_slot = slot
+        print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+    _save_phase2_results(dirs["logs"], all_results, top_keep)
+
     all_ok = [r for r in all_results if r.get("success") and r.get("macro_roc_auc")]
     best = max(all_ok, key=lambda r: r["macro_roc_auc"]) if all_ok else None
     print(f"\n  Random done: {rc} iters, {len(all_ok)} successful")
@@ -1620,6 +2211,13 @@ def _generate_insights(llm, results, phase, dirs, temperature):
     print(f"  Saved to {out}")
  
  
+def _maybe_generate_insights(config, llm, results, phase, dirs, temperature):
+    if not config.get("logging", {}).get("generate_insights", True):
+        print(f"\n  Skipping {phase} insights (generate_insights=false).")
+        return
+    _generate_insights(llm, results, phase, dirs, temperature)
+
+
 def _generate_kaggle_notebook(params, output_path):
     nm, nf = params.get("n_mels", 64), params.get("n_frames", 128)
     nb = {
@@ -1688,7 +2286,7 @@ def _final_execution_timeout_seconds(config: dict) -> int | None:
     return ex["final_timeout_seconds"]
 
 
-def _run_final_training(best_params, executor, evaluator, llm, temperature, project_root, dirs, search_cfg):
+def _run_final_training(best_params, executor, evaluator, llm, temperature, project_root, dirs, search_cfg, best_slot_code=None, best_epoch_override=None):
     print("\n" + "=" * 60)
     print("  PHASE 3: FINAL TRAINING")
     print("=" * 60)
@@ -1699,10 +2297,28 @@ def _run_final_training(best_params, executor, evaluator, llm, temperature, proj
  
     fp = dict(best_params)
     fp["max_samples"] = search_cfg["final"].get("max_samples")
-    fp["epochs"] = search_cfg["final"]["epochs"]
-    fp["val_split"] = search_cfg["final"].get("val_split", 0.1)
+    fp["epochs"] = int(best_epoch_override) if best_epoch_override is not None else int(search_cfg["final"]["epochs"])
+    fp["val_split"] = 0.0
  
-    slot_code = generate_slot_code(fp)
+    if best_slot_code:
+        slot_code = best_slot_code + _final_config_override_block({
+            "max_samples": fp["max_samples"],
+            "sample_rate": 32000,
+            "clip_seconds": 5.0,
+            "n_mels": fp.get("n_mels", 64),
+            "n_frames": fp.get("n_frames", 128),
+            "epochs": fp["epochs"],
+            "batch_size": fp.get("batch_size", 32),
+            "learning_rate": fp.get("learning_rate", 1e-3),
+            "optimizer": fp.get("optimizer", "adam"),
+            "val_split": 0.0,
+            "weight_decay": fp.get("weight_decay", 0.0),
+            "classifier_hidden_units": fp.get("classifier_hidden_units", 0),
+            "pooling_type": fp.get("pooling_type", "global_avg"),
+            "use_best_checkpoint": True,
+        })
+    else:
+        slot_code = generate_slot_code(fp)
     script = assemble_script(slot_code, is_final=True, model_save_path=model_path)
     script = _append_eval_wrapper(script, "final", dirs["eval"])
  
@@ -1715,6 +2331,10 @@ def _run_final_training(best_params, executor, evaluator, llm, temperature, proj
     if best_epoch is not None:
         print(f"  Best epochs found: {best_epoch}")
     print(f"  Epochs: {fp['epochs']}, Samples: {'ALL' if fp['max_samples'] is None else fp['max_samples']}")
+    print("  Final split policy: val_split=0.0 (train on all data).")
+    if best_epoch_override is not None:
+        print(f"  Epoch source: medium/gate best epoch = {best_epoch_override}")
+    print(f"  Final architecture source: {'winning slot code' if best_slot_code else 'parametric generator'}")
  
     t0 = time.time()
     result = executor.run_file(script_path)
@@ -1850,11 +2470,31 @@ def agent_loop(config):
         d.mkdir(parents=True, exist_ok=True)
  
     sc = config.get("search", {})
-    sc.setdefault("cheap", {"max_samples": 1500, "epochs": 3, "val_split": 0.2})
-    sc.setdefault("medium", {"max_samples": 2000, "epochs": 10})
+    sc.setdefault("cheap", {"max_samples": 1000, "epochs": 3, "val_split": 0.2})
+    sc.setdefault("medium", {"max_samples": 10000, "epochs": 15, "val_split": 0.2})
     sc.setdefault("final", {"max_samples": None, "epochs": 20, "val_split": 0.1})
     sc.setdefault("linear_budget", 75)
     sc.setdefault("random_budget", 50)
+    p2 = sc.setdefault("phase2", {})
+    p2.setdefault("random_experiments", 50)
+    p2.setdefault("focused_experiments", 50)
+    p2.setdefault("tweak_experiments", 50)
+    p2.setdefault("ai_free_experiments", 50)
+    p2.setdefault("final_tweak_experiments", 15)
+    p2.setdefault("top_results_keep", 4)
+    ms = sc.setdefault("medium_stage", {})
+    ms.setdefault("enabled", True)
+    ms.setdefault("total_runs", 10)
+    ms.setdefault("promoted_runs", 4)
+    ms.setdefault("resume_from_saved_phase2", False)
+    rg = sc.setdefault("reality_gate", {})
+    rg.setdefault("enabled", True)
+    rg.setdefault("use_all_candidates", True)
+    rg.setdefault("top_k", 5)
+    rg.setdefault("max_samples", sc["medium"]["max_samples"])
+    rg.setdefault("epochs", sc["medium"]["epochs"])
+    rg.setdefault("val_split", sc["medium"].get("val_split", 0.2))
+    rg.setdefault("split_mode", "group_holdout")
     sc.setdefault("random_seed", config.get("random_seed", 42))
  
     llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
@@ -1872,8 +2512,25 @@ def agent_loop(config):
     print("  BirdCLEF Structured Search Agent")
     print("=" * 60)
     print(f"  LLM:     {config['llm']['model']}")
-    print(f"  Linear:  {sc['linear_budget']} iters | Random: {sc['random_budget']} iters")
+    print(f"  Linear:  {sc['linear_budget']} iters")
+    print(
+        "  Phase2: "
+        f"A={p2['random_experiments']} random, "
+        f"B={p2['focused_experiments']} focused, "
+        f"C={p2['tweak_experiments']} tweaks, "
+        f"D={p2['ai_free_experiments']} ai-free, "
+        f"C-final={p2['final_tweak_experiments']} tweaks"
+    )
     print(f"  Cheap:   {sc['cheap']['max_samples']} samples, {sc['cheap']['epochs']} epochs")
+    print(
+        f"  Medium:  {sc['medium']['max_samples']} samples, {sc['medium']['epochs']} epochs "
+        f"(runs={ms['total_runs']}, promoted={ms['promoted_runs']}, "
+        f"resume_from_saved_phase2={ms['resume_from_saved_phase2']})"
+    )
+    print(
+        f"  Gate:    enabled={rg['enabled']} top_k={rg['top_k']} "
+        f"samples={rg['max_samples']} epochs={rg['epochs']} split={rg['split_mode']}"
+    )
     print(f"  Final:   {'ALL' if sc['final']['max_samples'] is None else sc['final']['max_samples']} samples, {sc['final']['epochs']} epochs")
     ft = _final_execution_timeout_seconds(config)
     print(f"  Final subprocess timeout: {'unlimited' if ft is None else f'{ft}s'}")
@@ -1881,40 +2538,82 @@ def agent_loop(config):
  
     t0 = time.time()
  
-    baseline_slot, _ = _run_baseline(executor_search, evaluator, llm, temp, dirs, sc)
- 
-    lin_results, lin_best = _run_linear_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc)
-    _generate_insights(llm, lin_results, "linear", dirs, temp)
+    if ms["resume_from_saved_phase2"]:
+        print("\n" + "=" * 60)
+        print("  RESUME MODE: STARTING FROM MEDIUM STAGE")
+        print("=" * 60)
+        lin_results, lin_best, rnd_results, best_rnd = _load_saved_search_state(dirs["logs"])
+        print(f"  Loaded {len(lin_results)} linear results from {dirs['logs'] / 'linear.json'}")
+        print(f"  Loaded {len(rnd_results)} phase-2 results from {dirs['logs'] / 'random_results.json'}")
+    else:
+        baseline_slot, _ = _run_baseline(executor_search, evaluator, llm, temp, dirs, sc)
+        lin_results, lin_best = _run_linear_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc)
+        _maybe_generate_insights(config, llm, lin_results, "linear", dirs, temp)
+        rnd_results, best_rnd = _run_random_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc)
+        _maybe_generate_insights(config, llm, rnd_results, "random", dirs, temp)
+
     lin_ok = [r for r in lin_results if r.get("success") and r.get("macro_roc_auc")]
     best_lin_auc = max((r["macro_roc_auc"] for r in lin_ok), default=0.0)
- 
-    rnd_results, best_rnd = _run_random_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc)
-    _generate_insights(llm, rnd_results, "random", dirs, temp)
     best_rnd_auc = best_rnd["macro_roc_auc"] if best_rnd else 0.0
  
+    pre_medium_results = lin_results + rnd_results
+    med_results, best_med = _run_medium_stage(pre_medium_results, executor_search, evaluator, llm, temp, dirs, sc)
+    _maybe_generate_insights(config, llm, med_results, "medium", dirs, temp)
+    best_med_auc = best_med["macro_roc_auc"] if best_med else 0.0
+
+    gate_pool = _best_successful(med_results, len(med_results))
+    gate_results, best_gate = _run_reality_check_gate(gate_pool, executor_search, evaluator, dirs, sc)
+    best_gate_auc = best_gate["macro_roc_auc"] if best_gate else 0.0
+ 
     print("\n" + "=" * 60)
-    print("  COMPARISON: LINEAR vs RANDOM")
+    print("  COMPARISON: LINEAR vs RANDOM vs MEDIUM (+ GATE)")
     print("=" * 60)
     print(f"  Linear: AUC={best_lin_auc:.6f} | {describe_params(lin_best)}")
     print(f"  Random: AUC={_fmt_score(best_rnd_auc)} | {best_rnd['description'] if best_rnd else 'N/A'}")
- 
-    if best_rnd_auc > best_lin_auc and best_rnd:
-        best_params, winner = best_rnd["params"], "random"
+    print(f"  Medium: AUC={_fmt_score(best_med_auc)} | {best_med['description'] if best_med else 'N/A'}")
+    print(f"  Gate:   AUC={_fmt_score(best_gate_auc)} | {best_gate['description'] if best_gate else 'N/A'}")
+
+    if best_gate:
+        winner, winner_auc = "gate", best_gate_auc
+        best_params = best_gate["params"]
+        best_slot_code = best_gate.get("slot_code")
+        winner_best_epoch = best_gate.get("best_epoch")
+        print("  Selection policy: gate winner (primary).")
+    elif best_med:
+        winner, winner_auc = "medium_fallback", best_med_auc
+        best_params = best_med["params"]
+        best_slot_code = best_med.get("slot_code")
+        winner_best_epoch = best_med.get("best_epoch")
+        print("  Selection policy: medium fallback (gate had no successful run).")
     else:
-        best_params, winner = lin_best, "linear"
-    print(f"\n  ★ WINNER: {winner} (AUC={max(best_lin_auc, best_rnd_auc):.6f})")
+        candidates = [("linear_fallback", best_lin_auc, lin_best, generate_slot_code({**lin_best, "max_samples": sc["cheap"]["max_samples"], "epochs": sc["cheap"]["epochs"], "val_split": sc["cheap"].get("val_split", 0.2)}), None)]
+        if best_rnd:
+            candidates.append(("random_fallback", best_rnd_auc, best_rnd["params"], best_rnd.get("slot_code"), best_rnd.get("best_epoch")))
+        winner, winner_auc, best_params, best_slot_code, winner_best_epoch = max(candidates, key=lambda x: x[1])
+        print("  Selection policy: emergency fallback (no gate/medium success).")
+    print(f"\n  ★ WINNER: {winner} (AUC={winner_auc:.6f})")
  
     _save_json({"best_linear_auc": best_lin_auc, "best_linear_params": lin_best,
                 "best_random_auc": best_rnd_auc,
                 "best_random_params": best_rnd["params"] if best_rnd else None,
-                "winner": winner, "final_params": best_params},
+                "best_medium_auc": best_med_auc,
+                "best_medium_params": best_med["params"] if best_med else None,
+                "best_gate_auc": best_gate_auc,
+                "best_gate_params": best_gate["params"] if best_gate else None,
+                "winner": winner, "winner_best_epoch": winner_best_epoch,
+                "final_params": best_params, "winner_slot_code_path": str(logs / "winner_slot_code.py")},
                logs / "search_comparison.json")
+    if best_slot_code:
+        (logs / "winner_slot_code.py").write_text(best_slot_code, encoding="utf-8")
  
-    total = len(lin_results) + len(rnd_results) + 1
+    total = len(lin_results) + len(rnd_results) + len(med_results) + len(gate_results) + 1
     print(f"\n  Total: {total} experiments in {(time.time()-t0)/60:.1f} min")
  
-    if best_lin_auc > 0 or best_rnd_auc > 0:
-        _run_final_training(best_params, executor_final, evaluator, llm, temp, root, dirs, sc)
+    if best_lin_auc > 0 or best_rnd_auc > 0 or best_med_auc > 0 or best_gate_auc > 0:
+        _run_final_training(
+            best_params, executor_final, evaluator, llm, temp, root, dirs, sc,
+            best_slot_code=best_slot_code, best_epoch_override=winner_best_epoch
+        )
     else:
         print("\n  No successful experiments — skipping final training.")
  
