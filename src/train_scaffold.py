@@ -8,6 +8,7 @@ Augmentation strategies are controlled via configs/agent_config.json.
 from __future__ import annotations
 
 import json
+import pickle
 import sys
 from pathlib import Path
 
@@ -227,6 +228,7 @@ def main():
     print(f"Spectrogram augmentations: {spec_aug.active_strategies()}")
 
     best_cmap = 0.0
+    best_state = None
     for epoch in range(1, NUM_EPOCHS + 1):
         loss = train_epoch(model, train_loader, criterion, optimizer, device)
         cmap = eval_epoch(model, val_loader, device, num_classes)
@@ -234,6 +236,17 @@ def main():
         print(f"Epoch {epoch}/{NUM_EPOCHS}  loss={loss:.4f}  cmAP={cmap:.4f}")
         if cmap > best_cmap:
             best_cmap = cmap
+            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+    # Save model + metadata for inference
+    if best_state is not None:
+        torch.save(best_state, logs_dir / "best_model.pth")
+    with open(logs_dir / "label_encoder.pkl", "wb") as f:
+        pickle.dump(le, f)
+    model_meta = {"num_classes": num_classes, "n_mels": N_MELS, "sample_rate": SAMPLE_RATE,
+                  "duration": DURATION, "n_fft": N_FFT, "hop_length": HOP_LENGTH}
+    (logs_dir / "model_config.json").write_text(json.dumps(model_meta, indent=2))
+    print(f"Model saved to {logs_dir}/best_model.pth")
 
     print(f"\ncmAP: {best_cmap:.4f}")
 
