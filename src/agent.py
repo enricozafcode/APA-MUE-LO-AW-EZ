@@ -123,21 +123,47 @@ def main() -> None:
         "Use the currently active augmentation strategies shown in the system prompt."
     )
 
+    max_retries = config.get("max_failures_before_stop", 3)
+    output_file = logs_dir / "generated_training_script.py"
+
     print("\nGenerating training script...")
     generated_code = generate_with_syntax_fix(
         llm=llm,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         temperature=config["llm"].get("temperature", 0.2),
-        max_retries=config.get("max_failures_before_stop", 3),
+        max_retries=max_retries,
     )
 
-    output_file = logs_dir / "generated_training_script.py"
-    output_file.write_text(generated_code, encoding="utf-8")
-    print(f"Script saved to {output_file}")
+    result = None
+    current_code = generated_code
+    for run_attempt in range(1, max_retries + 1):
+        output_file.write_text(current_code, encoding="utf-8")
+        print(f"\n--- EXECUTING TRAINING SCRIPT (run {run_attempt}/{max_retries}) ---")
+        result = executor.run_file(output_file)
 
-    print("\n--- EXECUTING TRAINING SCRIPT ---")
-    result = executor.run_file(output_file)
+        if result.success:
+            break
+
+        print(f"  Run failed. Sending traceback back to LLM for fixing...")
+        fix_prompt = (
+            f"The script you generated crashed at runtime with this error:\n\n"
+            f"{result.stderr}\n\n"
+            f"Here is the full script:\n{current_code}\n\n"
+            "Fix ALL errors (missing imports, wrong variable names, wrong API calls, etc.) "
+            "and return the complete corrected script. "
+            "Raw Python only — no markdown, no explanations."
+        )
+        raw_fix = llm.generate_code(
+            system_prompt=system_prompt,
+            user_prompt=fix_prompt,
+            temperature=0.1,
+        )
+        current_code = strip_markdown(raw_fix)
+        try:
+            ast.parse(current_code)
+        except SyntaxError as e:
+            print(f"  Fixed code still has syntax error on line {e.lineno}: {e.msg}")
 
     print("\n--- EXECUTION RESULTS ---")
     print(f"Success:     {result.success}")
