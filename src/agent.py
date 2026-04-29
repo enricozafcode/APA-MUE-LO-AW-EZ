@@ -97,9 +97,11 @@ def main() -> None:
         model=config["llm"]["model"],
     )
 
+    src_dir = str(Path(__file__).resolve().parent)
     executor = CodeExecutor(
         python_executable=config["execution"]["python_executable"],
         timeout_seconds=config["execution"]["timeout_seconds"],
+        extra_pythonpath=[src_dir],
     )
 
     evaluator = Evaluator()
