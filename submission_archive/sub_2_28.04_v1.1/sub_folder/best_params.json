@@ -1,0 +1,13 @@
+{
+  "depth": 5,
+  "filters_base": 48,
+  "filter_pattern": "constant",
+  "dropout": 0.09,
+  "batch_norm": true,
+  "residuals": false,
+  "optimizer": "adam",
+  "learning_rate": 0.0030336987857336314,
+  "batch_size": 8,
+  "n_mels": 128,
+  "n_frames": 192
+}

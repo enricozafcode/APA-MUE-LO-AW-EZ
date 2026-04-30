@@ -1,4 +1,4 @@
-# Submission Progress Summary (Submissions 1–6)
+# Submission Progress Summary (Submissions 1–6, plus v1.6 / v1.7)
 
 ## Submission 1 (`sub_1`)
 
@@ -61,6 +61,10 @@ Observed score: **0.721**.
 Same base as v1.4 (Submission 4 / `sub_4_29.04_v1.3`), with the **same online B augmentations**, plus **Mixup** during training batches (**α = 0.25**).  
 Artifacts under `submission/submission_02/`, same runner script as v1.4.
 Observed score: **0.720**.
+
+## Versions 1.6 and 1.7 (secondary labels)
+
+For **v1.6** and **v1.7**, training incorporated **secondary labels**. Despite that extra supervision signal, **neither run improved the final leaderboard AUC** compared to earlier best scores—the public score did not increase on these attempts.
 
 ## Overall Summary Across Submissions 1–4
 

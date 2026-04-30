@@ -1,0 +1,17 @@
+{
+  "depth": 8,
+  "filters_base": 32,
+  "filter_pattern": "doubling",
+  "dropout": 0.0,
+  "batch_norm": true,
+  "pooling_type": "global_avg",
+  "residuals": true,
+  "weight_decay": 1.0645987236440721e-05,
+  "classifier_hidden_units": 0,
+  "optimizer": "adam",
+  "learning_rate": 0.00017776545083782858,
+  "batch_size": 32,
+  "n_mels": 64,
+  "n_frames": 128,
+  "val_split": 0.2
+}
