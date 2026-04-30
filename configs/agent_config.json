@@ -2,15 +2,21 @@
   "project_name": "apa-birdclef-autonomous-agent",
   "track": "birdclef",
   "random_seed": 42,
+  "max_iterations": 5,
   "llm": {
     "provider": "ollama",
-    "model": "gemma4",
+    "model": "qwen2.5-coder:7b",
     "temperature": 0.2
   },
   "execution": {
     "timeout_seconds": 1800,
     "final_timeout_seconds": null,
     "python_executable": "python3"
+  },
+  "transfer": {
+    "require_pretrained_only": true,
+    "min_scored_columns": 35,
+    "final_epochs_override": 12
   },
   "search": {
     "cheap": {
@@ -31,22 +37,31 @@
     "linear_budget": 0,
     "random_budget": 50,
     "phase2": {
-      "random_experiments": 10,
-      "focused_experiments": 10,
-      "tweak_experiments": 10,
+      "random_experiments": 5,
+      "focused_experiments": 5,
+      "tweak_experiments": 5,
+      "augmentation_tweak_experiments": 8,
       "ai_free_experiments": 10,
       "final_tweak_experiments": 10,
       "top_results_keep": 2
     },
-    "medium_stage": {
+    "cnn_exploration": {
+      "enabled": false
+    },
+    "transfer_exploration": {
       "enabled": true,
+      "max_iterations": 10,
+      "interactive_pick_final": false
+    },
+    "medium_stage": {
+      "enabled": false,
       "total_runs": 4,
       "promoted_runs": 4,
       "max_attempts_per_model": 1,
       "resume_from_saved_phase2": false
     },
     "reality_gate": {
-      "enabled": true,
+      "enabled": false,
       "use_all_candidates": true,
       "top_k": 5,
       "max_samples": 10000,

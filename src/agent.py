@@ -646,6 +646,11 @@ else:
     from evaluator import Evaluator
     from llm_client import LLMClient
 
+try:
+    from . import agent_transfer as _agent_transfer
+except ImportError:
+    import agent_transfer as _agent_transfer  # type: ignore
+
  
 # ═══════════════════════════════════════════════════════════════════════════
 # DEFAULT PARAMETERS & SEARCH SPACE
@@ -667,6 +672,10 @@ DEFAULT_PARAMS = {
     "n_mels": 64,
     "n_frames": 128,
     "val_split": 0.2,
+    "aug_prob": 0.0,
+    "aug_noise_std": 0.0,
+    "aug_time_mask": 0,
+    "aug_freq_mask": 0,
 }
  
 # Ordered by impact tier (Tier 1 searched first)
@@ -777,6 +786,10 @@ def main():
     epochs        = cfg.get("epochs", 3)
     batch_size    = cfg.get("batch_size", 32)
     learning_rate = cfg.get("learning_rate", 1e-3)
+    aug_prob      = float(cfg.get("aug_prob", 0.0))
+    aug_noise_std = float(cfg.get("aug_noise_std", 0.0))
+    aug_time_mask = int(cfg.get("aug_time_mask", 0))
+    aug_freq_mask = int(cfg.get("aug_freq_mask", 0))
  
     optimizer_name = cfg.get("optimizer", "adam")
     if optimizer_name == "sgd_momentum":
@@ -913,9 +926,45 @@ def main():
         f"X_val={{X_val.shape}}, y_val={{y_val.shape}}, val_split={{val_split}}, split_mode={{split_mode}}"
     )
     print(
+        f"AUG_CFG: prob={{aug_prob}} noise_std={{aug_noise_std}} "
+        f"time_mask={{aug_time_mask}} freq_mask={{aug_freq_mask}}"
+    )
+    print(
         f"PHASE3_DEBUG: split_stats train_n={{len(X_train)}} val_n={{len(X_val)}} "
         f"unique_species_selected={{represented_species}}"
     )
+
+    def _apply_training_augmentation(X, prob, noise_std, tmask, fmask, seed=42):
+        if prob <= 0.0:
+            return X, 0
+        if noise_std <= 0.0 and tmask <= 0 and fmask <= 0:
+            return X, 0
+        rng_aug = np.random.default_rng(seed)
+        X_aug = np.array(X, copy=True)
+        changed = 0
+        n, n_m, n_f, _ = X_aug.shape
+        tmask = max(0, min(int(tmask), max(0, n_f - 1)))
+        fmask = max(0, min(int(fmask), max(0, n_m - 1)))
+        for i in range(n):
+            if rng_aug.random() > prob:
+                continue
+            if noise_std > 0:
+                X_aug[i] += rng_aug.normal(0.0, noise_std, size=X_aug[i].shape).astype(np.float32)
+            if tmask > 0:
+                w = int(rng_aug.integers(1, tmask + 1))
+                t0 = int(rng_aug.integers(0, max(1, n_f - w + 1)))
+                X_aug[i, :, t0:t0 + w, :] = 0.0
+            if fmask > 0:
+                h = int(rng_aug.integers(1, fmask + 1))
+                f0 = int(rng_aug.integers(0, max(1, n_m - h + 1)))
+                X_aug[i, f0:f0 + h, :, :] = 0.0
+            changed += 1
+        return X_aug.astype(np.float32), changed
+
+    X_train_fit, aug_changed = _apply_training_augmentation(
+        X_train, aug_prob, aug_noise_std, aug_time_mask, aug_freq_mask, seed=42
+    )
+    print(f"AUG_APPLIED: changed={{aug_changed}}/{{len(X_train)}}")
  
     model = build_model(X_train.shape[1:], len(species_cols))
     model.compile(optimizer=_opt, loss="binary_crossentropy")
@@ -972,7 +1021,7 @@ def main():
     else:
         print("PHASE3_DEBUG: checkpoint_enabled=False")
     history = model.fit(
-        X_train, y_train,
+        X_train_fit, y_train,
         epochs=epochs,
         batch_size=min(batch_size, len(X_train)),
         verbose=1,
@@ -1048,6 +1097,10 @@ def generate_slot_code(params):
         "weight_decay": {d.get("weight_decay", 0.0)},
         "classifier_hidden_units": {d.get("classifier_hidden_units", 0)},
         "pooling_type": "{d.get("pooling_type", "global_avg")}",
+        "aug_prob": {d.get("aug_prob", 0.0)},
+        "aug_noise_std": {d.get("aug_noise_std", 0.0)},
+        "aug_time_mask": {d.get("aug_time_mask", 0)},
+        "aug_freq_mask": {d.get("aug_freq_mask", 0)},
     }}
  
  
@@ -1111,6 +1164,10 @@ def describe_params(params):
         f"mels={params.get('n_mels','?')}",
         f"frames={params.get('n_frames','?')}",
         f"bs={params.get('batch_size','?')}",
+        f"aug_p={params.get('aug_prob', 0.0)}",
+        f"aug_n={params.get('aug_noise_std', 0.0)}",
+        f"aug_tm={params.get('aug_time_mask', 0)}",
+        f"aug_fm={params.get('aug_freq_mask', 0)}",
     ]
     return " | ".join(parts)
  
@@ -1154,6 +1211,41 @@ def _load_saved_search_state(logs_dir):
 
 def _fmt_score(v):
     return f"{v:.6f}" if isinstance(v, (int, float)) else "N/A"
+
+
+def _coverage_adjusted_score_agent(macro_auc: float, scored_columns: int, total_classes: int = 234) -> float:
+    denom = max(int(total_classes), 1)
+    coverage = max(0.0, min(1.0, float(scored_columns) / float(denom)))
+    return float(macro_auc) * coverage
+
+
+def _phase1_selection_score(macro_auc: float | None, num_scored: int | None, total: int = 234) -> float:
+    if macro_auc is None:
+        return -1.0
+    if num_scored is None:
+        return float(macro_auc)
+    return _coverage_adjusted_score_agent(float(macro_auc), int(num_scored), total_classes=total)
+
+
+def _best_params_from_transfer_slot(slot_code: str) -> dict:
+    ns: dict = {}
+    exec(slot_code, ns)
+    tc = ns.get("get_training_config", lambda: {})() or {}
+    bp = dict(DEFAULT_PARAMS)
+    if isinstance(tc, dict):
+        for k in (
+            "n_mels",
+            "n_frames",
+            "batch_size",
+            "learning_rate",
+            "optimizer",
+            "weight_decay",
+            "val_split",
+        ):
+            if k in tc:
+                bp[k] = tc[k]
+    return bp
+
 
 def _final_config_override_block(base_cfg):
     safe_cfg = dict(base_cfg)
@@ -1530,6 +1622,10 @@ def _sample_random_params(rng):
         "batch_size": 32,
         "n_mels": 64,
         "n_frames": 128,
+        "aug_prob": 0.0,
+        "aug_noise_std": 0.0,
+        "aug_time_mask": 0,
+        "aug_freq_mask": 0,
     }
 
 def _tweak_params(base, rng):
@@ -1549,6 +1645,24 @@ def _tweak_params(base, rng):
             p["classifier_hidden_units"] = int(rng.choice([0, 128, 256, 512]))
         elif d == "residuals":
             p["residuals"] = bool(rng.choice([True, False]))
+    return p
+
+def _tweak_augmentation_params(base, rng):
+    p = dict(base)
+    dims = rng.choice(
+        ["aug_prob", "aug_noise_std", "aug_time_mask", "aug_freq_mask"],
+        size=int(rng.choice([1, 2])),
+        replace=False,
+    )
+    for d in dims:
+        if d == "aug_prob":
+            p["aug_prob"] = float(rng.choice([0.0, 0.25, 0.5, 0.75, 1.0]))
+        elif d == "aug_noise_std":
+            p["aug_noise_std"] = float(rng.choice([0.0, 0.003, 0.007, 0.015]))
+        elif d == "aug_time_mask":
+            p["aug_time_mask"] = int(rng.choice([0, 8, 16, 24]))
+        elif d == "aug_freq_mask":
+            p["aug_freq_mask"] = int(rng.choice([0, 4, 8, 12]))
     return p
  
 def _analyze_random_results(results, llm, temperature):
@@ -1842,6 +1956,9 @@ def _run_medium_stage(previous_results, executor, evaluator, llm, temperature, d
             "search_type": "medium_promoted",
             "params": {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
             "macro_roc_auc": auc,
+            "num_scored_columns": int(metrics["num_scored_columns"])
+            if metrics and metrics.get("status") == "success" and metrics.get("num_scored_columns") is not None
+            else None,
             "success": auc is not None,
             "attempts": att,
             "best_epoch": metrics.get("best_epoch") if metrics else None,
@@ -1892,6 +2009,9 @@ def _run_medium_stage(previous_results, executor, evaluator, llm, temperature, d
             "search_type": "medium_llm",
             "params": {k: v for k, v in seed_p.items() if k not in ("max_samples", "epochs")},
             "macro_roc_auc": auc,
+            "num_scored_columns": int(metrics["num_scored_columns"])
+            if metrics and metrics.get("status") == "success" and metrics.get("num_scored_columns") is not None
+            else None,
             "success": success,
             "counts_toward_budget": success,
             "attempts": att,
@@ -1974,6 +2094,9 @@ def _run_reality_check_gate(candidates, executor, evaluator, dirs, search_cfg):
             "search_type": "reality_gate",
             "params": c.get("params"),
             "macro_roc_auc": auc,
+            "num_scored_columns": int(metrics["num_scored_columns"])
+            if metrics and metrics.get("status") == "success" and metrics.get("num_scored_columns") is not None
+            else None,
             "success": auc is not None,
             "attempts": att,
             "best_epoch": metrics.get("best_epoch") if metrics else None,
@@ -2005,6 +2128,7 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
     explore_count = int(phase2_cfg.get("random_experiments", budget))
     focused_count = int(phase2_cfg.get("focused_experiments", 50))
     tweak_count = int(phase2_cfg.get("tweak_experiments", 50))
+    aug_tweak_count = int(phase2_cfg.get("augmentation_tweak_experiments", 5))
     ai_free_count = int(phase2_cfg.get("ai_free_experiments", 50))
     final_tweak_count = int(phase2_cfg.get("final_tweak_experiments", 15))
     top_keep = int(phase2_cfg.get("top_results_keep", 4))
@@ -2028,6 +2152,31 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
                  "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
                  "best_epoch": metrics.get("best_epoch") if metrics else None,
                  "description": describe_params(p), "slot_code": slot}
+        all_results.append(entry)
+        if entry["success"]:
+            current_best_slot = slot
+        print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+    _save_phase2_results(dirs["logs"], all_results, top_keep)
+
+    # Sub-phase C-aug: augmentation tweaks of top configs
+    print(f"\n  ── C-aug: {aug_tweak_count} augmentation tweaks of top configs ──")
+    for i in range(aug_tweak_count):
+        ok = _best_parametric_successful(all_results, 5)
+        if not ok:
+            break
+        rc += 1
+        p = _tweak_augmentation_params(ok[i % len(ok)]["params"], rng)
+        p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
+        slot = generate_slot_code(p)
+        rid = f"R{rc:03d}_tweak_aug"
+        slot, metrics, result, att = run_experiment_until_success(
+            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
+        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
+        entry = {"run_id": rid, "search_type": "tweak_aug",
+            "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
+            "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
+            "best_epoch": metrics.get("best_epoch") if metrics else None,
+            "description": describe_params(p), "slot_code": slot}
         all_results.append(entry)
         if entry["success"]:
             current_best_slot = slot
@@ -2286,7 +2435,20 @@ def _final_execution_timeout_seconds(config: dict) -> int | None:
     return ex["final_timeout_seconds"]
 
 
-def _run_final_training(best_params, executor, evaluator, llm, temperature, project_root, dirs, search_cfg, best_slot_code=None, best_epoch_override=None):
+def _run_final_training(
+    best_params,
+    executor,
+    evaluator,
+    llm,
+    temperature,
+    project_root,
+    dirs,
+    search_cfg,
+    best_slot_code=None,
+    best_epoch_override=None,
+    forced_final_epochs=None,
+    notebook_kind: str = "cnn",
+):
     print("\n" + "=" * 60)
     print("  PHASE 3: FINAL TRAINING")
     print("=" * 60)
@@ -2297,7 +2459,12 @@ def _run_final_training(best_params, executor, evaluator, llm, temperature, proj
  
     fp = dict(best_params)
     fp["max_samples"] = search_cfg["final"].get("max_samples")
-    fp["epochs"] = int(best_epoch_override) if best_epoch_override is not None else int(search_cfg["final"]["epochs"])
+    if forced_final_epochs is not None:
+        fp["epochs"] = int(forced_final_epochs)
+    elif best_epoch_override is not None:
+        fp["epochs"] = int(best_epoch_override)
+    else:
+        fp["epochs"] = int(search_cfg["final"]["epochs"])
     fp["val_split"] = 0.0
  
     if best_slot_code:
@@ -2352,7 +2519,10 @@ def _run_final_training(best_params, executor, evaluator, llm, temperature, proj
         if Path(model_path).exists():
             print(f"  Model: {model_path} ({Path(model_path).stat().st_size/1024/1024:.1f} MB)")
         nb_path = sub_dir / "kaggle_inference.ipynb"
-        _generate_kaggle_notebook(best_params, nb_path)
+        if notebook_kind == "transfer" and best_slot_code:
+            _agent_transfer._generate_kaggle_notebook(best_slot_code, nb_path)
+        else:
+            _generate_kaggle_notebook(best_params, nb_path)
         print(f"  Kaggle notebook: {nb_path}")
         _save_json(best_params, sub_dir / "best_params.json")
         print(f"\n  submission/ contents:")
@@ -2365,7 +2535,10 @@ def _run_final_training(best_params, executor, evaluator, llm, temperature, proj
         if metrics and metrics.get("status") == "success":
             print(f"  Fixed after {att} attempts. AUC={metrics['macro_roc_auc']:.6f}")
             (sub_dir / "best_model_code.py").write_text(slot_code, encoding="utf-8")
-            _generate_kaggle_notebook(best_params, sub_dir / "kaggle_inference.ipynb")
+            if notebook_kind == "transfer" and slot_code:
+                _agent_transfer._generate_kaggle_notebook(slot_code, sub_dir / "kaggle_inference.ipynb")
+            else:
+                _generate_kaggle_notebook(best_params, sub_dir / "kaggle_inference.ipynb")
  
  
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2479,6 +2652,7 @@ def agent_loop(config):
     p2.setdefault("random_experiments", 50)
     p2.setdefault("focused_experiments", 50)
     p2.setdefault("tweak_experiments", 50)
+    p2.setdefault("augmentation_tweak_experiments", 5)
     p2.setdefault("ai_free_experiments", 50)
     p2.setdefault("final_tweak_experiments", 15)
     p2.setdefault("top_results_keep", 4)
@@ -2496,7 +2670,13 @@ def agent_loop(config):
     rg.setdefault("val_split", sc["medium"].get("val_split", 0.2))
     rg.setdefault("split_mode", "group_holdout")
     sc.setdefault("random_seed", config.get("random_seed", 42))
- 
+    cnn_expl = sc.setdefault("cnn_exploration", {})
+    cnn_expl.setdefault("enabled", True)
+    tex = sc.setdefault("transfer_exploration", {})
+    tex.setdefault("enabled", True)
+    tex.setdefault("max_iterations", 10)
+    tex.setdefault("interactive_pick_final", False)
+
     llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
     py_exe = config["execution"]["python_executable"]
     search_timeout = config["execution"].get("timeout_seconds", 1800)
@@ -2518,6 +2698,7 @@ def agent_loop(config):
         f"A={p2['random_experiments']} random, "
         f"B={p2['focused_experiments']} focused, "
         f"C={p2['tweak_experiments']} tweaks, "
+        f"C-aug={p2['augmentation_tweak_experiments']} aug-tweaks, "
         f"D={p2['ai_free_experiments']} ai-free, "
         f"C-final={p2['final_tweak_experiments']} tweaks"
     )
@@ -2532,6 +2713,8 @@ def agent_loop(config):
         f"samples={rg['max_samples']} epochs={rg['epochs']} split={rg['split_mode']}"
     )
     print(f"  Final:   {'ALL' if sc['final']['max_samples'] is None else sc['final']['max_samples']} samples, {sc['final']['epochs']} epochs")
+    print(f"  CNN exploration: enabled={cnn_expl.get('enabled', True)}")
+    print(f"  Transfer exploration: enabled={tex.get('enabled', True)} iters={tex.get('max_iterations', 10)}")
     ft = _final_execution_timeout_seconds(config)
     print(f"  Final subprocess timeout: {'unlimited' if ft is None else f'{ft}s'}")
     print("=" * 60)
@@ -2545,6 +2728,12 @@ def agent_loop(config):
         lin_results, lin_best, rnd_results, best_rnd = _load_saved_search_state(dirs["logs"])
         print(f"  Loaded {len(lin_results)} linear results from {dirs['logs'] / 'linear.json'}")
         print(f"  Loaded {len(rnd_results)} phase-2 results from {dirs['logs'] / 'random_results.json'}")
+    elif not cnn_expl.get("enabled", True):
+        print("\n" + "=" * 60)
+        print("  CNN EXPLORATION DISABLED — skipping baseline → random → medium pipeline")
+        print("=" * 60)
+        lin_results, lin_best = [], dict(DEFAULT_PARAMS)
+        rnd_results, best_rnd = [], None
     else:
         baseline_slot, _ = _run_baseline(executor_search, evaluator, llm, temp, dirs, sc)
         lin_results, lin_best = _run_linear_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc)
@@ -2556,14 +2745,22 @@ def agent_loop(config):
     best_lin_auc = max((r["macro_roc_auc"] for r in lin_ok), default=0.0)
     best_rnd_auc = best_rnd["macro_roc_auc"] if best_rnd else 0.0
  
-    pre_medium_results = lin_results + rnd_results
-    med_results, best_med = _run_medium_stage(pre_medium_results, executor_search, evaluator, llm, temp, dirs, sc)
-    _maybe_generate_insights(config, llm, med_results, "medium", dirs, temp)
-    best_med_auc = best_med["macro_roc_auc"] if best_med else 0.0
+    med_results, best_med = [], None
+    gate_results, best_gate = [], None
+    best_med_auc, best_gate_auc = 0.0, 0.0
+    if cnn_expl.get("enabled", True) and ms.get("enabled", True):
+        pre_medium_results = lin_results + rnd_results
+        med_results, best_med = _run_medium_stage(pre_medium_results, executor_search, evaluator, llm, temp, dirs, sc)
+        _maybe_generate_insights(config, llm, med_results, "medium", dirs, temp)
+        best_med_auc = best_med["macro_roc_auc"] if best_med else 0.0
 
-    gate_pool = _best_successful(med_results, len(med_results))
-    gate_results, best_gate = _run_reality_check_gate(gate_pool, executor_search, evaluator, dirs, sc)
-    best_gate_auc = best_gate["macro_roc_auc"] if best_gate else 0.0
+        gate_pool = _best_successful(med_results, len(med_results))
+        gate_results, best_gate = _run_reality_check_gate(gate_pool, executor_search, evaluator, dirs, sc)
+        best_gate_auc = best_gate["macro_roc_auc"] if best_gate else 0.0
+    elif not cnn_expl.get("enabled", True):
+        print("\n  Medium/gate skipped (CNN exploration disabled).")
+    else:
+        print("\n  Medium stage disabled by config (search.medium_stage.enabled=false).")
  
     print("\n" + "=" * 60)
     print("  COMPARISON: LINEAR vs RANDOM vs MEDIUM (+ GATE)")
@@ -2573,46 +2770,162 @@ def agent_loop(config):
     print(f"  Medium: AUC={_fmt_score(best_med_auc)} | {best_med['description'] if best_med else 'N/A'}")
     print(f"  Gate:   AUC={_fmt_score(best_gate_auc)} | {best_gate['description'] if best_gate else 'N/A'}")
 
-    if best_gate:
-        winner, winner_auc = "gate", best_gate_auc
-        best_params = best_gate["params"]
-        best_slot_code = best_gate.get("slot_code")
-        winner_best_epoch = best_gate.get("best_epoch")
-        print("  Selection policy: gate winner (primary).")
-    elif best_med:
-        winner, winner_auc = "medium_fallback", best_med_auc
-        best_params = best_med["params"]
-        best_slot_code = best_med.get("slot_code")
-        winner_best_epoch = best_med.get("best_epoch")
-        print("  Selection policy: medium fallback (gate had no successful run).")
+    winner = "cnn_disabled"
+    winner_auc: float | None = None
+    best_params = dict(DEFAULT_PARAMS)
+    best_slot_code = None
+    winner_best_epoch = None
+    phase1_num_scored = None
+
+    if cnn_expl.get("enabled", True):
+        if best_gate:
+            winner, winner_auc = "gate", best_gate_auc
+            best_params = best_gate["params"]
+            best_slot_code = best_gate.get("slot_code")
+            winner_best_epoch = best_gate.get("best_epoch")
+            phase1_num_scored = best_gate.get("num_scored_columns")
+            print("  Selection policy: gate winner (primary).")
+        elif best_med:
+            winner, winner_auc = "medium_fallback", best_med_auc
+            best_params = best_med["params"]
+            best_slot_code = best_med.get("slot_code")
+            winner_best_epoch = best_med.get("best_epoch")
+            phase1_num_scored = best_med.get("num_scored_columns")
+            print("  Selection policy: medium fallback (gate had no successful run).")
+        else:
+            candidates = [
+                (
+                    "linear_fallback",
+                    best_lin_auc,
+                    lin_best,
+                    generate_slot_code(
+                        {
+                            **lin_best,
+                            "max_samples": sc["cheap"]["max_samples"],
+                            "epochs": sc["cheap"]["epochs"],
+                            "val_split": sc["cheap"].get("val_split", 0.2),
+                        }
+                    ),
+                    None,
+                )
+            ]
+            if best_rnd:
+                candidates.append(
+                    ("random_fallback", best_rnd_auc, best_rnd["params"], best_rnd.get("slot_code"), best_rnd.get("best_epoch"))
+                )
+            winner, winner_auc, best_params, best_slot_code, winner_best_epoch = max(candidates, key=lambda x: x[1])
+            phase1_num_scored = None
+            print("  Selection policy: emergency fallback (no gate/medium success).")
+        print(f"\n  ★ CNN PHASE WINNER: {winner} (AUC={winner_auc:.6f})")
     else:
-        candidates = [("linear_fallback", best_lin_auc, lin_best, generate_slot_code({**lin_best, "max_samples": sc["cheap"]["max_samples"], "epochs": sc["cheap"]["epochs"], "val_split": sc["cheap"].get("val_split", 0.2)}), None)]
-        if best_rnd:
-            candidates.append(("random_fallback", best_rnd_auc, best_rnd["params"], best_rnd.get("slot_code"), best_rnd.get("best_epoch")))
-        winner, winner_auc, best_params, best_slot_code, winner_best_epoch = max(candidates, key=lambda x: x[1])
-        print("  Selection policy: emergency fallback (no gate/medium success).")
-    print(f"\n  ★ WINNER: {winner} (AUC={winner_auc:.6f})")
- 
-    _save_json({"best_linear_auc": best_lin_auc, "best_linear_params": lin_best,
-                "best_random_auc": best_rnd_auc,
-                "best_random_params": best_rnd["params"] if best_rnd else None,
-                "best_medium_auc": best_med_auc,
-                "best_medium_params": best_med["params"] if best_med else None,
-                "best_gate_auc": best_gate_auc,
-                "best_gate_params": best_gate["params"] if best_gate else None,
-                "winner": winner, "winner_best_epoch": winner_best_epoch,
-                "final_params": best_params, "winner_slot_code_path": str(logs / "winner_slot_code.py")},
-               logs / "search_comparison.json")
+        print("\n  ★ CNN PHASE SKIPPED (no Phase-1 winner).")
+
+    phase1_score = _phase1_selection_score(winner_auc, phase1_num_scored)
+    print(f"  Phase-1 selection score (coverage-adjusted when scored cols known): {phase1_score:.6f}")
+
+    transfer_pack = None
+    transfer_slot = None
+    transfer_eff_score = -1.0
+    if tex.get("enabled", True):
+        print("\n" + "=" * 60)
+        print("  TRANSFER EXPLORATION (pretrained / ImageNet backbones)")
+        print("=" * 60)
+        transfer_pack = _agent_transfer.run_transfer_exploration_phase(
+            config,
+            logs_dir=logs,
+            eval_dir=dirs["eval"],
+            llm=llm,
+            executor=executor_search,
+            evaluator=evaluator,
+            interactive_pick_final=bool(tex.get("interactive_pick_final", False)),
+        )
+        transfer_slot = transfer_pack.get("effective_slot_code")
+        transfer_eff_score = float(transfer_pack.get("transfer_effective_score", -1.0))
+        print(f"  Transfer best adjusted score: {transfer_eff_score:.6f}")
+
+    global_winner = "cnn"
+    notebook_kind = "cnn"
+    forced_fe = None
+    if transfer_pack and transfer_slot is not None and transfer_eff_score > phase1_score:
+        global_winner = "transfer"
+        notebook_kind = "transfer"
+        best_slot_code = transfer_slot
+        best_params = _best_params_from_transfer_slot(transfer_slot)
+        winner_best_epoch = None
+        tfo = config.get("transfer", {}).get("final_epochs_override")
+        if tfo is not None:
+            forced_fe = int(tfo)
+        print(f"\n  ★ GLOBAL WINNER: transfer exploration (adj_score={transfer_eff_score:.6f} > phase1={phase1_score:.6f})")
+    elif phase1_score >= 0 or (
+        cnn_expl.get("enabled", True)
+        and (best_lin_auc > 0 or best_rnd_auc > 0 or best_med_auc > 0 or best_gate_auc > 0)
+    ):
+        print(f"\n  ★ GLOBAL WINNER: CNN pipeline ({winner}) adj_compare phase1={phase1_score:.6f}")
+    elif transfer_pack and transfer_slot is not None:
+        global_winner = "transfer"
+        notebook_kind = "transfer"
+        best_slot_code = transfer_slot
+        best_params = _best_params_from_transfer_slot(transfer_slot)
+        winner_best_epoch = None
+        tfo = config.get("transfer", {}).get("final_epochs_override")
+        if tfo is not None:
+            forced_fe = int(tfo)
+        print("\n  ★ GLOBAL WINNER: transfer exploration (CNN pipeline had no comparable score)")
+    else:
+        global_winner = "none"
+
+    _save_json(
+        {
+            "best_linear_auc": best_lin_auc,
+            "best_linear_params": lin_best,
+            "best_random_auc": best_rnd_auc,
+            "best_random_params": best_rnd["params"] if best_rnd else None,
+            "best_medium_auc": best_med_auc,
+            "best_medium_params": best_med["params"] if best_med else None,
+            "best_gate_auc": best_gate_auc,
+            "best_gate_params": best_gate["params"] if best_gate else None,
+            "cnn_exploration_enabled": cnn_expl.get("enabled", True),
+            "phase1_winner": winner,
+            "phase1_winner_auc": winner_auc,
+            "phase1_selection_score": phase1_score,
+            "transfer_exploration_enabled": tex.get("enabled", True),
+            "transfer_adjusted_score": transfer_eff_score if transfer_pack else None,
+            "global_winner": global_winner,
+            "winner_best_epoch": winner_best_epoch,
+            "final_params": best_params,
+            "winner_slot_code_path": str(logs / "winner_slot_code.py"),
+        },
+        logs / "search_comparison.json",
+    )
     if best_slot_code:
         (logs / "winner_slot_code.py").write_text(best_slot_code, encoding="utf-8")
- 
+
     total = len(lin_results) + len(rnd_results) + len(med_results) + len(gate_results) + 1
+    if transfer_pack:
+        total += len(transfer_pack.get("metrics_history", []))
     print(f"\n  Total: {total} experiments in {(time.time()-t0)/60:.1f} min")
- 
-    if best_lin_auc > 0 or best_rnd_auc > 0 or best_med_auc > 0 or best_gate_auc > 0:
+
+    ran_anything = (
+        best_lin_auc > 0
+        or best_rnd_auc > 0
+        or best_med_auc > 0
+        or best_gate_auc > 0
+        or (transfer_pack and transfer_pack.get("effective_slot_code") is not None)
+    )
+    if ran_anything and best_slot_code:
         _run_final_training(
-            best_params, executor_final, evaluator, llm, temp, root, dirs, sc,
-            best_slot_code=best_slot_code, best_epoch_override=winner_best_epoch
+            best_params,
+            executor_final,
+            evaluator,
+            llm,
+            temp,
+            root,
+            dirs,
+            sc,
+            best_slot_code=best_slot_code,
+            best_epoch_override=winner_best_epoch,
+            forced_final_epochs=forced_fe,
+            notebook_kind=notebook_kind,
         )
     else:
         print("\n  No successful experiments — skipping final training.")
