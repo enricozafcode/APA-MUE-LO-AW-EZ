@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Run final training from archived sub_4 model code with two augmentation variants:
-  - submission_01: B (time/freq mask + mild noise + small time shift)
-  - submission_02: C (B + mixup alpha=0.25)
+Run final training from archived sub_4 model code for the v1.4 setup only.
+
+Strategy:
+  - online augmentation B (time/freq mask + mild noise + small time shift)
+  - no mixup
+  - include secondary_labels as additional positive targets (multi-hot labels)
 
 Outputs:
   submission/submission_01/
@@ -11,8 +14,6 @@ Outputs:
     - best_model_code.py
     - best_params.json
     - train.log
-  submission/submission_02/
-    - same artifacts
 """
 
 from __future__ import annotations
@@ -132,8 +133,28 @@ def _inject_online_augmentation_into_script(script: str) -> str:
     return script.replace(anchor, replacement, 1)
 
 
+def _inject_secondary_labels_into_script(script: str) -> str:
+    anchor = "yv[sp2i[label]] = 1.0"
+    if anchor not in script:
+        return script
+    replacement = """yv[sp2i[label]] = 1.0
+        # Add co-occurring species as additional positives when available.
+        sec_label_weight = float(cfg.get("secondary_label_weight", 1.0))
+        try:
+            import ast as _ast
+            sec = getattr(row, "secondary_labels", "[]")
+            sec_list = _ast.literal_eval(str(sec)) if isinstance(sec, str) else []
+            for sl in sec_list:
+                sl = str(sl).strip()
+                if sl and sl in sp2i:
+                    yv[sp2i[sl]] = max(yv[sp2i[sl]], sec_label_weight)
+        except Exception:
+            pass"""
+    return script.replace(anchor, replacement, 1)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train sub_4 model with augmentation variants B and C.")
+    parser = argparse.ArgumentParser(description="Train sub_4 model with v1.4 augmentation + secondary labels.")
     parser.add_argument(
         "--root",
         type=Path,
@@ -193,11 +214,12 @@ def main() -> None:
     evaluator = Evaluator(row_id_column_name="row_id")
 
     variants = [
-        ("submission_01", 0.0),   # B: no mixup
-        ("submission_02", 0.25),  # C: B + mixup
+        ("submission_01_sec_label_1_0", 1.0, "full secondary labels"),
+        ("submission_02_sec_label_weighted_0_5", 0.5, "weighted secondary labels"),
     ]
 
-    for folder_name, mixup_alpha in variants:
+    for folder_name, secondary_weight, variant_label in variants:
+        mixup_alpha = 0.0
         out_dir = root / "submission" / folder_name
         out_dir.mkdir(parents=True, exist_ok=True)
         model_path = out_dir / "model.keras"
@@ -223,12 +245,14 @@ def main() -> None:
             "aug_time_mask_max_fraction": 0.08,
             "aug_freq_mask_max_fraction": 0.08,
             "mixup_alpha": float(mixup_alpha),
+            "secondary_label_weight": float(secondary_weight),
         }
 
         slot_code = "\n\n".join(
             [slot_base.strip(), _base_build_features_code(), _final_config_override_block(override_cfg)]
         )
         script = assemble_script(slot_code, is_final=True, model_save_path=str(model_path))
+        script = _inject_secondary_labels_into_script(script)
         script = _inject_online_augmentation_into_script(script)
         run_id = f"final_aug_{folder_name}"
         script = _append_eval_wrapper(script, run_id, eval_dir)
@@ -239,7 +263,7 @@ def main() -> None:
         (out_dir / "best_params.json").write_text(json.dumps(override_cfg, indent=2), encoding="utf-8")
 
         print("=" * 60)
-        print(f"Running {folder_name} (mixup_alpha={mixup_alpha})")
+        print(f"Running {folder_name} ({variant_label}, weight={secondary_weight})")
         print("=" * 60)
         result = executor.run_file(script_path)
         (out_dir / "train.log").write_text((result.stdout or "") + "\n\n" + (result.stderr or ""), encoding="utf-8")
