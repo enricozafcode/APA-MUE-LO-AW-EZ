@@ -1,0 +1,22 @@
+{
+  "max_samples": null,
+  "sample_rate": 32000,
+  "clip_seconds": 5.0,
+  "n_mels": 64,
+  "n_frames": 128,
+  "epochs": 15,
+  "batch_size": 32,
+  "learning_rate": 0.00017776545083782858,
+  "optimizer": "adam",
+  "val_split": 0.0,
+  "weight_decay": 1.0645987236440721e-05,
+  "classifier_hidden_units": 0,
+  "pooling_type": "global_avg",
+  "use_best_checkpoint": true,
+  "aug_probability": 0.6,
+  "aug_noise_std": 0.015,
+  "aug_time_shift_max_fraction": 0.1,
+  "aug_time_mask_max_fraction": 0.08,
+  "aug_freq_mask_max_fraction": 0.08,
+  "mixup_alpha": 0.0
+}

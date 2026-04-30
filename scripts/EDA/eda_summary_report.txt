@@ -1,0 +1,38 @@
+======================================================================
+BirdCLEF 2026 - EDA REPORT
+Focus: Taxonomy & Sample Submission Analysis
+======================================================================
+
+DATASET OVERVIEW
+----------------------------------------------------------------------
+Taxonomy entries:                 234
+Biological classes:                 5
+Submission test segments:           3
+Target prediction classes:        234
+
+CLASS DISTRIBUTION
+----------------------------------------------------------------------
+Aves            : 162 species ( 69.2%)
+Amphibia        :  35 species ( 15.0%)
+Insecta         :  28 species ( 12.0%)
+Mammalia        :   8 species (  3.4%)
+Reptilia        :   1 species (  0.4%)
+
+CLASS IMBALANCE METRICS
+----------------------------------------------------------------------
+Most represented:  Aves (162 species)
+Least represented: Reptilia (1 species)
+Imbalance ratio:   162.0:1
+
+ALIGNMENT CHECK
+----------------------------------------------------------------------
+Taxonomy species:        234
+Submission species:      234
+Species in both:         234
+Missing from submission: 0
+Extra in submission:     0
+Perfect match: YES
+
+======================================================================
+END OF REPORT
+======================================================================

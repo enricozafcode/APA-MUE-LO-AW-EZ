@@ -1,0 +1,8 @@
+{
+  "status": "success",
+  "macro_roc_auc": 0.9858787263382413,
+  "error_metric": 0.014121273661758749,
+  "num_scored_columns": 206,
+  "num_classes": 234,
+  "num_samples": 35549
+}

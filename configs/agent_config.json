@@ -1,23 +1,65 @@
 {
   "project_name": "apa-birdclef-autonomous-agent",
   "track": "birdclef",
-  "llm_script_mode": "slots",
-  "max_iterations": 10,
-  "max_failures_before_stop": 3,
-  "time_budget_minutes": 180,
   "random_seed": 42,
   "llm": {
-    "provider": "ollama", 
+    "provider": "ollama",
     "model": "gemma4",
     "temperature": 0.2
   },
   "execution": {
     "timeout_seconds": 1800,
+    "final_timeout_seconds": null,
     "python_executable": "python3"
+  },
+  "search": {
+    "cheap": {
+      "max_samples": 2000,
+      "epochs": 3,
+      "val_split": 0.2
+    },
+    "medium": {
+      "max_samples": 10000,
+      "epochs": 15,
+      "val_split": 0.2
+    },
+    "final": {
+      "max_samples": null,
+      "epochs": 15,
+      "val_split": 0.1
+    },
+    "linear_budget": 0,
+    "random_budget": 50,
+    "phase2": {
+      "random_experiments": 10,
+      "focused_experiments": 10,
+      "tweak_experiments": 10,
+      "ai_free_experiments": 10,
+      "final_tweak_experiments": 10,
+      "top_results_keep": 2
+    },
+    "medium_stage": {
+      "enabled": true,
+      "total_runs": 4,
+      "promoted_runs": 4,
+      "max_attempts_per_model": 1,
+      "resume_from_saved_phase2": false
+    },
+    "reality_gate": {
+      "enabled": true,
+      "use_all_candidates": true,
+      "top_k": 5,
+      "max_samples": 10000,
+      "epochs": 15,
+      "val_split": 0.2,
+      "split_mode": "group_holdout"
+    },
+    "random_seed": 42
   },
   "logging": {
     "log_dir": "logs",
     "save_generated_code": true,
-    "save_metrics_json": true
+    "save_metrics_json": true,
+    "generate_insights": false
   }
 }
