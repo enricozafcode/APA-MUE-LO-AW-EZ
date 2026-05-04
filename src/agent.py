@@ -75,7 +75,7 @@ def _make_harness_suffix(*, is_final: bool = False, model_save_path: str = "") -
     if is_final:
         max_line = '    max_samples = None  # FINAL RUN: use ALL data'
         save_block = (
-            f'\n    _mp = Path("{model_save_path}")\n'
+            f'\n    _mp = Path({repr(str(model_save_path))})\n'
             '    _mp.parent.mkdir(parents=True, exist_ok=True)\n'
             '    model.save(_mp)\n'
             '    print(f"MODEL_SAVED: {_mp}")\n'
@@ -223,20 +223,39 @@ SYSTEM_PROMPT = (
     "- build_model must return a COMPILED Keras model\n"
     "- Last layer must be Dense(num_classes, activation='sigmoid')\n"
     "- Loss must be 'binary_crossentropy'\n"
-    "- input_shape is (n_mels, n_frames, 1) — a mel spectrogram image\n"
+    "- input_shape is passed as a parameter. ALWAYS use it as-is. NEVER hardcode any input shape.\n"
+    "- Default input_shape is (64, 128, 1): 64 mel bins, 128 time frames, 1 channel\n"
     "- num_classes is 234 (one per bird species)\n\n"
+    "CNN EXAMPLE (correct pattern):\n"
+    "    def build_model(input_shape, num_classes):\n"
+    "        import tensorflow as tf\n"
+    "        inputs = tf.keras.Input(shape=input_shape)\n"
+    "        x = tf.keras.layers.Conv2D(32, 3, activation='relu', padding='same')(inputs)\n"
+    "        x = tf.keras.layers.GlobalAveragePooling2D()(x)\n"
+    "        x = tf.keras.layers.Dropout(0.3)(x)\n"
+    "        out = tf.keras.layers.Dense(num_classes, activation='sigmoid')(x)\n"
+    "        model = tf.keras.Model(inputs, out)\n"
+    "        model.compile(optimizer='adam', loss='binary_crossentropy')\n"
+    "        return model\n\n"
     "TRANSFER LEARNING:\n"
-    "- You may use MobileNetV2 as a pretrained backbone instead of a custom CNN\n"
     "- Only switch to pretrained when explicitly told CNN results are stagnating\n"
-    "- For the first pretrained run: freeze the backbone (base_model.trainable = False), train only the head\n"
-    "- Only unfreeze (base_model.trainable = True) if a frozen pretrained run already improved results\n"
-    "- Spectrograms are 1-channel: resize to (96, 96) and repeat to 3 channels before passing to MobileNetV2\n"
-    "- Example pretrained build_model:\n"
-    "    base = tf.keras.applications.MobileNetV2(input_shape=(96,96,3), include_top=False, weights='imagenet')\n"
-    "    base.trainable = False\n"
-    "    x = tf.keras.layers.GlobalAveragePooling2D()(base.output)\n"
-    "    out = tf.keras.layers.Dense(num_classes, activation='sigmoid')(x)\n"
-    "    return tf.keras.Model(inputs=base.input, outputs=out)\n\n"
+    "- For the first pretrained run: freeze the backbone (base.trainable = False)\n"
+    "- Only unfreeze if a frozen pretrained run already improved results\n"
+    "- You MUST resize and repeat channels INSIDE build_model using Keras layers\n"
+    "- PRETRAINED EXAMPLE (complete, use exactly this pattern):\n"
+    "    def build_model(input_shape, num_classes):\n"
+    "        import tensorflow as tf\n"
+    "        inputs = tf.keras.Input(shape=input_shape)\n"
+    "        x = tf.keras.layers.Resizing(96, 96)(inputs)\n"
+    "        x = tf.keras.layers.Lambda(lambda t: tf.repeat(t, 3, axis=-1))(x)\n"
+    "        base = tf.keras.applications.MobileNetV2(input_shape=(96,96,3), include_top=False, weights='imagenet')\n"
+    "        base.trainable = False\n"
+    "        x = base(x)\n"
+    "        x = tf.keras.layers.GlobalAveragePooling2D()(x)\n"
+    "        out = tf.keras.layers.Dense(num_classes, activation='sigmoid')(x)\n"
+    "        model = tf.keras.Model(inputs=inputs, outputs=out)\n"
+    "        model.compile(optimizer='adam', loss='binary_crossentropy')\n"
+    "        return model\n\n"
     "EXPERIMENT_META must be a dict with these keys:\n"
     "    model_type: 'cnn' | 'pretrained'\n"
     "    architecture: short description, e.g. '3x Conv2D + GAP' or 'MobileNetV2 frozen'\n"
@@ -368,9 +387,9 @@ _yt = _np.asarray(y_train)
 _yp = _np.asarray(model.predict(X_train, verbose=0))
 if _yt.shape != _yp.shape:
     raise RuntimeError(f"Shape mismatch: y_train={{_yt.shape}} vs y_pred={{_yp.shape}}")
-_np.save("{yt}", _yt)
-_np.save("{yp}", _yp)
-print(f"EVAL_ARTIFACTS_SAVED y_true={yt} y_pred={yp}")
+_np.save({repr(str(yt))}, _yt)
+_np.save({repr(str(yp))}, _yp)
+print("EVAL_ARTIFACTS_SAVED y_true=" + {repr(str(yt))} + " y_pred=" + {repr(str(yp))})
 '''
 
 
@@ -620,8 +639,12 @@ def agent_loop(config):
             yt = eval_dir / f"y_true_iter_{it}.npy"
             yp = eval_dir / f"y_pred_iter_{it}.npy"
             if yt.exists() and yp.exists():
-                ev = evaluator.evaluate_from_files(yt, yp)
-                em = ev.metrics
+                try:
+                    ev = evaluator.evaluate_from_files(yt, yp)
+                    em = ev.metrics
+                except Exception as eval_err:
+                    print(f"  Evaluation error (skipping): {eval_err}")
+                    em = None
                 if em.get("status") == "success":
                     auc = em["macro_roc_auc"]
                     print(f"  macro_roc_auc = {auc:.6f} | scored = {em['num_scored_columns']}")

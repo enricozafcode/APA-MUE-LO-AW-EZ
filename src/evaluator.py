@@ -61,9 +61,16 @@ class Evaluator:
         self.row_id_column_name = row_id_column_name
 
     def evaluate_from_files(self, y_true_path: Path, y_pred_path: Path) -> EvaluationSummary:
-        y_true = np.load(y_true_path)
-        y_pred = np.load(y_pred_path)
-        return self.evaluate_arrays(y_true=y_true, y_pred=y_pred)
+        import time as _time
+        for attempt in range(5):
+            try:
+                y_true = np.load(y_true_path)
+                y_pred = np.load(y_pred_path)
+                return self.evaluate_arrays(y_true=y_true, y_pred=y_pred)
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                _time.sleep(2)
 
     def evaluate_arrays(self, y_true: np.ndarray, y_pred: np.ndarray) -> EvaluationSummary:
         y_true = np.asarray(y_true)
