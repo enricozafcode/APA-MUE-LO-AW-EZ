@@ -1145,6 +1145,47 @@ def _tweak_augmentation_params(base, rng):
             p["aug_freq_mask"] = int(rng.choice([0, 4, 8, 12]))
     return p
 
+def _researcher_analysis(llm_researcher, results, temperature=0.6):
+    """Researcher LLM (e.g. DeepSeek R1) analyzes experiment history.
+    Produces a short text research direction — no code, just reasoning.
+    Returns empty string if not enough data or researcher not configured.
+    """
+    if llm_researcher is None:
+        return ""
+    ok = [r for r in results if r.get("success") and r.get("macro_roc_auc")]
+    if len(ok) < 3:
+        return ""
+    ok.sort(key=lambda r: r["macro_roc_auc"], reverse=True)
+    lines = []
+    for i, r in enumerate(ok[:15]):
+        lines.append(
+            f"{i+1}. AUC={r['macro_roc_auc']:.6f} | {r.get('description', 'unknown')}"
+        )
+    prompt = (
+        "You are a deep learning research expert analyzing BirdCLEF 2026 audio classification "
+        "experiments (234 species, macro ROC-AUC metric, mel-spectrogram input).\n\n"
+        "Experiment results so far (best first):\n"
+        + "\n".join(lines)
+        + "\n\n"
+        "Provide a concise research direction (3-5 sentences):\n"
+        "1. What pattern do you see in what works vs. what does not?\n"
+        "2. What ONE specific architectural or hyperparameter change should be tried next and why?\n"
+        "3. Is there a clear ceiling being hit that suggests a fundamentally different approach?\n\n"
+        "Think step by step. No code — just your reasoning."
+    )
+    print("  [Researcher] Analyzing experiment history...")
+    hint = llm_researcher.generate_from_messages(
+        messages=[
+            {"role": "system", "content": "You are a deep learning research expert. Think step by step. Be concise and specific."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=temperature,
+    )
+    if hint and not hint.startswith("Error"):
+        print(f"  [Researcher] Direction: {hint[:200]}...")
+    return hint or ""
+
+
 def _analyze_random_results(results, llm, temperature):
     ok = [r for r in results if r.get("success") and r.get("macro_roc_auc")]
     if len(ok) < 3:
@@ -1283,7 +1324,8 @@ def _has_auc_plateau(results, repeats=3, decimals=6):
 
 
 def _generate_ai_free_slot_with_context(
-    llm, temperature, best_results, fallback_slot, cheap_cfg, tried_summary, force_novelty=False
+    llm, temperature, best_results, fallback_slot, cheap_cfg, tried_summary, force_novelty=False,
+    researcher_hint="",
 ):
     top_lines = []
     for i, r in enumerate(best_results[:4], start=1):
@@ -1297,13 +1339,18 @@ def _generate_ai_free_slot_with_context(
         "Do not return a near-duplicate of previously tried architectures.\n\n"
     ) if force_novelty else ""
 
+    researcher_block = (
+        f"Research direction from expert analysis:\n{researcher_hint}\n\n"
+    ) if researcher_hint else ""
+
     prompt = (
         "You are improving a BirdCLEF audio classification model.\n"
         "Create a stronger architecture than prior runs while keeping training cheap for search.\n\n"
-        f"Top prior results:\n{top_summary}\n\n"
+        + researcher_block
+        + f"Top prior results:\n{top_summary}\n\n"
         f"Previously tried architecture summaries:\n{tried_summary}\n\n"
-        + novelty_block +
-        f"Current baseline slot code:\n```python\n{fallback_slot}\n```\n\n"
+        + novelty_block
+        + f"Current baseline slot code:\n```python\n{fallback_slot}\n```\n\n"
         "Return ONLY Python code with get_training_config() and build_model(input_shape, num_classes).\n"
         "Constraints:\n"
         f"- max_samples must be {cheap_cfg['max_samples']}\n"
@@ -1596,7 +1643,8 @@ def _run_reality_check_gate(candidates, executor, evaluator, dirs, search_cfg):
     return results, best
 
 
-def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dirs, search_cfg):
+def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dirs, search_cfg,
+                       llm_researcher=None, researcher_temp=0.6):
     print("\n" + "=" * 60)
     print("  PHASE 2: RANDOM SEARCH")
     print("=" * 60)
@@ -1662,6 +1710,9 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
             current_best_slot = slot
         print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
     _save_phase2_results(dirs["logs"], all_results, top_keep)
+
+    # Researcher analysis (dual-LLM: DeepSeek reasons, then coder acts)
+    researcher_hint = _researcher_analysis(llm_researcher, all_results, researcher_temp)
 
     # LLM analysis
     print(f"\n  ── Analyzing results with LLM ──")
@@ -1743,6 +1794,7 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
             cheap_cfg={"max_samples": s, "epochs": e, "val_split": vs},
             tried_summary=tried_summary,
             force_novelty=plateau,
+            researcher_hint=researcher_hint,
         )
         rid = f"R{rc:03d}_ai_free"
         ai_slot, metrics, result, att = run_experiment_until_success(
@@ -2622,6 +2674,18 @@ def agent_loop(config):
     tex.setdefault("interactive_pick_final", False)
 
     llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
+
+    # Dual-LLM: optional researcher (e.g. DeepSeek R1) that reasons about results
+    # before the coder LLM proposes the next architecture.
+    llm_researcher = None
+    rc_cfg = config.get("llm_researcher", {})
+    if rc_cfg.get("enabled", False):
+        llm_researcher = LLMClient(provider=rc_cfg["provider"], model=rc_cfg["model"])
+        print(f"  Researcher: {rc_cfg['model']} (dual-LLM mode)")
+    else:
+        print("  Researcher: disabled (single-LLM mode)")
+    researcher_temp = rc_cfg.get("temperature", 0.6)
+
     py_exe = config["execution"]["python_executable"]
     search_timeout = config["execution"].get("timeout_seconds", 1800)
     executor_search = CodeExecutor(python_executable=py_exe, timeout_seconds=search_timeout)
@@ -2682,7 +2746,10 @@ def agent_loop(config):
         baseline_slot, _ = _run_baseline(executor_search, evaluator, llm, temp, dirs, sc)
         lin_results, lin_best = _run_linear_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc)
         _maybe_generate_insights(config, llm, lin_results, "linear", dirs, temp)
-        rnd_results, best_rnd = _run_random_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc)
+        rnd_results, best_rnd = _run_random_search(
+            baseline_slot, executor_search, evaluator, llm, temp, dirs, sc,
+            llm_researcher=llm_researcher, researcher_temp=researcher_temp,
+        )
         _maybe_generate_insights(config, llm, rnd_results, "random", dirs, temp)
 
     lin_ok = [r for r in lin_results if r.get("success") and r.get("macro_roc_auc")]

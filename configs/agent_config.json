@@ -5,8 +5,14 @@
   "max_iterations": 5,
   "llm": {
     "provider": "ollama",
-    "model": "qwen2.5-coder:7b",
+    "model": "qwen2.5-coder:3b",
     "temperature": 0.2
+  },
+  "llm_researcher": {
+    "provider": "ollama",
+    "model": "deepseek-r1:8b",
+    "temperature": 0.6,
+    "enabled": true
   },
   "execution": {
     "timeout_seconds": 1800,
