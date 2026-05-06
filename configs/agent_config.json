@@ -17,7 +17,7 @@
   "execution": {
     "timeout_seconds": 1800,
     "final_timeout_seconds": null,
-    "python_executable": "python3"
+    "python_executable": "C:/Users/lasse/Documents/Master Business Analytics Lasse/Advanced Predictive Analytics/APA-MUE-LO-AW-EZ/.venv/Scripts/python.exe"
   },
   "transfer": {
     "require_pretrained_only": true,
@@ -52,7 +52,7 @@
       "top_results_keep": 2
     },
     "cnn_exploration": {
-      "enabled": false
+      "enabled": true
     },
     "transfer_exploration": {
       "enabled": true,
