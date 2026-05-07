@@ -136,7 +136,7 @@ def _make_harness_suffix(*, is_final=False, model_save_path=""):
         val_line = "    val_split = float(cfg.get('val_split', 0.1))  # FINAL RUN: checkpoint on validation"
         ckpt_line = "    checkpoint_best = True"
         save_block = (
-            f'\n    _mp = Path("{model_save_path}")\n'
+            f'\n    _mp = Path(r"{model_save_path}")\n'
             "    _mp.parent.mkdir(parents=True, exist_ok=True)\n"
             "    print(f\"PHASE3_DEBUG: final_save_target={{_mp}}\")\n"
             "    if checkpoint_best and has_validation and (_ckpt is not None) and _ckpt.exists():\n"
@@ -1171,13 +1171,25 @@ def _researcher_analysis(llm_researcher, results, temperature=0.6):
     prompt = (
         "You are a deep learning research expert analyzing BirdCLEF 2026 audio classification "
         "experiments (234 species, macro ROC-AUC metric, mel-spectrogram input).\n\n"
+        "IMPORTANT CONTEXT — scale sensitivity:\n"
+        "All experiments so far were run on ~800 training samples (cheap search budget). "
+        "The final model will be trained on ~35,000 samples. "
+        "This means:\n"
+        "- Augmentation results are UNRELIABLE at small scale. Even if augmentation "
+        "showed little benefit here, it almost certainly helps at full scale. "
+        "Always recommend strong augmentation for the final run regardless of what the "
+        "search results suggest.\n"
+        "- Architecture choices (depth, filters, residuals) transfer more reliably from "
+        "small to large scale.\n\n"
         "Experiment results so far (best first):\n"
         + "\n".join(lines)
         + "\n\n"
         "Provide a concise research direction (3-5 sentences):\n"
         "1. What pattern do you see in what works vs. what does not?\n"
         "2. What ONE specific architectural or hyperparameter change should be tried next and why?\n"
-        "3. Is there a clear ceiling being hit that suggests a fundamentally different approach?\n\n"
+        "3. Is there a clear ceiling being hit that suggests a fundamentally different approach?\n"
+        "4. What augmentation strategy should be used in the final run (remember: small-scale "
+        "augmentation results are not reliable)?\n\n"
         "Think step by step. No code — just your reasoning."
     )
     print("  [Researcher] Analyzing experiment history...")
