@@ -1172,7 +1172,7 @@ def _researcher_analysis(llm_researcher, results, temperature=0.6):
         "You are a deep learning research expert analyzing BirdCLEF 2026 audio classification "
         "experiments (234 species, macro ROC-AUC metric, mel-spectrogram input).\n\n"
         "IMPORTANT CONTEXT — scale sensitivity:\n"
-        "All experiments so far were run on ~800 training samples (cheap search budget). "
+        "All experiments so far were run on a small search budget (max 2000 samples, often fewer due to label filtering). "
         "The final model will be trained on ~35,000 samples. "
         "This means:\n"
         "- Augmentation results are UNRELIABLE at small scale. Even if augmentation "
