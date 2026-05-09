@@ -15,19 +15,12 @@ so no external import of `agent_transfer` is required.
 
 from __future__ import annotations
 
-import sys
 import inspect
 import json
 import math
 import random
 import re
 import ast
-
-# Force UTF-8 stdout/stderr on Windows (handles unicode chars like → ★ ─ in print statements)
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import time
 from pathlib import Path
 from datetime import datetime
@@ -38,10 +31,12 @@ if __package__:
     from .code_executor import CodeExecutor
     from .evaluator import Evaluator
     from .llm_client import LLMClient
+    from .memory import ExperimentMemory
 else:
     from code_executor import CodeExecutor
     from evaluator import Evaluator
     from llm_client import LLMClient
+    from memory import ExperimentMemory
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -136,7 +131,7 @@ def _make_harness_suffix(*, is_final=False, model_save_path=""):
         val_line = "    val_split = float(cfg.get('val_split', 0.1))  # FINAL RUN: checkpoint on validation"
         ckpt_line = "    checkpoint_best = True"
         save_block = (
-            f'\n    _mp = Path(r"{model_save_path}")\n'
+            f'\n    _mp = Path("{model_save_path}")\n'
             "    _mp.parent.mkdir(parents=True, exist_ok=True)\n"
             "    print(f\"PHASE3_DEBUG: final_save_target={{_mp}}\")\n"
             "    if checkpoint_best and has_validation and (_ckpt is not None) and _ckpt.exists():\n"
@@ -882,8 +877,10 @@ def _extract_best_epoch(stdout: str) -> int | None:
 
 
 def run_experiment_until_success(slot_code, run_id, code_dir, eval_dir,
-                                 executor, evaluator, llm, temperature, max_attempts=5, use_llm_fixes=True):
-    """Run experiment, auto-fix with LLM on failure."""
+                                 executor, evaluator, llm, temperature, max_attempts=5,
+                                 use_llm_fixes=True, memory=None, phase="unknown",
+                                 description="", params=None):
+    """Run experiment, auto-fix with LLM on failure. Logs every outcome to memory."""
     current_slot = slot_code
     for attempt in range(1, max_attempts + 1):
         metrics, result = run_experiment(
@@ -896,6 +893,9 @@ def run_experiment_until_success(slot_code, run_id, code_dir, eval_dir,
                 metrics["best_epoch"] = best_epoch
             if attempt > 1:
                 print(f"    Fixed after {attempt} attempts")
+            if memory is not None:
+                memory.log(params=params or {}, metrics=metrics,
+                           description=description, phase=phase, slot_code=current_slot)
             return current_slot, metrics, result, attempt
 
         error_text = _clean_error_text(result.stderr) if not result.success else "No valid metrics produced."
@@ -903,10 +903,16 @@ def run_experiment_until_success(slot_code, run_id, code_dir, eval_dir,
         err_path.write_text(result.stderr or "", encoding="utf-8")
         if attempt == max_attempts:
             print(f"    Failed all {max_attempts} attempts. Error: {_truncate(error_text, 200)}")
+            if memory is not None:
+                memory.log(params=params or {}, metrics=None,
+                           description=f"FAILED: {description}", phase=phase, slot_code=current_slot)
             return current_slot, None, result, attempt
 
         if not use_llm_fixes:
             print(f"    Attempt {attempt} failed (LLM fixes disabled for this run).")
+            if memory is not None:
+                memory.log(params=params or {}, metrics=None,
+                           description=f"FAILED: {description}", phase=phase, slot_code=current_slot)
             return current_slot, None, result, attempt
 
         print(f"    Attempt {attempt} failed, requesting LLM fix...")
@@ -934,7 +940,7 @@ def run_experiment_until_success(slot_code, run_id, code_dir, eval_dir,
 # PHASE 0: BASELINE
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _run_baseline(executor, evaluator, llm, temperature, dirs, search_cfg):
+def _run_baseline(executor, evaluator, llm, temperature, dirs, search_cfg, memory=None):
     print("\n" + "=" * 60)
     print("  PHASE 0: BASELINE VERIFICATION")
     print("=" * 60)
@@ -945,10 +951,13 @@ def _run_baseline(executor, evaluator, llm, temperature, dirs, search_cfg):
     params["val_split"] = search_cfg["cheap"].get("val_split", 0.2)
     slot_code = generate_slot_code(params)
 
+    _desc = describe_params(params)
+
     # Stage A: deterministic generated baseline, no LLM fixes.
     slot_code, metrics, result, attempts = run_experiment_until_success(
         slot_code, "baseline_gen", dirs["baseline_codes"], dirs["eval"],
         executor, evaluator, llm, temperature, max_attempts=1, use_llm_fixes=False,
+        memory=memory, phase="baseline", description=_desc, params=params,
     )
 
     # Stage B: hardcoded safe baseline, no LLM fixes.
@@ -957,6 +966,7 @@ def _run_baseline(executor, evaluator, llm, temperature, dirs, search_cfg):
         slot_code, metrics, result, attempts_b = run_experiment_until_success(
             SAFE_BASELINE_SLOT_CODE, "baseline_safe", dirs["baseline_codes"], dirs["eval"],
             executor, evaluator, llm, temperature, max_attempts=1, use_llm_fixes=False,
+            memory=memory, phase="baseline", description="safe_template", params=params,
         )
         attempts += attempts_b
 
@@ -966,6 +976,7 @@ def _run_baseline(executor, evaluator, llm, temperature, dirs, search_cfg):
         slot_code, metrics, result, attempts_c = run_experiment_until_success(
             slot_code, "baseline_fix", dirs["baseline_codes"], dirs["eval"],
             executor, evaluator, llm, temperature, max_attempts=5, use_llm_fixes=True,
+            memory=memory, phase="baseline", description=f"llm_fix:{_desc}", params=params,
         )
         attempts += attempts_c
 
@@ -1002,7 +1013,7 @@ def _compute_zoom_values(dim, winner):
     return []
 
 
-def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dirs, search_cfg):
+def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dirs, search_cfg, memory=None):
     print("\n" + "=" * 60)
     print("  PHASE 1: LINEAR SEARCH (coordinate descent)")
     print("=" * 60)
@@ -1152,60 +1163,7 @@ def _tweak_augmentation_params(base, rng):
             p["aug_freq_mask"] = int(rng.choice([0, 4, 8, 12]))
     return p
 
-def _researcher_analysis(llm_researcher, results, temperature=0.6):
-    """Researcher LLM (e.g. DeepSeek R1) analyzes experiment history.
-    Produces a short text research direction — no code, just reasoning.
-    Returns empty string if not enough data or researcher not configured.
-    """
-    if llm_researcher is None:
-        return ""
-    ok = [r for r in results if r.get("success") and r.get("macro_roc_auc")]
-    if len(ok) < 3:
-        return ""
-    ok.sort(key=lambda r: r["macro_roc_auc"], reverse=True)
-    lines = []
-    for i, r in enumerate(ok[:15]):
-        lines.append(
-            f"{i+1}. AUC={r['macro_roc_auc']:.6f} | {r.get('description', 'unknown')}"
-        )
-    prompt = (
-        "You are a deep learning research expert analyzing BirdCLEF 2026 audio classification "
-        "experiments (234 species, macro ROC-AUC metric, mel-spectrogram input).\n\n"
-        "IMPORTANT CONTEXT — scale sensitivity:\n"
-        "All experiments so far were run on a small search budget (max 2000 samples, often fewer due to label filtering). "
-        "The final model will be trained on ~35,000 samples. "
-        "This means:\n"
-        "- Augmentation results are UNRELIABLE at small scale. Even if augmentation "
-        "showed little benefit here, it almost certainly helps at full scale. "
-        "Always recommend strong augmentation for the final run regardless of what the "
-        "search results suggest.\n"
-        "- Architecture choices (depth, filters, residuals) transfer more reliably from "
-        "small to large scale.\n\n"
-        "Experiment results so far (best first):\n"
-        + "\n".join(lines)
-        + "\n\n"
-        "Provide a concise research direction (3-5 sentences):\n"
-        "1. What pattern do you see in what works vs. what does not?\n"
-        "2. What ONE specific architectural or hyperparameter change should be tried next and why?\n"
-        "3. Is there a clear ceiling being hit that suggests a fundamentally different approach?\n"
-        "4. What augmentation strategy should be used in the final run (remember: small-scale "
-        "augmentation results are not reliable)?\n\n"
-        "Think step by step. No code — just your reasoning."
-    )
-    print("  [Researcher] Analyzing experiment history...")
-    hint = llm_researcher.generate_from_messages(
-        messages=[
-            {"role": "system", "content": "You are a deep learning research expert. Think step by step. Be concise and specific."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=temperature,
-    )
-    if hint and not hint.startswith("Error"):
-        print(f"  [Researcher] Direction: {hint[:200]}...")
-    return hint or ""
-
-
-def _analyze_random_results(results, llm, temperature):
+def _analyze_random_results(results, llm, temperature, memory=None):
     ok = [r for r in results if r.get("success") and r.get("macro_roc_auc")]
     if len(ok) < 3:
         return None
@@ -1213,9 +1171,11 @@ def _analyze_random_results(results, llm, temperature):
     lines = ["rank | AUC      | description", "-"*80]
     for i, r in enumerate(ok[:20]):
         lines.append(f"{i+1:4d} | {r['macro_roc_auc']:.6f} | {r['description']}")
+    memory_ctx = ("\n\n" + memory.summary_for_prompt()) if memory else ""
     prompt = (
         "Results from random architecture search for bird audio classification.\n\n"
-        + "\n".join(lines) + "\n\n"
+        + "\n".join(lines)
+        + memory_ctx + "\n\n"
         "Return ONLY a JSON object with narrowed ranges for focused search:\n"
         '{"depth":[min,max],"filters_base":[min,max],"learning_rate":[min,max],'
         '"weight_decay":[min,max],"classifier_hidden_units":[min,max],"residuals":true/false/null,'
@@ -1274,16 +1234,19 @@ def _save_phase2_results(logs_dir, all_results, top_k):
     _save_json(_best_successful(all_results, top_k), logs_dir / "final_results.json")
 
 
-def _generate_ai_free_slot(llm, temperature, best_results, fallback_slot, cheap_cfg):
+def _generate_ai_free_slot(llm, temperature, best_results, fallback_slot, cheap_cfg, memory=None):
     top_lines = []
     for i, r in enumerate(best_results[:4], start=1):
         top_lines.append(f"{i}. AUC={r['macro_roc_auc']:.6f} | {r['description']}")
     top_summary = "\n".join(top_lines) if top_lines else "No successful prior runs yet."
 
+    memory_ctx = ("\n\n" + memory.summary_for_prompt() + "\n" + memory.prompt_instruction()) if memory else ""
+
     prompt = (
         "You are improving a BirdCLEF audio classification model.\n"
         "Create a stronger architecture than prior runs while keeping training cheap for search.\n\n"
-        f"Top prior results:\n{top_summary}\n\n"
+        f"Top prior results:\n{top_summary}\n"
+        f"{memory_ctx}\n\n"
         f"Current baseline slot code:\n```python\n{fallback_slot}\n```\n\n"
         "Return ONLY Python code with get_training_config() and build_model(input_shape, num_classes).\n"
         "Constraints:\n"
@@ -1343,8 +1306,7 @@ def _has_auc_plateau(results, repeats=3, decimals=6):
 
 
 def _generate_ai_free_slot_with_context(
-    llm, temperature, best_results, fallback_slot, cheap_cfg, tried_summary, force_novelty=False,
-    researcher_hint="",
+    llm, temperature, best_results, fallback_slot, cheap_cfg, tried_summary, force_novelty=False
 ):
     top_lines = []
     for i, r in enumerate(best_results[:4], start=1):
@@ -1358,18 +1320,13 @@ def _generate_ai_free_slot_with_context(
         "Do not return a near-duplicate of previously tried architectures.\n\n"
     ) if force_novelty else ""
 
-    researcher_block = (
-        f"Research direction from expert analysis:\n{researcher_hint}\n\n"
-    ) if researcher_hint else ""
-
     prompt = (
         "You are improving a BirdCLEF audio classification model.\n"
         "Create a stronger architecture than prior runs while keeping training cheap for search.\n\n"
-        + researcher_block
-        + f"Top prior results:\n{top_summary}\n\n"
+        f"Top prior results:\n{top_summary}\n\n"
         f"Previously tried architecture summaries:\n{tried_summary}\n\n"
-        + novelty_block
-        + f"Current baseline slot code:\n```python\n{fallback_slot}\n```\n\n"
+        + novelty_block +
+        f"Current baseline slot code:\n```python\n{fallback_slot}\n```\n\n"
         "Return ONLY Python code with get_training_config() and build_model(input_shape, num_classes).\n"
         "Constraints:\n"
         f"- max_samples must be {cheap_cfg['max_samples']}\n"
@@ -1662,8 +1619,7 @@ def _run_reality_check_gate(candidates, executor, evaluator, dirs, search_cfg):
     return results, best
 
 
-def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dirs, search_cfg,
-                       llm_researcher=None, researcher_temp=0.6):
+def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dirs, search_cfg, memory=None):
     print("\n" + "=" * 60)
     print("  PHASE 2: RANDOM SEARCH")
     print("=" * 60)
@@ -1692,7 +1648,8 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         slot = generate_slot_code(p)
         rid = f"R{rc:03d}_explore"
         slot, metrics, result, att = run_experiment_until_success(
-            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
+            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature,
+            memory=memory, phase="random_explore", description=describe_params(p), params=p)
         auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
         entry = {"run_id": rid, "search_type": "explore",
                  "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
@@ -1717,7 +1674,8 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         slot = generate_slot_code(p)
         rid = f"R{rc:03d}_tweak_aug"
         slot, metrics, result, att = run_experiment_until_success(
-            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
+            slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature,
+            memory=memory, phase="tweak_aug", description=describe_params(p), params=p)
         auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
         entry = {"run_id": rid, "search_type": "tweak_aug",
             "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
@@ -1730,12 +1688,9 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
     _save_phase2_results(dirs["logs"], all_results, top_keep)
 
-    # Researcher analysis (dual-LLM: DeepSeek reasons, then coder acts)
-    researcher_hint = _researcher_analysis(llm_researcher, all_results, researcher_temp)
-
     # LLM analysis
     print(f"\n  ── Analyzing results with LLM ──")
-    narrowed = _analyze_random_results(all_results, llm, temperature)
+    narrowed = _analyze_random_results(all_results, llm, temperature, memory=memory)
     if narrowed:
         print(f"  Analysis: {narrowed.get('analysis','')[:300]}")
         _save_json(narrowed, dirs["logs"] / "random_llm_analysis.json")
@@ -1813,7 +1768,6 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
             cheap_cfg={"max_samples": s, "epochs": e, "val_split": vs},
             tried_summary=tried_summary,
             force_novelty=plateau,
-            researcher_hint=researcher_hint,
         )
         rid = f"R{rc:03d}_ai_free"
         ai_slot, metrics, result, att = run_experiment_until_success(
@@ -2693,18 +2647,6 @@ def agent_loop(config):
     tex.setdefault("interactive_pick_final", False)
 
     llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
-
-    # Dual-LLM: optional researcher (e.g. DeepSeek R1) that reasons about results
-    # before the coder LLM proposes the next architecture.
-    llm_researcher = None
-    rc_cfg = config.get("llm_researcher", {})
-    if rc_cfg.get("enabled", False):
-        llm_researcher = LLMClient(provider=rc_cfg["provider"], model=rc_cfg["model"])
-        print(f"  Researcher: {rc_cfg['model']} (dual-LLM mode)")
-    else:
-        print("  Researcher: disabled (single-LLM mode)")
-    researcher_temp = rc_cfg.get("temperature", 0.6)
-
     py_exe = config["execution"]["python_executable"]
     search_timeout = config["execution"].get("timeout_seconds", 1800)
     executor_search = CodeExecutor(python_executable=py_exe, timeout_seconds=search_timeout)
@@ -2714,11 +2656,20 @@ def agent_loop(config):
     )
     evaluator = Evaluator(row_id_column_name="row_id")
     temp = config["llm"].get("temperature", 0.2)
+    memory = ExperimentMemory(logs_dir=dirs["logs"])
 
     print("=" * 60)
     print("  BirdCLEF Structured Search Agent")
     print("=" * 60)
     print(f"  LLM:     {config['llm']['model']}")
+    prior = len(memory.all_runs())
+    if prior:
+        print(f"  Memory:  {prior} prior experiments loaded ({len(memory.successful_runs())} successful)")
+        best = memory.best_runs(1)
+        if best:
+            print(f"  Best so far: AUC={best[0]['macro_roc_auc']:.6f} | {best[0]['description']}")
+    else:
+        print("  Memory:  No prior experiments — starting fresh")
     print(f"  Linear:  {sc['linear_budget']} iters")
     print(
         "  Phase2: "
@@ -2762,13 +2713,10 @@ def agent_loop(config):
         lin_results, lin_best = [], dict(DEFAULT_PARAMS)
         rnd_results, best_rnd = [], None
     else:
-        baseline_slot, _ = _run_baseline(executor_search, evaluator, llm, temp, dirs, sc)
-        lin_results, lin_best = _run_linear_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc)
+        baseline_slot, _ = _run_baseline(executor_search, evaluator, llm, temp, dirs, sc, memory=memory)
+        lin_results, lin_best = _run_linear_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc, memory=memory)
         _maybe_generate_insights(config, llm, lin_results, "linear", dirs, temp)
-        rnd_results, best_rnd = _run_random_search(
-            baseline_slot, executor_search, evaluator, llm, temp, dirs, sc,
-            llm_researcher=llm_researcher, researcher_temp=researcher_temp,
-        )
+        rnd_results, best_rnd = _run_random_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc, memory=memory)
         _maybe_generate_insights(config, llm, rnd_results, "random", dirs, temp)
 
     lin_ok = [r for r in lin_results if r.get("success") and r.get("macro_roc_auc")]

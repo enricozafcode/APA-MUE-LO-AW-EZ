@@ -15,7 +15,8 @@ class LLMClient:
             
         self.client = OpenAI(
             base_url=base_url,
-            api_key="local-dummy-key" # Local servers require a string here, but ignore it
+            api_key="local-dummy-key",
+            timeout=600.0,  # 10 minutes — local models can be slow
         )
 
     def generate_from_messages(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
