@@ -38,10 +38,12 @@ if __package__:
     from .code_executor import CodeExecutor
     from .evaluator import Evaluator
     from .llm_client import LLMClient
+    from .eda_agent import run_eda_phase
 else:
     from code_executor import CodeExecutor
     from evaluator import Evaluator
     from llm_client import LLMClient
+    from eda_agent import run_eda_phase
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2648,6 +2650,8 @@ def run_phase3_final_only(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def agent_loop(config):
+    global GENERATION_SYSTEM_PROMPT, TRANSFER_SYSTEM_PROMPT
+
     root = Path(__file__).resolve().parents[1]
     logs = root / "logs"
     dirs = {k: logs / v for k, v in {
@@ -2656,6 +2660,25 @@ def agent_loop(config):
     dirs["logs"] = logs
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
+
+    # ── Phase EDA: autonomous data exploration before any model training ──────
+    eda_cfg = config.get("eda", {})
+    if eda_cfg.get("enabled", True):
+        py_exe = config["execution"]["python_executable"]
+        _eda_executor = CodeExecutor(python_executable=py_exe, timeout_seconds=120)
+        _eda_llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
+        _eda_temp = config["llm"].get("temperature", 0.4)
+        eda_insights = run_eda_phase(_eda_executor, _eda_llm, dirs["logs"], temperature=_eda_temp)
+        if eda_insights.strip():
+            _eda_block = (
+                "\n\n## DATA INSIGHTS (from autonomous EDA before training)\n"
+                + eda_insights.strip()
+                + "\n## END OF EDA INSIGHTS\n"
+            )
+            GENERATION_SYSTEM_PROMPT = GENERATION_SYSTEM_PROMPT + _eda_block
+            TRANSFER_SYSTEM_PROMPT   = TRANSFER_SYSTEM_PROMPT   + _eda_block
+    else:
+        print("  EDA phase disabled (eda.enabled=false in config)")
 
     sc = config.get("search", {})
     sc.setdefault("cheap", {"max_samples": 1000, "epochs": 3, "val_split": 0.2})
