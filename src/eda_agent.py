@@ -115,7 +115,7 @@ _sep()
 ratings = [float(r["rating"]) for r in train if r.get("rating","").strip()]
 if ratings:
     zero_rated = sum(1 for x in ratings if x == 0)
-    print(f"  Rating range: {min(ratings):.1f} – {max(ratings):.1f}")
+    print(f"  Rating range: {min(ratings):.1f} to {max(ratings):.1f}")
     print(f"  Zero-rated (unrated, mostly iNat): {zero_rated} ({zero_rated/len(ratings)*100:.1f}%)")
     collections = Counter(r.get("collection", "?") for r in train)
     print(f"  Collection split: {dict(collections)}")
@@ -148,10 +148,19 @@ if tax_path.exists():
     taxonomy = _load_csv(tax_path)
     print(f"  Taxonomy rows: {len(taxonomy)}")
     print(f"  Taxonomy columns: {list(taxonomy[0].keys()) if taxonomy else []}")
-    orders = Counter(r.get("order", "?") for r in taxonomy)
-    families = Counter(r.get("family", "?") for r in taxonomy)
-    print(f"  Unique orders: {len(orders)}")
-    print(f"  Unique families: {len(families)}")
+    tax_cols = list(taxonomy[0].keys()) if taxonomy else []
+    if "order" in tax_cols:
+        orders = Counter(r.get("order", "?") for r in taxonomy)
+        print(f"  Unique orders: {len(orders)}")
+    else:
+        print("  'order' column not in taxonomy - skipped")
+    if "family" in tax_cols:
+        families = Counter(r.get("family", "?") for r in taxonomy)
+        print(f"  Unique families: {len(families)}")
+    else:
+        print("  'family' column not in taxonomy - skipped")
+    classes_in_tax = Counter(r.get("class_name", "?") for r in taxonomy)
+    print(f"  Taxonomic class breakdown: {dict(classes_in_tax)}")
     # Check coverage: are all primary_labels in taxonomy?
     tax_species = {r.get("species_code", r.get("primary_label","")) for r in taxonomy}
     train_species = set(species_counts.keys())
@@ -231,7 +240,7 @@ try:
             pass
     if durations:
         print(f"  Sample size: {len(durations)} files")
-        print(f"  Duration range: {min(durations):.1f}s – {max(durations):.1f}s")
+        print(f"  Duration range: {min(durations):.1f}s to {max(durations):.1f}s")
         print(f"  Median duration: {sorted(durations)[len(durations)//2]:.1f}s")
         print(f"  Unique sample rates: {sorted(set(sample_rates))}")
 except ImportError:
