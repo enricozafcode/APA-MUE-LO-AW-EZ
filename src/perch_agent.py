@@ -1046,8 +1046,11 @@ def run(config: dict) -> None:
 
 
 def main() -> None:
-    config_path = ROOT / "configs" / "agent_config.json"
-    config = json.loads(config_path.read_text())
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default=str(ROOT / "configs" / "agent_config.json"))
+    args = parser.parse_args()
+    config = json.loads(Path(args.config).read_text())
     run(config)
 
 
