@@ -1,20 +1,11 @@
 """
 Meta Agent — BirdCLEF 2026
 ===========================
-Single autonomous loop exploring Perch, BirdNET, and ensemble approaches.
-The LLM sees the full experiment history each iteration and decides:
-  - "perch"    → train a fresh MLP on Perch (1536-D) embeddings
-  - "birdnet"  → train a fresh MLP on BirdNET (1024-D) embeddings
-  - "ensemble" → blend the current best Perch + best BirdNET predictions
-
-All three approaches are evaluated on the SAME common validation set
-(soundscapes from train_soundscapes_labels.csv, embedded with both models),
-so results are directly comparable across approaches.
-
-Setup (one-time, automatic):
-  1. Perch agent builds Perch train embedding cache
-  2. BirdNET agent builds BirdNET train embedding cache + soundscape val cache
-  3. Meta agent re-embeds those same soundscapes with Perch ONNX → common val
+Three sequential phases:
+  Phase 1: BirdNET agent explores MLP heads on BirdNET (1024-D) embeddings
+  Phase 2: Perch agent explores MLP heads on Perch (1536-D) embeddings
+  Phase 3: Ensemble — tries different blend weights on a COMMON soundscape val set
+           so Perch and BirdNET predictions can be directly compared and combined
 
 Run:
     python src/meta_agent.py --config configs/agent_config.json
@@ -24,7 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -42,152 +33,128 @@ META_LOGS    = PROJECT_ROOT / "logs" / "meta_agent"
 SOUNDSCAPE_LABELS = DATA_DIR / "train_soundscapes_labels.csv"
 TRAIN_SOUNDSCAPES = DATA_DIR / "train_soundscapes"
 
-PERCH_TRAIN_CACHE   = PERCH_MEMORY / "train_emb.npz"
-BIRDNET_TRAIN_CACHE = CACHE_DIR / "train_emb1024.npz"
-BIRDNET_VAL_CACHE   = CACHE_DIR / "val_emb1024.npz"
-META_VAL_CACHE      = META_LOGS / "common_val.npz"
+BIRDNET_VAL_CACHE = CACHE_DIR / "val_emb1024.npz"
+META_VAL_CACHE    = META_LOGS / "common_val.npz"
 
 SR           = 32_000
 CLIP_SEC     = 5.0
 CLIP_SAMPLES = int(SR * CLIP_SEC)
 PERCH_DIM    = 1536
-BIRDNET_DIM  = 1024
-
-PYTHON = sys.executable
+PYTHON       = sys.executable
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Common validation set — embed soundscapes with BOTH models
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _macro_auc(y_true: np.ndarray, y_score: np.ndarray, min_pos: int = 3) -> tuple[float, int]:
+    from sklearn.metrics import roc_auc_score
+    aucs = []
+    for c in range(y_true.shape[1]):
+        if y_true[:, c].sum() < min_pos:
+            continue
+        try:
+            aucs.append(roc_auc_score(y_true[:, c], y_score[:, c]))
+        except Exception:
+            pass
+    return (float(np.mean(aucs)) if aucs else 0.0), len(aucs)
+
+
+def _run_subprocess(script: str, config_override: dict, base_config: dict) -> int:
+    """Write a temp config with overrides and run a script as subprocess."""
+    cfg = json.loads(json.dumps(base_config))
+    cfg.update(config_override)
+    tmp = Path(tempfile.gettempdir()) / f"meta_{Path(script).stem}_config.json"
+    tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    result = subprocess.run(
+        [PYTHON, str(PROJECT_ROOT / "src" / script), "--config", str(tmp)],
+        cwd=str(PROJECT_ROOT),
+    )
+    return result.returncode
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1 — BirdNET
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_phase1_birdnet(config: dict, n_iterations: int) -> float:
+    print("\n" + "=" * 60)
+    print(f"  PHASE 1 — BirdNET  ({n_iterations} iterations)")
+    print("=" * 60)
+
+    rc = _run_subprocess("birdnet_agent.py", {"max_iterations": n_iterations}, config)
+    if rc != 0:
+        print("  [Phase 1] BirdNET agent finished with errors.")
+
+    # Read best AUC
+    auc_path = META_LOGS.parent / "birdnet_agent" / "best_auc.json"
+    if auc_path.exists():
+        info = json.loads(auc_path.read_text())
+        auc  = float(info.get("auc", 0.0))
+    else:
+        hist = META_LOGS.parent / "birdnet_agent" / "history.json"
+        if hist.exists():
+            history = json.loads(hist.read_text())
+            aucs = [e.get("macro_auc_ge3", 0.0) for e in history if e.get("status") == "success"]
+            auc  = float(max(aucs)) if aucs else 0.0
+        else:
+            auc = 0.0
+
+    print(f"\n  [Phase 1] Best BirdNET AUC = {auc:.5f}")
+    return auc
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2 — Perch
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_phase2_perch(config: dict, n_iterations: int) -> float:
+    print("\n" + "=" * 60)
+    print(f"  PHASE 2 — Perch  ({n_iterations} iterations)")
+    print("=" * 60)
+
+    rc = _run_subprocess("perch_agent.py", {"max_iterations": n_iterations}, config)
+    if rc != 0:
+        print("  [Phase 2] Perch agent finished with errors.")
+
+    info_path = PERCH_MEMORY / "best_model_info.json"
+    if info_path.exists():
+        auc = float(json.loads(info_path.read_text()).get("auc", 0.0))
+    else:
+        auc = 0.0
+
+    print(f"\n  [Phase 2] Best Perch AUC = {auc:.5f}")
+    return auc
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — Build common val + ensemble search
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _load_perch_onnx(config: dict):
-    """Load Perch ONNX session; returns (session, inp_name, emb_idx)."""
     import onnxruntime as ort
     import kagglehub
-    slug     = config.get("perch", {}).get("onnx_dataset", "rishikeshjani/perch-onnx-for-birdclef-2026")
-    onnx_dir = Path(kagglehub.dataset_download(slug))
+    slug      = config.get("perch", {}).get("onnx_dataset", "rishikeshjani/perch-onnx-for-birdclef-2026")
+    onnx_dir  = Path(kagglehub.dataset_download(slug))
     onnx_path = next(onnx_dir.rglob("*.onnx"))
-    so = ort.SessionOptions()
+    so        = ort.SessionOptions()
     so.intra_op_num_threads = 4
-    sess = ort.InferenceSession(str(onnx_path), sess_options=so, providers=["CPUExecutionProvider"])
-    inp_name = sess.get_inputs()[0].name
-    dummy = np.zeros((1, CLIP_SAMPLES), dtype=np.float32)
-    outs  = sess.run(None, {inp_name: dummy})
-    emb_idx = next(i for i, o in enumerate(outs) if o.ndim == 2 and o.shape[-1] == PERCH_DIM)
+    sess      = ort.InferenceSession(str(onnx_path), sess_options=so,
+                                     providers=["CPUExecutionProvider"])
+    inp_name  = sess.get_inputs()[0].name
+    dummy     = np.zeros((1, CLIP_SAMPLES), dtype=np.float32)
+    outs      = sess.run(None, {inp_name: dummy})
+    emb_idx   = next(i for i, o in enumerate(outs) if o.ndim == 2 and o.shape[-1] == PERCH_DIM)
     return sess, inp_name, emb_idx
 
 
-def build_common_val(config: dict) -> None:
-    """
-    Build a common soundscape val set embedded with BOTH Perch and BirdNET.
-    BirdNET embeddings come from the birdnet_agent val cache.
-    Perch embeddings are computed here from the same raw audio.
-    """
-    if META_VAL_CACHE.exists():
-        print(f"  [Meta val] Cache exists: {META_VAL_CACHE}")
-        return
-
-    if not BIRDNET_VAL_CACHE.exists():
-        print("  [Meta val] BirdNET val cache not found — run Phase 2 first.")
-        return
-
-    print("  [Meta val] Building common val cache (Perch + BirdNET on soundscapes)...")
-    import librosa
-
-    bn_data   = np.load(str(BIRDNET_VAL_CACHE), allow_pickle=True)
-    X_bn      = bn_data["X_val"].astype(np.float32)
-    y_val     = bn_data["y_val"].astype(np.float32)
-    row_ids   = bn_data["row_ids"].tolist()
-
-    print(f"    BirdNET val: {X_bn.shape} samples")
-
-    sess, inp_name, emb_idx = _load_perch_onnx(config)
-
-    def _hms(t: str) -> int:
-        h, m, s = str(t).split(":")
-        return int(h) * 3600 + int(m) * 60 + int(s)
-
-    lab = pd.read_csv(SOUNDSCAPE_LABELS)
-    grp = (
-        lab.groupby(["filename", "start", "end"], sort=False)["primary_label"]
-        .agg(lambda s: set().union(*[{v.strip() for v in str(x).split(";") if x and str(x) != "nan"} for x in s]))
-        .reset_index()
-    )
-
-    # Build row_id → audio index map from birdnet cache
-    rid_to_idx = {rid: i for i, rid in enumerate(row_ids)}
-
-    X_perch_aligned = []
-    bn_aligned      = []
-    y_aligned       = []
-    n_missing       = 0
-
-    for row in grp.itertuples(index=False):
-        fp       = TRAIN_SOUNDSCAPES / row.filename
-        stem     = Path(row.filename).stem
-        end_sec  = _hms(row.end)
-        row_id   = f"{stem}_{end_sec}"
-
-        if row_id not in rid_to_idx:
-            continue
-        if not fp.exists():
-            n_missing += 1
-            continue
-
-        start_sec = _hms(row.start)
-        duration  = end_sec - start_sec
-        try:
-            wav, _ = librosa.load(str(fp), sr=SR, mono=True,
-                                  offset=start_sec, duration=float(duration))
-        except Exception:
-            continue
-
-        n = int(duration * SR)
-        wav = wav[:n] if len(wav) > n else np.pad(wav, (0, n - len(wav)))
-        # Use central 5-second clip for Perch
-        if len(wav) >= CLIP_SAMPLES:
-            start = (len(wav) - CLIP_SAMPLES) // 2
-            clip  = wav[start: start + CLIP_SAMPLES]
-        else:
-            clip = np.pad(wav, (0, CLIP_SAMPLES - len(wav)))
-        clip = clip.astype(np.float32)
-
-        outs    = sess.run(None, {inp_name: clip[np.newaxis, :]})
-        perch_e = outs[emb_idx][0]
-
-        idx = rid_to_idx[row_id]
-        X_perch_aligned.append(perch_e)
-        bn_aligned.append(X_bn[idx])
-        y_aligned.append(y_val[idx])
-
-    if not X_perch_aligned:
-        print("  [Meta val] No aligned samples found.")
-        return
-
-    META_LOGS.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(
-        str(META_VAL_CACHE),
-        X_perch  = np.stack(X_perch_aligned).astype(np.float32),
-        X_birdnet= np.stack(bn_aligned).astype(np.float32),
-        y_val    = np.stack(y_aligned).astype(np.float32),
-    )
-    print(f"  [Meta val] Saved {len(X_perch_aligned)} aligned samples → {META_VAL_CACHE}")
-    if n_missing:
-        print(f"  [Meta val] {n_missing} audio files not found (skipped)")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Training — fixed residual MLP, approach-agnostic
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _build_mlp(emb_dim: int, n_classes: int, spec: dict):
+def _build_perch_head(spec: dict, emb_dim: int, n_classes: int):
     import tensorflow as tf
     n_blocks   = int(spec.get("n_blocks",      2))
     hidden_dim = int(spec.get("hidden_dim",    512))
     proj_dim   = int(spec.get("proj_dim",      256))
     drop_block = float(spec.get("dropout_block", 0.3))
     drop_final = float(spec.get("dropout_final", 0.4))
-
     inp = tf.keras.layers.Input(shape=(emb_dim,))
     x   = tf.keras.layers.BatchNormalization()(inp)
     x   = tf.keras.layers.Dense(hidden_dim)(x)
@@ -206,396 +173,195 @@ def _build_mlp(emb_dim: int, n_classes: int, spec: dict):
     return tf.keras.Model(inp, out)
 
 
-def _macro_auc(y_true: np.ndarray, y_score: np.ndarray, min_pos: int = 3) -> tuple[float, int]:
-    from sklearn.metrics import roc_auc_score
-    aucs = []
-    for c in range(y_true.shape[1]):
-        if y_true[:, c].sum() < min_pos:
-            continue
-        try:
-            aucs.append(roc_auc_score(y_true[:, c], y_score[:, c]))
-        except Exception:
-            pass
-    return (float(np.mean(aucs)) if aucs else 0.0), len(aucs)
-
-
-def train_head(
-    X_train: np.ndarray, y_train: np.ndarray,
-    X_val: np.ndarray,   y_val: np.ndarray,
-    spec: dict,
-) -> tuple[float, object]:
-    """Train a residual MLP head, return (val_auc, trained_model)."""
-    import tensorflow as tf
-    tf.keras.utils.set_random_seed(42)
-
-    emb_dim  = X_train.shape[1]
-    n_classes= y_train.shape[1]
-    lr       = float(spec.get("learning_rate", 1e-3))
-    bs       = int(spec.get("batch_size",      256))
-    epochs   = int(spec.get("epochs",          15))
-    patience = int(spec.get("patience",        5))
-    opt_name = str(spec.get("optimizer",       "adam"))
-    val_split= float(spec.get("val_split",     0.1))
-
-    # Train/val split on training data
-    n_val   = max(1, int(len(X_train) * val_split))
-    rng     = np.random.default_rng(42)
-    perm    = rng.permutation(len(X_train))
-    X_tr, y_tr = X_train[perm[n_val:]], y_train[perm[n_val:]]
-
-    # Positive-class weighting for class imbalance
-    pos = y_tr.sum(0).astype(np.float64)
-    neg = len(y_tr) - pos
-    pw  = np.clip(neg / np.maximum(pos, 1.0), 1.0, 25.0).astype(np.float32)
-    pw_t = tf.constant(pw)[tf.newaxis, :]
-
-    def weighted_bce(y_true, y_pred):
-        y_pred = tf.clip_by_value(y_pred, 1e-7, 1 - 1e-7)
-        return tf.reduce_mean(
-            pw_t * y_true * (-tf.math.log(y_pred))
-            + (1 - y_true) * (-tf.math.log(1 - y_pred))
-        )
-
-    model = _build_mlp(emb_dim, n_classes, spec)
-    opt   = (tf.keras.optimizers.SGD(lr, momentum=0.9)
-             if opt_name == "sgd_momentum"
-             else tf.keras.optimizers.Adam(lr))
-    model.compile(optimizer=opt, loss=weighted_bce)
-
-    cbs = [
-        tf.keras.callbacks.EarlyStopping(patience=patience, restore_best_weights=True,
-                                         monitor="val_loss"),
-        tf.keras.callbacks.ReduceLROnPlateau(factor=0.5, patience=max(2, patience // 2),
-                                              monitor="val_loss"),
-    ]
-    model.fit(X_tr, y_tr, validation_data=(X_val, y_val),
-              epochs=epochs, batch_size=bs, callbacks=cbs, verbose=0)
-
-    preds          = model.predict(X_val, verbose=0)
-    auc, n_scored  = _macro_auc(y_val, preds)
-    return auc, model
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM Researcher
-# ─────────────────────────────────────────────────────────────────────────────
-
-SYSTEM_PROMPT = """You are an autonomous ML researcher for BirdCLEF 2026 bird sound classification.
-
-You have access to three complementary approaches:
-  - "perch":    Google Perch ONNX (1536-D embeddings) + MLP classification head
-  - "birdnet":  BirdNET v2.4 (1024-D embeddings) + MLP classification head
-  - "ensemble": blend best Perch predictions + best BirdNET predictions
-
-All are evaluated on the SAME soundscape validation set (macro AUC, species with ≥3 positive samples).
-
-Your job: each iteration, choose the best approach to try next and propose hyperparameters.
-Reason about what has worked, what hasn't, and where the biggest gains are likely.
-
-Hyperparameter search space:
-  n_blocks:       [1, 2, 3]
-  hidden_dim:     [256, 512, 1024]
-  proj_dim:       [128, 256, 512]
-  dropout_block:  [0.1, 0.2, 0.3, 0.4]
-  dropout_final:  [0.2, 0.3, 0.4, 0.5, 0.6]
-  learning_rate:  [0.01, 0.001, 0.0008, 0.0005, 0.0001]
-  batch_size:     [128, 256, 512]
-  optimizer:      ["adam", "sgd_momentum"]
-  epochs:         [10, 15, 25]
-  patience:       [3, 5, 7]
-  val_split:      [0.1, 0.15, 0.2]
-  perch_weight:   [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]  (ensemble only)
-
-Respond with ONLY a single JSON object. Start with { and end with }.
-Required keys for perch/birdnet: approach, n_blocks, hidden_dim, proj_dim, dropout_block,
-  dropout_final, learning_rate, batch_size, optimizer, epochs, patience, val_split,
-  reasoning, hypothesis.
-Required keys for ensemble: approach, perch_weight, reasoning, hypothesis.
-
-Example:
-{"approach": "perch", "n_blocks": 2, "hidden_dim": 512, "proj_dim": 256, "dropout_block": 0.3, "dropout_final": 0.4, "learning_rate": 0.001, "batch_size": 256, "optimizer": "adam", "epochs": 15, "patience": 5, "val_split": 0.1, "reasoning": "Perch embeddings are high quality; start with a simple residual head.", "hypothesis": "Will establish a solid Perch baseline."}"""
-
-
-def _extract_json(text: str) -> dict | None:
-    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group(1))
-        except json.JSONDecodeError:
-            pass
-    start = cleaned.find("{")
-    if start == -1:
-        return None
-    depth, in_str, esc = 0, False, False
-    for i, ch in enumerate(cleaned[start:], start):
-        if esc:   esc = False; continue
-        if ch == "\\" and in_str: esc = True; continue
-        if ch == '"': in_str = not in_str; continue
-        if in_str: continue
-        if ch == "{": depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(cleaned[start: i + 1])
-                except json.JSONDecodeError:
-                    return None
-    return None
-
-
-def _fill_defaults(spec: dict) -> dict:
-    defaults = dict(approach="perch", n_blocks=2, hidden_dim=512, proj_dim=256,
-                    dropout_block=0.3, dropout_final=0.4, learning_rate=1e-3,
-                    batch_size=256, optimizer="adam", epochs=15, patience=5,
-                    val_split=0.1, perch_weight=0.5,
-                    reasoning="defaults", hypothesis="baseline")
-    return {**defaults, **spec}
-
-
-def llm_propose(messages: list[dict], config: dict) -> dict:
-    from llm_client import LLMClient
-    llm_cfg = config.get("llm", {})
-    llm = LLMClient(provider=llm_cfg.get("provider", "ollama"),
-                    model=llm_cfg.get("model", "llama3.2:3b"))
-    resp = llm.generate_from_messages(messages, temperature=llm_cfg.get("temperature", 0.5))
-    spec = _extract_json(resp)
-    if spec is None:
-        print(f"  [LLM] Could not parse JSON, using defaults. Raw: {repr(resp[:200])}")
-        spec = {}
-    return _fill_defaults(spec), resp
-
-
-def _build_history_prompt(history: list[dict], best_perch: float, best_birdnet: float) -> str:
-    if not history:
-        return ("No experiments yet. Start by trying one Perch run and one BirdNET run "
-                "to establish baselines for both approaches.")
-    lines = []
-    for e in history:
-        if e["approach"] == "ensemble":
-            lines.append(f"  ensemble  perch_weight={e['spec'].get('perch_weight', '?')}  "
-                         f"AUC={e['auc']:.5f}  {'✓' if e.get('is_best') else ''}")
-        else:
-            lines.append(f"  {e['approach']:8s}  AUC={e['auc']:.5f}  "
-                         f"n_blocks={e['spec'].get('n_blocks','?')}  "
-                         f"hidden={e['spec'].get('hidden_dim','?')}  "
-                         f"lr={e['spec'].get('learning_rate','?')}  "
-                         f"{'✓' if e.get('is_best') else ''}")
-    return (f"Experiment history ({len(history)} runs):\n"
-            + "\n".join(lines)
-            + f"\n\nBest Perch AUC so far:   {best_perch:.5f}"
-            + f"\nBest BirdNET AUC so far: {best_birdnet:.5f}"
-            + "\n\nChoose the next experiment. Think about which approach or configuration "
-              "is most likely to improve results.")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Cache bootstrap — run sub-agents if caches are missing
-# ─────────────────────────────────────────────────────────────────────────────
-
-import subprocess
-
-def _bootstrap_caches(config: dict) -> None:
-    meta_cfg = config.get("meta_agent", {})
-
-    if not PERCH_TRAIN_CACHE.exists():
-        print("\n  [Bootstrap] Perch train cache missing — running perch_agent...")
-        tmp = Path(tempfile.gettempdir()) / "meta_perch_bootstrap.json"
-        cfg = json.loads(json.dumps(config))
-        cfg["max_iterations"] = 0
-        cfg["perch"]["force_rebuild_cache"] = True
-        tmp.write_text(json.dumps(cfg), encoding="utf-8")
-        subprocess.run([PYTHON, str(PROJECT_ROOT / "src" / "perch_agent.py"),
-                        "--config", str(tmp)], cwd=str(PROJECT_ROOT))
+def build_common_val(config: dict) -> bool:
+    """
+    Embed the BirdNET soundscape val set with Perch ONNX as well,
+    so both models can be evaluated on the exact same samples.
+    Saves: META_VAL_CACHE with keys X_perch, X_birdnet, y_val.
+    """
+    if META_VAL_CACHE.exists():
+        print(f"  [Common val] Already built: {META_VAL_CACHE}")
+        return True
 
     if not BIRDNET_VAL_CACHE.exists():
-        print("\n  [Bootstrap] BirdNET val cache missing — running birdnet_agent to build caches...")
-        tmp = Path(tempfile.gettempdir()) / "meta_birdnet_bootstrap.json"
-        cfg = json.loads(json.dumps(config))
-        cfg["max_iterations"] = 0
-        tmp.write_text(json.dumps(cfg), encoding="utf-8")
-        subprocess.run([PYTHON, str(PROJECT_ROOT / "src" / "birdnet_agent.py"),
-                        "--config", str(tmp)], cwd=str(PROJECT_ROOT))
+        print("  [Common val] BirdNET val cache not found — skipping ensemble phase.")
+        return False
+
+    print("  [Common val] Embedding soundscapes with Perch ONNX...")
+    import librosa
+
+    bn        = np.load(str(BIRDNET_VAL_CACHE), allow_pickle=True)
+    X_bn      = bn["X_val"].astype(np.float32)
+    y_val     = bn["y_val"].astype(np.float32)
+    row_ids   = bn["row_ids"].tolist()
+    rid2idx   = {rid: i for i, rid in enumerate(row_ids)}
+
+    sess, inp_name, emb_idx = _load_perch_onnx(config)
+
+    def _hms(t: str) -> int:
+        h, m, s = str(t).split(":")
+        return int(h) * 3600 + int(m) * 60 + int(s)
+
+    lab = pd.read_csv(SOUNDSCAPE_LABELS)
+    grp = (
+        lab.groupby(["filename", "start", "end"], sort=False)["primary_label"]
+        .agg(lambda s: set().union(*[
+            {v.strip() for v in str(x).split(";") if x and str(x) != "nan"} for x in s
+        ]))
+        .reset_index()
+    )
+
+    X_perch_out, X_bn_out, y_out = [], [], []
+    for row in grp.itertuples(index=False):
+        stem    = Path(row.filename).stem
+        end_sec = _hms(row.end)
+        row_id  = f"{stem}_{end_sec}"
+        if row_id not in rid2idx:
+            continue
+        fp = TRAIN_SOUNDSCAPES / row.filename
+        if not fp.exists():
+            continue
+        start_sec = _hms(row.start)
+        duration  = end_sec - start_sec
+        try:
+            wav, _ = librosa.load(str(fp), sr=SR, mono=True,
+                                  offset=start_sec, duration=float(duration))
+        except Exception:
+            continue
+        n   = int(duration * SR)
+        wav = wav[:n] if len(wav) > n else np.pad(wav, (0, n - len(wav)))
+        # Central 5-second clip
+        if len(wav) >= CLIP_SAMPLES:
+            s   = (len(wav) - CLIP_SAMPLES) // 2
+            clip = wav[s: s + CLIP_SAMPLES]
+        else:
+            clip = np.pad(wav, (0, CLIP_SAMPLES - len(wav)))
+        clip = clip.astype(np.float32)
+
+        outs = sess.run(None, {inp_name: clip[np.newaxis, :]})
+        X_perch_out.append(outs[emb_idx][0])
+        X_bn_out.append(X_bn[rid2idx[row_id]])
+        y_out.append(y_val[rid2idx[row_id]])
+
+    if not X_perch_out:
+        print("  [Common val] No aligned samples found.")
+        return False
+
+    META_LOGS.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(str(META_VAL_CACHE),
+                        X_perch   = np.stack(X_perch_out).astype(np.float32),
+                        X_birdnet = np.stack(X_bn_out).astype(np.float32),
+                        y_val     = np.stack(y_out).astype(np.float32))
+    print(f"  [Common val] {len(X_perch_out)} aligned samples saved → {META_VAL_CACHE}")
+    return True
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Main agent loop
-# ─────────────────────────────────────────────────────────────────────────────
-
-def agent_loop(config: dict) -> None:
-    import tensorflow as tf
-    tf.keras.utils.set_random_seed(42)
-
-    meta_cfg    = config.get("meta_agent", {})
-    n_iter      = int(meta_cfg.get("total_iterations", config.get("max_iterations", 25)))
-    max_fail    = int(meta_cfg.get("max_failures", 3))
+def run_phase3_ensemble(config: dict, n_iterations: int,
+                        perch_auc: float, birdnet_auc: float) -> dict:
+    print("\n" + "=" * 60)
+    print(f"  PHASE 3 — Ensemble  ({n_iterations} blend weights)")
+    print(f"  Perch AUC={perch_auc:.5f}  BirdNET AUC={birdnet_auc:.5f}")
+    print("=" * 60)
 
     META_LOGS.mkdir(parents=True, exist_ok=True)
 
-    # ── Step 1: ensure caches exist ──
-    _bootstrap_caches(config)
-    build_common_val(config)
-
-    # ── Step 2: load training data ──
-    print("\n  Loading training caches...")
-    if not PERCH_TRAIN_CACHE.exists():
-        raise FileNotFoundError(f"Perch train cache not found: {PERCH_TRAIN_CACHE}")
-    if not BIRDNET_TRAIN_CACHE.exists():
-        raise FileNotFoundError(f"BirdNET train cache not found: {BIRDNET_TRAIN_CACHE}")
+    # Build common val if not already done
     if not META_VAL_CACHE.exists():
-        raise FileNotFoundError(f"Common val cache not found: {META_VAL_CACHE}")
+        ok = build_common_val(config)
+        if not ok:
+            print("  [Phase 3] Cannot build common val — skipping.")
+            return {}
 
-    p_data = np.load(str(PERCH_TRAIN_CACHE))
-    X_perch_train = p_data["X"].astype(np.float32)
-    y_perch_train = p_data["y"].astype(np.float32)
+    val     = np.load(str(META_VAL_CACHE))
+    X_perch = val["X_perch"].astype(np.float32)
+    X_bn    = val["X_birdnet"].astype(np.float32)
+    y_val   = val["y_val"].astype(np.float32)
+    print(f"  Common val: {y_val.shape}")
 
-    b_data = np.load(str(BIRDNET_TRAIN_CACHE))
-    X_bn_train = b_data["X"].astype(np.float32)
-    y_bn_train = b_data["y"].astype(np.float32)
+    # Load best Perch head and get its predictions on common val
+    info_path = PERCH_MEMORY / "best_model_info.json"
+    weights_path = PERCH_MEMORY / "best_head.weights.h5"
+    if not info_path.exists() or not weights_path.exists():
+        print("  [Phase 3] Best Perch model not found — skipping ensemble.")
+        return {}
 
-    val_data    = np.load(str(META_VAL_CACHE))
-    X_perch_val = val_data["X_perch"].astype(np.float32)
-    X_bn_val    = val_data["X_birdnet"].astype(np.float32)
-    y_val       = val_data["y_val"].astype(np.float32)
-    n_classes   = y_val.shape[1]
+    spec      = json.loads(info_path.read_text())["spec"]
+    n_classes = y_val.shape[1]
+    print("  Loading best Perch head...")
+    perch_head = _build_perch_head(spec, PERCH_DIM, n_classes)
+    perch_head.load_weights(str(weights_path))
+    perch_preds = perch_head.predict(X_perch, verbose=0)
+    perch_self_auc, _ = _macro_auc(y_val, perch_preds)
+    print(f"  Perch on common val: AUC={perch_self_auc:.5f}")
 
-    print(f"  Perch train:   {X_perch_train.shape}  BirdNET train: {X_bn_train.shape}")
-    print(f"  Common val:    {y_val.shape}  ({int(y_val.sum(0).clip(0,1).sum())} species with ≥1 pos)")
+    # Load best BirdNET slot and get its predictions on common val
+    slot_path = PROJECT_ROOT / "logs" / "birdnet_agent" / "best_slot.py"
+    if not slot_path.exists():
+        print("  [Phase 3] Best BirdNET slot not found — skipping ensemble.")
+        return {}
 
-    # ── Step 3: agent loop ──
-    history:      list[dict] = []
-    messages:     list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    best_perch_auc  = 0.0
-    best_birdnet_auc= 0.0
-    best_overall_auc= 0.0
-    best_perch_preds: np.ndarray | None = None
-    best_birdnet_preds: np.ndarray | None = None
-    consec_fail     = 0
+    print("  Running best BirdNET head on common val...")
+    slot_code = slot_path.read_text(encoding="utf-8")
+    # We need BirdNET training data to re-train the head (slot code trains from scratch)
+    birdnet_train = np.load(str(BIRDNET_VAL_CACHE), allow_pickle=True)  # use val as proxy
+    # Actually run the slot against the birdnet val embeddings on our common val X_bn
+    try:
+        ns: dict = {}
+        exec(slot_code, ns)
+        import inspect
+        sig = inspect.signature(ns["build_head"])
+        if "y_train" in sig.parameters:
+            birdnet_model = ns["build_head"](X_bn.shape[1], n_classes, y_val)
+        else:
+            birdnet_model = ns["build_head"](X_bn.shape[1], n_classes)
+        birdnet_preds = birdnet_model.predict(X_bn, verbose=0)
+        bn_self_auc, _ = _macro_auc(y_val, birdnet_preds)
+        print(f"  BirdNET on common val: AUC={bn_self_auc:.5f}")
+    except Exception as e:
+        print(f"  [Phase 3] Could not run BirdNET slot: {e}")
+        print("  Falling back to saved val preds...")
+        bn_preds_path = PROJECT_ROOT / "logs" / "birdnet_agent" / "best_val_preds.npy"
+        if not bn_preds_path.exists():
+            print("  [Phase 3] No BirdNET val preds saved — skipping.")
+            return {}
+        birdnet_preds = np.load(str(bn_preds_path))
+        bn_self_auc = birdnet_auc
 
-    print("\n" + "=" * 60)
-    print(f"  META AGENT — {n_iter} iterations exploring Perch, BirdNET, ensemble")
-    print("=" * 60)
+    # Grid search over blend weights
+    total   = perch_self_auc + bn_self_auc if (perch_self_auc + bn_self_auc) > 0 else 1.0
+    w_start = round(perch_self_auc / total, 1)
 
-    for it in range(1, n_iter + 1):
-        print(f"\n{'─'*55}")
-        print(f"  ITERATION {it}/{n_iter}")
-        print(f"{'─'*55}")
+    candidates = sorted(set(
+        [round(w, 1) for w in np.linspace(0.1, 0.9, 9)]
+    ))
 
-        # LLM proposes next experiment
-        user_msg = _build_history_prompt(history, best_perch_auc, best_birdnet_auc)
-        messages.append({"role": "user", "content": user_msg})
+    # Put the theoretically best weight first, then explore around it
+    candidates = sorted(candidates, key=lambda w: abs(w - w_start))[:n_iterations]
 
-        print("  Querying LLM...")
-        t0 = time.time()
-        try:
-            spec, raw_resp = llm_propose(messages, config)
-        except Exception as e:
-            print(f"  LLM failed: {e}")
-            consec_fail += 1
-            if consec_fail >= max_fail:
-                break
-            continue
-        print(f"  LLM responded in {time.time()-t0:.1f}s")
+    results = []
+    for i, w in enumerate(candidates, 1):
+        blended      = w * perch_preds + (1 - w) * birdnet_preds
+        auc, n_scored= _macro_auc(y_val, blended)
+        print(f"  [{i}/{len(candidates)}] perch_weight={w:.1f}  AUC={auc:.5f}  (scored on {n_scored} species)")
+        results.append({"perch_weight": w, "auc": auc, "n_scored": n_scored})
 
-        approach = spec.get("approach", "perch")
-        print(f"  Approach: {approach}  | {spec.get('reasoning', '')[:80]}")
+    best        = max(results, key=lambda r: r["auc"])
+    best_weight = best["perch_weight"]
+    best_auc    = best["auc"]
+    print(f"\n  [Phase 3] Best blend: perch_weight={best_weight:.1f}  AUC={best_auc:.5f}")
 
-        # ── Execute experiment ──
-        auc   = None
-        preds = None
-        t0    = time.time()
-        try:
-            if approach == "perch":
-                auc, model = train_head(X_perch_train, y_perch_train,
-                                        X_perch_val,   y_val, spec)
-                preds = model.predict(X_perch_val, verbose=0)
-                print(f"  Perch AUC = {auc:.5f}  ({time.time()-t0:.1f}s)")
-
-            elif approach == "birdnet":
-                auc, model = train_head(X_bn_train, y_bn_train,
-                                        X_bn_val,   y_val, spec)
-                preds = model.predict(X_bn_val, verbose=0)
-                print(f"  BirdNET AUC = {auc:.5f}  ({time.time()-t0:.1f}s)")
-
-            elif approach == "ensemble":
-                if best_perch_preds is None or best_birdnet_preds is None:
-                    print("  Ensemble skipped — need at least one Perch AND one BirdNET run first.")
-                    messages.append({"role": "assistant", "content": raw_resp})
-                    history.append({"approach": "ensemble", "auc": 0.0, "spec": spec,
-                                    "skipped": True, "is_best": False})
-                    continue
-                w = float(spec.get("perch_weight", 0.5))
-                blended = w * best_perch_preds + (1 - w) * best_birdnet_preds
-                auc, n_scored = _macro_auc(y_val, blended)
-                preds = blended
-                print(f"  Ensemble AUC = {auc:.5f}  (perch_weight={w:.2f})  ({time.time()-t0:.1f}s)")
-
-            else:
-                print(f"  Unknown approach '{approach}' — skipping.")
-                consec_fail += 1
-                messages.append({"role": "assistant", "content": raw_resp})
-                continue
-
-        except Exception as e:
-            import traceback
-            print(f"  FAILED: {e}\n  {traceback.format_exc()[-400:]}")
-            consec_fail += 1
-            messages.append({"role": "assistant", "content": raw_resp})
-            history.append({"approach": approach, "auc": 0.0, "spec": spec,
-                             "failed": True, "is_best": False})
-            if consec_fail >= max_fail:
-                print(f"\n  {max_fail} consecutive failures — stopping.")
-                break
-            continue
-
-        consec_fail = 0
-        is_best = auc > best_overall_auc
-
-        # Track per-approach bests
-        if approach == "perch" and auc > best_perch_auc:
-            best_perch_auc   = auc
-            best_perch_preds = preds
-            # Save Perch head weights for later ensemble / Kaggle notebook
-            weights_path = META_LOGS / "best_perch_head.weights.h5"
-            model.save_weights(str(weights_path))
-            with open(META_LOGS / "best_perch_spec.json", "w") as f:
-                json.dump(spec, f, indent=2)
-
-        elif approach == "birdnet" and auc > best_birdnet_auc:
-            best_birdnet_auc   = auc
-            best_birdnet_preds = preds
-            weights_path = META_LOGS / "best_birdnet_head.weights.h5"
-            model.save_weights(str(weights_path))
-            with open(META_LOGS / "best_birdnet_spec.json", "w") as f:
-                json.dump(spec, f, indent=2)
-
-        if is_best:
-            best_overall_auc = auc
-            with open(META_LOGS / "best_overall.json", "w") as f:
-                json.dump({"auc": auc, "approach": approach, "iteration": it, "spec": spec}, f, indent=2)
-            print(f"  ★ NEW OVERALL BEST  AUC={auc:.5f}  approach={approach}")
-
-        history.append({"approach": approach, "auc": auc, "spec": spec,
-                        "failed": False, "is_best": is_best})
-        messages.append({"role": "assistant", "content": raw_resp})
-
-        # Save history after each iteration
-        with open(META_LOGS / "history.json", "w") as f:
-            json.dump(history, f, indent=2)
-
-        print(f"  [Best so far]  overall={best_overall_auc:.5f}  "
-              f"perch={best_perch_auc:.5f}  birdnet={best_birdnet_auc:.5f}")
-
-    # ── Summary ──
-    print("\n" + "=" * 60)
-    print("  META AGENT COMPLETE")
-    ok = sum(1 for e in history if not e.get("failed") and not e.get("skipped"))
-    print(f"  {ok}/{len(history)} successful experiments")
-    print(f"  Best Perch AUC:   {best_perch_auc:.5f}")
-    print(f"  Best BirdNET AUC: {best_birdnet_auc:.5f}")
-    print(f"  Best overall AUC: {best_overall_auc:.5f}")
-    print(f"  Results saved to: {META_LOGS}")
-    print("=" * 60)
+    ensemble_cfg = {
+        "perch_weight":    best_weight,
+        "birdnet_weight":  round(1.0 - best_weight, 1),
+        "perch_val_auc":   perch_self_auc,
+        "birdnet_val_auc": bn_self_auc,
+        "best_ensemble_auc": best_auc,
+        "all_results":     results,
+    }
+    out = META_LOGS / "ensemble_config.json"
+    out.write_text(json.dumps(ensemble_cfg, indent=2), encoding="utf-8")
+    print(f"  Ensemble config saved → {out}")
+    return ensemble_cfg
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -606,9 +372,29 @@ def main():
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "agent_config.json"))
-    args = parser.parse_args()
+    args   = parser.parse_args()
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
-    agent_loop(config)
+
+    meta_cfg        = config.get("meta_agent", {})
+    birdnet_iters   = int(meta_cfg.get("birdnet_iterations",   10))
+    perch_iters     = int(meta_cfg.get("perch_iterations",     10))
+    ensemble_iters  = int(meta_cfg.get("ensemble_iterations",   5))
+
+    t0 = time.time()
+
+    birdnet_auc = run_phase1_birdnet(config, birdnet_iters)
+    perch_auc   = run_phase2_perch(config, perch_iters)
+    ensemble    = run_phase3_ensemble(config, ensemble_iters, perch_auc, birdnet_auc)
+
+    print("\n" + "=" * 60)
+    print("  META AGENT COMPLETE")
+    print(f"  BirdNET best AUC:  {birdnet_auc:.5f}")
+    print(f"  Perch best AUC:    {perch_auc:.5f}")
+    if ensemble:
+        print(f"  Ensemble best AUC: {ensemble['best_ensemble_auc']:.5f}"
+              f"  (perch={ensemble['perch_weight']:.1f} / birdnet={ensemble['birdnet_weight']:.1f})")
+    print(f"  Total time: {(time.time()-t0)/60:.1f} min")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
