@@ -1,39 +1,27 @@
-from openai import OpenAI
+import requests
 
 class LLMClient:
-    def __init__(self, provider: str = "ollama", model: str = "gemma4"):
-        """Initializes the client pointing to the local LLM server."""
+    def __init__(self, provider: str = "ollama", model: str = "llama3.2:3b"):
         self.model_name = model
-        self.provider = provider
-        
-        # Determine the base URL depending on the provider from the config
         if provider.lower() == "ollama":
-            base_url = "http://localhost:11434/v1"
+            self.base_url = "http://localhost:11434/api/chat"
         else:
-            # Fallback if using LM Studio or others
-            base_url = "http://localhost:1234/v1" 
-            
-        self.client = OpenAI(
-            base_url=base_url,
-            api_key="local-dummy-key" # Local servers require a string here, but ignore it
-        )
+            self.base_url = "http://localhost:1234/v1/chat/completions"
 
     def generate_from_messages(self, messages: list[dict[str, str]], temperature: float = 0.2) -> str:
-        """Sends full chat history to the local LLM and returns the reply."""
         try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                temperature=temperature,
+            resp = requests.post(
+                self.base_url,
+                json={"model": self.model_name, "messages": messages, "stream": False,
+                      "options": {"temperature": temperature}},
+                timeout=600,
             )
-            return response.choices[0].message.content or ""
+            resp.raise_for_status()
+            return resp.json()["message"]["content"]
         except Exception as e:
             return f"Error communicating with local LLM: {e}"
 
     def generate_code(self, system_prompt: str, user_prompt: str, temperature: float = 0.2) -> str:
-        """
-        Sends a prompt to the local LLM and returns the response.
-        """
         return self.generate_from_messages(
             messages=[
                 {"role": "system", "content": system_prompt},

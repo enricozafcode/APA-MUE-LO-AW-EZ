@@ -10,13 +10,13 @@ def get_training_config():
         "learning_rate": 0.0005,
         "optimizer": "adam",
         "val_split": 0.2,
-        "weight_decay": 0.0,
+        "weight_decay": 0.0001,
         "classifier_hidden_units": 512,
         "pooling_type": "global_avg",
-        "aug_prob": 0.25,
-        "aug_noise_std": 0.015,
+        "aug_prob": 0.0,
+        "aug_noise_std": 0.0,
         "aug_time_mask": 0,
-        "aug_freq_mask": 12,
+        "aug_freq_mask": 0,
     }
 
 
@@ -27,7 +27,7 @@ def build_model(input_shape, num_classes):
     use_batch_norm = True
     use_residuals = True
     dropout_rate = 0.0
-    weight_decay = 0.0
+    weight_decay = 0.0001
     classifier_hidden_units = 512
     pooling_type = "global_avg"
     reg = tf.keras.regularizers.l2(weight_decay) if weight_decay > 0 else None
@@ -66,4 +66,4 @@ def build_model(input_shape, num_classes):
 
 # --- FINAL OVERRIDE: force final training config ---
 def get_training_config():
-    return {'max_samples': None, 'sample_rate': 32000, 'clip_seconds': 5.0, 'n_mels': 64, 'n_frames': 128, 'epochs': 15, 'batch_size': 32, 'learning_rate': 0.0005, 'optimizer': 'adam', 'val_split': 0.0, 'weight_decay': 0.0, 'classifier_hidden_units': 512, 'pooling_type': 'global_avg', 'use_best_checkpoint': True}
+    return {'max_samples': None, 'sample_rate': 32000, 'clip_seconds': 5.0, 'n_mels': 64, 'n_frames': 128, 'epochs': 15, 'batch_size': 32, 'learning_rate': 0.0005, 'optimizer': 'adam', 'val_split': 0.0, 'weight_decay': 0.0001, 'classifier_hidden_units': 512, 'pooling_type': 'global_avg', 'use_best_checkpoint': True}

@@ -72,6 +72,11 @@ class AudioAugmenter:
         shift = int(np.random.uniform(-max_fraction, max_fraction) * len(audio))
         return np.roll(audio, shift)
 
+    def gain_jitter(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        c = self.cfg["gain_jitter"]
+        gain_db = float(np.random.uniform(c.get("min_db", -6.0), c.get("max_db", 6.0)))
+        return np.clip(audio * (10.0 ** (gain_db / 20.0)), -1.0, 1.0).astype(audio.dtype)
+
     # --- main entry point ---
 
     def apply(self, audio: np.ndarray, sr: int) -> np.ndarray:
@@ -84,11 +89,13 @@ class AudioAugmenter:
             audio = self.noise_injection(audio, sr)
         if self._enabled("time_shift") and self._roll("time_shift"):
             audio = self.time_shift(audio, sr)
+        if self._enabled("gain_jitter") and self._roll("gain_jitter"):
+            audio = self.gain_jitter(audio, sr)
         return audio
 
     def active_strategies(self) -> list[str]:
         """Returns names of currently enabled strategies."""
-        return [s for s in ["time_stretch", "pitch_shift", "noise_injection", "time_shift"]
+        return [s for s in ["time_stretch", "pitch_shift", "noise_injection", "time_shift", "gain_jitter"]
                 if self._enabled(s)]
 
 
