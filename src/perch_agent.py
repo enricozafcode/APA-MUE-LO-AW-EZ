@@ -1024,6 +1024,13 @@ def run(config: dict) -> None:
                     shutil.copy2(str(_weights_src), str(mem_dir / "best_head.weights.h5"))
                 with open(mem_dir / "best_model_info.json", "w") as _f:
                     json.dump({"auc": auc, "iteration": iteration, "spec": spec}, _f, indent=2)
+                # Save val preds for meta-agent ensemble phase
+                _y_pred_tmp = Path(tempfile.gettempdir()) / "_y_pred.npy"
+                _y_true_tmp = Path(tempfile.gettempdir()) / "_y_true.npy"
+                if _y_pred_tmp.exists():
+                    shutil.copy2(str(_y_pred_tmp), str(mem_dir / "best_val_preds.npy"))
+                if _y_true_tmp.exists():
+                    shutil.copy2(str(_y_true_tmp), str(mem_dir / "y_val.npy"))
                 print(f"  [Best] NEW BEST AUC={auc:.5f} — head saved to {best_head_path.name}")
 
         best = memory.best_runs(1)
