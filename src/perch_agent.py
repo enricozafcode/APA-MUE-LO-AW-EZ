@@ -409,6 +409,36 @@ def _build_focal_val_fallback(train_cache: Path, val_cache: Path) -> None:
 # Perch Researcher — outer loop, reads history, decides head config
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _extract_first_json_object(text: str) -> dict | None:
+    """Find the first complete JSON object in text by counting braces."""
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth, in_string, escape = 0, False, False
+    for i, ch in enumerate(text[start:], start):
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
 PERCH_SEARCH_SPACE = {
     "n_blocks":      [1, 2, 3],
     "hidden_dim":    [512, 1024],
@@ -418,8 +448,8 @@ PERCH_SEARCH_SPACE = {
     "learning_rate": [1e-2, 1e-3, 8e-4, 5e-4, 1e-4],
     "batch_size":    [128, 256, 512],
     "optimizer":     ["adam", "sgd_momentum"],
-    "epochs":        [30, 50, 80],
-    "patience":      [5, 7, 10],
+    "epochs":        [15, 25, 40],
+    "patience":      [3, 5, 7],
     "perch_weight":  [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
 }
 
@@ -434,12 +464,13 @@ Reason carefully about:
 - Which learning rates and batch sizes worked
 - What has NOT been tried yet
 
-Output ONLY a JSON object with all hyperparameter values plus:
-- "reasoning": analysis of past results (2-3 sentences)
-- "hypothesis": why this config will improve (1-2 sentences)
-- "strategy": one of "exploit", "explore", or "fix_failure"
+You MUST respond with ONLY a single JSON object — no prose, no explanation, no markdown, no code fences.
+Start your response with { and end with }.
 
-Return ONLY valid JSON, nothing else."""
+Example response format:
+{"n_blocks": 2, "hidden_dim": 1024, "proj_dim": 512, "dropout_block": 0.3, "dropout_final": 0.4, "learning_rate": 0.001, "batch_size": 256, "optimizer": "adam", "epochs": 25, "patience": 5, "perch_weight": 0.2, "reasoning": "First run, establishing baseline.", "hypothesis": "Standard residual MLP should generalize well.", "strategy": "explore"}
+
+Required keys: n_blocks, hidden_dim, proj_dim, dropout_block, dropout_final, learning_rate, batch_size, optimizer, epochs, patience, perch_weight, reasoning, hypothesis, strategy."""
 
 
 class PerchResearcher:
@@ -460,9 +491,10 @@ class PerchResearcher:
             f"Search space:\n{json.dumps(PERCH_SEARCH_SPACE, indent=2)}\n\n"
             f"Total experiments: {total}\n"
             f"Best AUC: {best_str}\n\n"
-            "Pick the next experiment. Return JSON with all hyperparameter values "
-            "plus 'reasoning', 'hypothesis', 'strategy'. "
-            "Build on what worked; avoid repeating failed configs."
+            "Pick the next experiment. Respond with ONLY a JSON object — no prose, no markdown.\n"
+            "Start with { and end with }. Include all keys: "
+            "n_blocks, hidden_dim, proj_dim, dropout_block, dropout_final, learning_rate, "
+            "batch_size, optimizer, epochs, patience, perch_weight, reasoning, hypothesis, strategy."
         )
 
         print(f"\n  [Researcher] Analyzing {total} experiments, best AUC={best_str}...")
@@ -483,13 +515,24 @@ class PerchResearcher:
         return spec
 
     def _parse_spec(self, response: str) -> dict:
-        match = re.search(r'\{.*\}', response, re.DOTALL)
-        if match:
+        # Strip deepseek-r1 thinking tokens before searching for JSON
+        cleaned = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+
+        # Try ```json ... ``` block
+        m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', cleaned, re.DOTALL)
+        if m:
             try:
-                return _perch_fill_defaults(json.loads(match.group()))
+                return _perch_fill_defaults(json.loads(m.group(1)))
             except json.JSONDecodeError:
                 pass
+
+        # Walk character by character to find the first complete JSON object
+        spec = _extract_first_json_object(cleaned)
+        if spec is not None:
+            return _perch_fill_defaults(spec)
+
         print("  [Researcher] Warning: could not parse JSON, using safe defaults.")
+        print(f"  [Researcher] Raw response (first 400 chars): {repr(cleaned[:400])}")
         return _perch_safe_defaults()
 
 
@@ -503,8 +546,8 @@ def _perch_safe_defaults() -> dict:
         "learning_rate": 8e-4,
         "batch_size":    256,
         "optimizer":     "adam",
-        "epochs":        50,
-        "patience":      7,
+        "epochs":        25,
+        "patience":      5,
         "perch_weight":  0.2,
         "reasoning":     "Fallback defaults — researcher output could not be parsed.",
         "hypothesis":    "Baseline residual head config.",
@@ -524,33 +567,40 @@ def _perch_fill_defaults(spec: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 PERCH_CODER_SYSTEM_PROMPT = """You are a Python ML engineer.
-You receive a hyperparameter spec and write a TensorFlow/Keras classification head for Perch embeddings.
-Return ONLY one ```python``` code block, nothing else.
+You receive a hyperparameter spec and must return ONLY a Python function get_training_config().
 
 Rules:
-- Define exactly two functions: get_training_config() and build_head(emb_dim, num_classes)
-- get_training_config() returns a plain Python dict — no imports, no class needed
-- build_head() returns an UNCOMPILED tf.keras.Model (compilation happens in harness)
-- Input to the model: 1D tensor of shape (emb_dim,)
-- Final layer: Dense(num_classes, activation='sigmoid')
-- Use tf.keras layers: BatchNormalization, Dense, Dropout, Add, LayerNormalization, Activation
-- Build n_blocks residual blocks each with: Dense → LayerNorm → Activation → Dropout → Dense → Add → LayerNorm
-- Do NOT import tensorflow at module level — it is already imported in the harness as 'tf'
-- Do NOT define main() or any other function
-- No top-level executable statements outside the two required functions"""
+- Define ONLY ONE function: get_training_config()
+- get_training_config() returns a plain Python dict with all the values from the spec
+- Do NOT define build_head(), main(), or any other function
+- Do NOT import anything
+- No top-level executable statements
+
+Example:
+```python
+def get_training_config():
+    return {
+        "n_blocks": 2,
+        "hidden_dim": 1024,
+        "proj_dim": 512,
+        "dropout_block": 0.3,
+        "dropout_final": 0.4,
+        "learning_rate": 0.001,
+        "batch_size": 256,
+        "optimizer": "adam",
+        "epochs": 25,
+        "patience": 5,
+        "perch_weight": 0.2,
+    }
+```"""
 
 
 def _spec_to_coder_prompt(spec: dict) -> str:
     clean = {k: v for k, v in spec.items() if k not in ("reasoning", "hypothesis", "strategy")}
     return (
-        f"Implement this Perch classification head configuration:\n"
+        f"Write get_training_config() that returns exactly this configuration:\n"
         f"{json.dumps(clean, indent=2)}\n\n"
-        f"Write get_training_config() returning these values and "
-        f"build_head(emb_dim, num_classes) that builds a residual MLP with "
-        f"BatchNormalization → Dense(hidden_dim) → LayerNorm → "
-        f"{clean.get('n_blocks', 2)} residual blocks (each with dropout={clean.get('dropout_block', 0.3)}) → "
-        f"Dense(proj_dim={clean.get('proj_dim', 512)}) → Dropout({clean.get('dropout_final', 0.4)}) → "
-        f"Dense(num_classes, sigmoid)."
+        f"Return ONLY the function in a ```python``` code block. Nothing else."
     )
 
 
@@ -577,8 +627,6 @@ def _validate_perch_code(code: str) -> list[str]:
     names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     if "get_training_config" not in names:
         issues.append("Missing: get_training_config()")
-    if "build_head" not in names:
-        issues.append("Missing: build_head(emb_dim, num_classes)")
     return issues
 
 
@@ -668,6 +716,34 @@ print(f"  Loaded val:   X={X_val.shape}    y={y_val.shape}")
 
 
 HARNESS_SUFFIX = r"""
+# Fixed reference architecture — always the same structure, controlled by get_training_config()
+# This overrides any build_head() the Coder may have generated, ensuring Kaggle notebook matches.
+def build_head(emb_dim, num_classes):
+    cfg        = get_training_config()
+    n_blocks   = int(cfg.get("n_blocks",      2))
+    hidden_dim = int(cfg.get("hidden_dim",    1024))
+    proj_dim   = int(cfg.get("proj_dim",      512))
+    drop_block = float(cfg.get("dropout_block", 0.3))
+    drop_final = float(cfg.get("dropout_final", 0.4))
+
+    inp = tf.keras.layers.Input(shape=(emb_dim,))
+    x   = tf.keras.layers.BatchNormalization()(inp)
+    x   = tf.keras.layers.Dense(hidden_dim)(x)
+    x   = tf.keras.layers.LayerNormalization()(x)
+    for _ in range(n_blocks):
+        h = tf.keras.layers.Dense(hidden_dim)(x)
+        h = tf.keras.layers.LayerNormalization()(h)
+        h = tf.keras.layers.Activation("gelu")(h)
+        h = tf.keras.layers.Dropout(drop_block)(h)
+        h = tf.keras.layers.Dense(hidden_dim)(h)
+        x = tf.keras.layers.Add()([x, h])
+        x = tf.keras.layers.LayerNormalization()(x)
+    x   = tf.keras.layers.Dense(proj_dim, activation="gelu")(x)
+    x   = tf.keras.layers.Dropout(drop_final)(x)
+    out = tf.keras.layers.Dense(num_classes, activation="sigmoid")(x)
+    return tf.keras.Model(inp, out)
+
+
 def main():
     tf.keras.utils.set_random_seed(42)
     cfg = get_training_config()
@@ -688,6 +764,19 @@ def main():
     X_tr, y_tr = X_train[trn_idx], y_train[trn_idx]
     X_vl, y_vl = X_train[val_idx], y_train[val_idx]
 
+    # Positive class weighting — handles severe species imbalance (200:1 neg/pos ratio)
+    pos = y_tr.sum(axis=0).astype(np.float64)
+    neg = len(y_tr) - pos
+    pos_weight = np.clip(neg / np.maximum(pos, 1.0), 1.0, 25.0).astype(np.float32)
+    pw = tf.constant(pos_weight)[tf.newaxis, :]
+
+    def weighted_bce(y_true, y_pred):
+        y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
+        return tf.reduce_mean(
+            pw * y_true * (-tf.math.log(y_pred))
+            + (1.0 - y_true) * (-tf.math.log(1.0 - y_pred))
+        )
+
     # Build head (Coder-generated, uncompiled)
     head = build_head(EMB_DIM, N_CLASSES)
 
@@ -696,7 +785,7 @@ def main():
         opt = tf.keras.optimizers.SGD(lr, momentum=0.9)
     else:
         opt = tf.keras.optimizers.Adam(lr)
-    head.compile(optimizer=opt, loss="binary_crossentropy")
+    head.compile(optimizer=opt, loss=weighted_bce)
 
     # Train with early stopping and LR reduction
     callbacks = [
@@ -723,6 +812,11 @@ def main():
 
     # Blend: perch_weight controls how much to trust Perch's own classifier
     y_pred = perch_weight * perch_probs + (1.0 - perch_weight) * head_probs
+
+    # Save trained head so the main loop can promote it if it's the new best
+    head.save(str(Path(tempfile.gettempdir()) / "_trained_head.keras"))
+    # Also save weights-only file (Keras-version-agnostic, used by Kaggle notebook)
+    head.save_weights(str(Path(tempfile.gettempdir()) / "_trained_head.weights.h5"))
 
     # Save artifacts for the evaluator
     _tmp = Path(tempfile.gettempdir())
@@ -797,7 +891,8 @@ def run(config: dict) -> None:
     tables      = load_core_tables(paths)
     train_df    = tables["train"]
     sample_sub  = tables["sample_submission"]
-    taxonomy_df = tables.get("taxonomy") or pd.read_csv(paths.taxonomy_csv)
+    _tax = tables.get("taxonomy")
+    taxonomy_df = _tax if _tax is not None else pd.read_csv(paths.taxonomy_csv)
 
     species_cols   = species_columns_from_sample_submission(sample_sub)
     species_to_idx = {s: i for i, s in enumerate(species_cols)}
@@ -807,6 +902,18 @@ def run(config: dict) -> None:
     MAPPED_POS, MAPPED_BC_IDX, proxy_map, NO_LABEL = _build_logit_mapping(
         labels_path, taxonomy_df, species_cols
     )
+
+    # ── Save species mapping for Kaggle notebook ──────────────────────────
+    import numpy as _np_map
+    bc_indices_full = _np_map.full(n_species, int(NO_LABEL), dtype=_np_map.int32)
+    bc_indices_full[MAPPED_POS] = MAPPED_BC_IDX
+    _np_map.save(str(mem_dir / "bc_indices.npy"), bc_indices_full)
+    with open(mem_dir / "proxy_map.json", "w") as _f:
+        json.dump({str(k): v for k, v in proxy_map.items()}, _f)
+    with open(mem_dir / "species_cols.json", "w") as _f:
+        json.dump(species_cols, _f)
+    with open(mem_dir / "mapping_meta.json", "w") as _f:
+        json.dump({"NO_LABEL": int(NO_LABEL), "n_species": n_species}, _f)
 
     # ── Step 6: Build embedding caches (once) ─────────────────────────────
     train_cache = cache_dir / "train_emb.npz"
@@ -863,8 +970,12 @@ def run(config: dict) -> None:
     print("=" * 60)
 
     # ── Step 8: Agent loop ────────────────────────────────────────────────
-    y_true_path = Path(tempfile.gettempdir()) / "_y_true.npy"
-    y_pred_path = Path(tempfile.gettempdir()) / "_y_pred.npy"
+    y_true_path        = Path(tempfile.gettempdir()) / "_y_true.npy"
+    y_pred_path        = Path(tempfile.gettempdir()) / "_y_pred.npy"
+    trained_head_path  = Path(tempfile.gettempdir()) / "_trained_head.keras"
+    best_head_path     = mem_dir / "best_head.keras"
+    _prior_best        = memory.best_runs(1)
+    best_auc_ever      = _prior_best[0]["macro_roc_auc"] if _prior_best else -1.0
 
     for iteration in range(1, max_iterations + 1):
         print(f"\n{'─'*60}")
@@ -896,9 +1007,24 @@ def run(config: dict) -> None:
         status = f"AUC={auc:.5f}" if auc is not None else "FAILED"
         print(f"  [Result] {status}")
         if not result.success and result.stderr:
-            print(f"  [Error]  {result.stderr[:300]}")
+            # TF logs to stderr too — show the tail where the real Python error is
+            print(f"  [Error]  {result.stderr[-600:]}")
 
         memory.log(spec=spec, metrics=metrics, code=slot_code)
+
+        # Promote to best model if this run beat the previous best
+        if auc is not None and auc > best_auc_ever:
+            best_auc_ever = auc
+            if trained_head_path.exists():
+                import shutil
+                shutil.copy2(str(trained_head_path), str(best_head_path))
+                # Also copy weights-only file for Kaggle (no Keras version dependency)
+                _weights_src = Path(tempfile.gettempdir()) / "_trained_head.weights.h5"
+                if _weights_src.exists():
+                    shutil.copy2(str(_weights_src), str(mem_dir / "best_head.weights.h5"))
+                with open(mem_dir / "best_model_info.json", "w") as _f:
+                    json.dump({"auc": auc, "iteration": iteration, "spec": spec}, _f, indent=2)
+                print(f"  [Best] NEW BEST AUC={auc:.5f} — head saved to {best_head_path.name}")
 
         best = memory.best_runs(1)
         if best:
