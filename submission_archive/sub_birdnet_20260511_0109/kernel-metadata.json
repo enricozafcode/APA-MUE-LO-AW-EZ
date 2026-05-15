@@ -1,0 +1,14 @@
+{
+  "id": "alexanderwanstrath/notebook4b15b27022",
+  "title": "notebook4b15b27022",
+  "code_file": "kaggle_inference.ipynb",
+  "language": "python",
+  "kernel_type": "notebook",
+  "is_private": true,
+  "enable_gpu": false,
+  "enable_tpu": false,
+  "enable_internet": false,
+  "dataset_sources": ["alexanderwanstrath/birdnet-alex"],
+  "competition_sources": ["birdclef-2026"],
+  "kernel_sources": []
+}

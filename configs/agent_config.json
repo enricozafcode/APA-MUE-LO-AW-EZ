@@ -2,21 +2,61 @@
   "project_name": "apa-birdclef-autonomous-agent",
   "track": "birdclef",
   "max_iterations": 10,
+  "max_train_samples": null,
+  "train_sample_frac": 0.30,
   "max_failures_before_stop": 3,
-  "time_budget_minutes": 180,
+  "time_budget_minutes": 360,
   "random_seed": 42,
   "llm": {
-    "provider": "ollama", 
+    "provider": "ollama",
     "model": "gemma3:4b",
     "temperature": 0.2
   },
   "execution": {
-    "timeout_seconds": 300,
+    "timeout_seconds": 600,
+    "llm_timeout_seconds": 900,
     "python_executable": "python"
   },
   "logging": {
     "log_dir": "logs",
     "save_generated_code": true,
     "save_metrics_json": true
+  },
+  "augmentation": {
+    "use_snr_mixing": true,
+    "n_mix_views": 3,
+    "mix_prob": 0.35,
+    "snr_min_db": 0.0,
+    "snr_max_db": 15.0,
+    "audio": {
+      "time_stretch":    { "enabled": true,  "probability": 0.5, "rate_min": 0.9,  "rate_max": 1.1 },
+      "pitch_shift":     { "enabled": true,  "probability": 0.3, "steps_min": -2,  "steps_max": 2  },
+      "noise_injection": { "enabled": true,  "probability": 0.4, "noise_level": 0.005              },
+      "time_shift":      { "enabled": true,  "probability": 0.5, "shift_max_fraction": 0.5         },
+      "gain_jitter":     { "enabled": true,  "probability": 0.4, "min_db": -6.0,   "max_db": 6.0   }
+    }
+  },
+  "aug_preset_sweep": {
+    "enabled": true,
+    "sweep_sample_frac": 0.10,
+    "fixed_head_hidden": 256,
+    "fixed_head_dropout": 0.3
+  },
+  "pseudo_labeling": {
+    "enabled": true,
+    "threshold": 0.5,
+    "runnerup_max": 0.4,
+    "max_pseudo_samples": 1000
+  },
+  "hyperparam_sweep": {
+    "enabled": true,
+    "n_trials": 20,
+    "hidden":   [128, 256, 512],
+    "n_layers": [1, 2, 3],
+    "dropout":  [0.2, 0.3, 0.4],
+    "lr":       [1e-4, 1e-3, 3e-3]
+  },
+  "final_retrain": {
+    "enabled": true
   }
 }
