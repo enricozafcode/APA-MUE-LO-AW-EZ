@@ -929,6 +929,31 @@ def run(config: dict) -> None:
     for d in [logs_dir, code_dir, cache_dir, mem_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
+    # Shortcut: skip search and only run final retrain on saved best spec
+    if config.get("final_retrain_only", False):
+        memory = ExperimentMemory(mem_dir)
+        best_runs = memory.best_runs(1)
+        if best_runs:
+            best_spec = best_runs[0]["spec"]
+            best_auc  = best_runs[0]["macro_roc_auc"]
+            print(f"\n{'='*60}")
+            print(f"  FINAL RETRAIN ONLY — best spec (val AUC={best_auc:.5f})")
+            print(f"{'='*60}")
+            py_exe   = config.get("execution", {}).get("python_executable", "python3")
+            timeout  = config.get("execution", {}).get("timeout_seconds", 1800)
+            executor = CodeExecutor(python_executable=py_exe, timeout_seconds=timeout)
+            final_script      = _build_final_retrain_script(best_spec, mem_dir, cache_dir)
+            final_script_path = code_dir / "final_retrain.py"
+            final_script_path.write_text(final_script, encoding="utf-8")
+            result = executor.run_file(final_script_path)
+            if result.success and "FINAL_RETRAIN_DONE" in (result.stdout or ""):
+                print(f"  Final head saved → {mem_dir / 'final_head.weights.h5'}")
+            else:
+                print(f"  Final retrain failed: {(result.stderr or '')[-400:]}")
+        else:
+            print("  No memory found — cannot run final retrain only.")
+        return
+
     perch_cfg      = config.get("perch", {})
     onnx_slug      = perch_cfg.get("onnx_dataset",       "rishikeshjani/perch-onnx-for-birdclef-2026")
     labels_slug    = perch_cfg.get("perch_labels_model",  "google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu")
@@ -1129,7 +1154,7 @@ def run(config: dict) -> None:
 
     # ── Final retrain on full data (train + val) with best spec ──────────────
     best_runs = memory.best_runs(1)
-    if best_runs:
+    if best_runs and not config.get("skip_final_training", False):
         best_spec = best_runs[0]["spec"]
         best_auc  = best_runs[0]["macro_roc_auc"]
         print(f"\n{'='*60}")

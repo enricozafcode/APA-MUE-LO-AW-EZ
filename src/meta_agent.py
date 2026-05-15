@@ -125,7 +125,7 @@ def run_phase1_cnn(config: dict, n_iterations: int) -> float:
             "final_tweak_experiments":     0,
         },
     }
-    rc = _run_subprocess("cnn_agent.py", {"search": cnn_search_override}, config)
+    rc = _run_subprocess("cnn_agent.py", {"search": cnn_search_override, "skip_final_training": True}, config)
     if rc != 0:
         print("  [Phase 1] CNN agent finished with errors.")
 
@@ -182,7 +182,7 @@ def run_phase2_perch(config: dict, n_iterations: int) -> float:
     print(f"  PHASE 3 — Perch  ({n_iterations} iterations)")
     print("=" * 60)
 
-    rc = _run_subprocess("perch_agent.py", {"max_iterations": n_iterations}, config)
+    rc = _run_subprocess("perch_agent.py", {"max_iterations": n_iterations, "skip_final_training": True}, config)
     if rc != 0:
         print("  [Phase 3] Perch agent finished with errors.")
 
@@ -434,6 +434,23 @@ def run_phase3_ensemble(config: dict, n_iterations: int,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Final retrain — only for the overall winner
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_winner_final_retrain(winner: str, auc: float, config: dict) -> None:
+    print("\n" + "=" * 60)
+    print(f"  FINAL RETRAIN — winner: {winner.upper()}  (val AUC={auc:.5f})")
+    print("=" * 60)
+    if winner == "cnn":
+        _run_subprocess("cnn_agent.py", {"phase3_only": True}, config)
+    elif winner == "perch":
+        _run_subprocess("perch_agent.py", {"final_retrain_only": True}, config)
+    elif winner == "birdnet":
+        _run_subprocess("birdnet_agent.py", {"final_retrain_only": True}, config)
+    print(f"  [Final retrain] done.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -458,11 +475,17 @@ def main():
     perch_auc   = run_phase2_perch(config, perch_iters)
     ensemble    = run_phase3_ensemble(config, ensemble_iters, perch_auc, birdnet_auc)
 
+    # Pick overall winner and retrain only that model on full data
+    candidates  = [("cnn", cnn_auc), ("birdnet", birdnet_auc), ("perch", perch_auc)]
+    winner, winner_auc = max(candidates, key=lambda x: x[1])
+    run_winner_final_retrain(winner, winner_auc, config)
+
     print("\n" + "=" * 60)
     print("  META AGENT COMPLETE")
     print(f"  CNN best AUC:      {cnn_auc:.5f}")
     print(f"  BirdNET best AUC:  {birdnet_auc:.5f}")
     print(f"  Perch best AUC:    {perch_auc:.5f}")
+    print(f"  Overall winner:    {winner.upper()} (AUC={winner_auc:.5f})")
     if ensemble:
         print(f"  Ensemble best AUC: {ensemble['best_ensemble_auc']:.5f}"
               f"  (perch={ensemble['perch_weight']:.1f} / birdnet={ensemble['birdnet_weight']:.1f})")

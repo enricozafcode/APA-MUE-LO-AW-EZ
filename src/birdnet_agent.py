@@ -1499,6 +1499,17 @@ def agent_loop(config: dict) -> None:
     _use_aug      = _aug_cfg.get("use_snr_mixing", False) or bool(_aug_cfg.get("audio", {}))
     n_total_views = _aug_cfg.get("n_mix_views", 3) if _use_aug else 1
 
+    # Shortcut: skip search and only run final retrain on saved best slot
+    if config.get("final_retrain_only", False):
+        best_slot_path = LOGS_DIR / "best_slot.py"
+        if best_slot_path.exists():
+            best_slot = best_slot_path.read_text(encoding="utf-8")
+            final_retrain(best_slot, X_val, y_val,
+                          {**config, "final_retrain": {"enabled": True}})
+        else:
+            print("  No saved best slot — cannot run final retrain only.")
+        return
+
     n_iter   = config.get("max_iterations", 10)
     max_fail = config.get("max_failures_before_stop", 3)
 

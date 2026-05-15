@@ -2650,6 +2650,12 @@ def run_phase3_final_only(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def agent_loop(config):
+    # Shortcut: skip search and only run Phase 3 final training on saved best params
+    if config.get("phase3_only", False):
+        root = Path(__file__).resolve().parents[1]
+        run_phase3_final_only(project_root=root)
+        return
+
     global GENERATION_SYSTEM_PROMPT, TRANSFER_SYSTEM_PROMPT
 
     root = Path(__file__).resolve().parents[1]
@@ -2966,7 +2972,7 @@ def agent_loop(config):
         or best_gate_auc > 0
         or (transfer_pack and transfer_pack.get("effective_slot_code") is not None)
     )
-    if ran_anything and best_slot_code:
+    if ran_anything and best_slot_code and not config.get("skip_final_training", False):
         _run_final_training(
             best_params,
             executor_final,
