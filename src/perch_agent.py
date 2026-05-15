@@ -835,6 +835,89 @@ def _build_script(slot_code: str) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Final retrain on full data (train + val combined)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_final_retrain_script(best_spec: dict, mem_dir: Path, cache_dir: Path) -> str:
+    spec_json = json.dumps(best_spec)
+    return f"""
+import numpy as np
+import tensorflow as tf
+from pathlib import Path
+
+_CACHE_DIR = Path(r"{cache_dir}")
+_MEM_DIR   = Path(r"{mem_dir}")
+
+def _load(p):
+    d = np.load(str(p), allow_pickle=True)
+    return d["X"].astype(np.float32), d["y"].astype(np.float32)
+
+X_tr, y_tr = _load(_CACHE_DIR / "train_emb.npz")
+X_vl, y_vl = _load(_CACHE_DIR / "val_emb.npz")
+
+X_full = np.concatenate([X_tr, X_vl], axis=0)
+y_full = np.concatenate([y_tr, y_vl], axis=0)
+
+EMB_DIM   = X_full.shape[1]
+N_CLASSES = y_full.shape[1]
+print(f"  Final retrain: X={{X_full.shape}}  y={{y_full.shape}}")
+
+cfg        = {spec_json}
+n_blocks   = int(cfg.get("n_blocks",      2))
+hidden_dim = int(cfg.get("hidden_dim",    1024))
+proj_dim   = int(cfg.get("proj_dim",      512))
+drop_block = float(cfg.get("dropout_block", 0.3))
+drop_final = float(cfg.get("dropout_final", 0.4))
+lr         = float(cfg.get("learning_rate", 8e-4))
+batch_size = int(cfg.get("batch_size",    256))
+epochs     = int(cfg.get("epochs",         50))
+opt_name   = str(cfg.get("optimizer",   "adam"))
+
+inp = tf.keras.layers.Input(shape=(EMB_DIM,))
+x   = tf.keras.layers.BatchNormalization()(inp)
+x   = tf.keras.layers.Dense(hidden_dim)(x)
+x   = tf.keras.layers.LayerNormalization()(x)
+for _ in range(n_blocks):
+    h = tf.keras.layers.Dense(hidden_dim)(x)
+    h = tf.keras.layers.LayerNormalization()(h)
+    h = tf.keras.layers.Activation("gelu")(h)
+    h = tf.keras.layers.Dropout(drop_block)(h)
+    h = tf.keras.layers.Dense(hidden_dim)(h)
+    x = tf.keras.layers.Add()([x, h])
+    x = tf.keras.layers.LayerNormalization()(x)
+x   = tf.keras.layers.Dense(proj_dim, activation="gelu")(x)
+x   = tf.keras.layers.Dropout(drop_final)(x)
+out = tf.keras.layers.Dense(N_CLASSES, activation="sigmoid")(x)
+head = tf.keras.Model(inp, out)
+
+pos = y_full.sum(axis=0).astype(np.float64)
+neg = len(y_full) - pos
+pos_weight = np.clip(neg / np.maximum(pos, 1.0), 1.0, 25.0).astype(np.float32)
+pw = tf.constant(pos_weight)[tf.newaxis, :]
+
+def weighted_bce(y_true, y_pred):
+    y_pred = tf.clip_by_value(y_pred, 1e-7, 1.0 - 1e-7)
+    return tf.reduce_mean(
+        pw * y_true * (-tf.math.log(y_pred))
+        + (1.0 - y_true) * (-tf.math.log(1.0 - y_pred))
+    )
+
+if opt_name == "sgd_momentum":
+    opt = tf.keras.optimizers.SGD(lr, momentum=0.9)
+else:
+    opt = tf.keras.optimizers.Adam(lr)
+head.compile(optimizer=opt, loss=weighted_bce)
+
+tf.keras.utils.set_random_seed(42)
+head.fit(X_full, y_full, epochs=epochs, batch_size=batch_size, verbose=1)
+
+head.save(str(_MEM_DIR / "final_head.keras"))
+head.save_weights(str(_MEM_DIR / "final_head.weights.h5"))
+print("FINAL_RETRAIN_DONE")
+""".strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main agent loop
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1043,6 +1126,25 @@ def run(config: dict) -> None:
     for i, r in enumerate(best, 1):
         print(f"  #{i} AUC={r['macro_roc_auc']:.5f} | {r['reasoning'][:80]}")
     print(f"{'='*60}")
+
+    # ── Final retrain on full data (train + val) with best spec ──────────────
+    best_runs = memory.best_runs(1)
+    if best_runs:
+        best_spec = best_runs[0]["spec"]
+        best_auc  = best_runs[0]["macro_roc_auc"]
+        print(f"\n{'='*60}")
+        print(f"  FINAL RETRAIN — full data (val AUC={best_auc:.5f})")
+        print(f"{'='*60}")
+        final_script      = _build_final_retrain_script(best_spec, mem_dir, cache_dir)
+        final_script_path = code_dir / "final_retrain.py"
+        final_script_path.write_text(final_script, encoding="utf-8")
+        result = executor.run_file(final_script_path)
+        if result.success and "FINAL_RETRAIN_DONE" in (result.stdout or ""):
+            print(f"  Final head saved → {mem_dir / 'final_head.weights.h5'}")
+        else:
+            print(f"  Final retrain failed: {(result.stderr or '')[-400:]}")
+    else:
+        print("  No successful runs — skipping final retrain.")
 
 
 def main() -> None:

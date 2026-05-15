@@ -101,13 +101,40 @@ def run_phase1_cnn(config: dict, n_iterations: int) -> float:
     print(f"  PHASE 1 — CNN  ({n_iterations} iterations)")
     print("=" * 60)
 
-    rc = _run_subprocess("cnn_agent.py", {"max_iterations": n_iterations}, config)
+    # Build a search config that respects n_iterations as the total budget
+    base_search = config.get("search", {})
+    cnn_search_override = {
+        **base_search,
+        "linear_budget": 0,
+        "random_budget": n_iterations,
+        "cnn_exploration": {"enabled": True},
+        "transfer_exploration": {
+            "enabled": True,
+            "max_iterations": max(1, n_iterations // 2),
+            "interactive_pick_final": False,
+        },
+        "medium_stage": {"enabled": False},
+        "reality_gate": {"enabled": False},
+        "phase2": {
+            **base_search.get("phase2", {}),
+            "random_experiments":          n_iterations,
+            "focused_experiments":         0,
+            "tweak_experiments":           0,
+            "augmentation_tweak_experiments": 0,
+            "ai_free_experiments":         0,
+            "final_tweak_experiments":     0,
+        },
+    }
+    rc = _run_subprocess("cnn_agent.py", {"search": cnn_search_override}, config)
     if rc != 0:
         print("  [Phase 1] CNN agent finished with errors.")
 
-    auc_path = PROJECT_ROOT / "logs" / "agent" / "best_auc.json"
+    # CNN agent logs to logs/agent/
+    auc_path = PROJECT_ROOT / "logs" / "agent" / "final_results.json"
     if auc_path.exists():
-        auc = float(json.loads(auc_path.read_text()).get("auc", 0.0))
+        results = json.loads(auc_path.read_text())
+        aucs = [r.get("macro_roc_auc", 0.0) for r in results if r.get("macro_roc_auc")]
+        auc  = float(max(aucs)) if aucs else 0.0
     else:
         auc = 0.0
 
