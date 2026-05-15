@@ -82,9 +82,9 @@
     "generate_insights": false
   },
   "meta_agent": {
-    "cnn_iterations": 2,
-    "birdnet_iterations": 2,
-    "perch_iterations": 2,
+    "cnn_iterations": 1,
+    "birdnet_iterations": 1,
+    "perch_iterations": 1,
     "ensemble_iterations": 1
   },
   "perch": {
