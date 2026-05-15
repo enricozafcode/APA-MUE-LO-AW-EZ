@@ -1,10 +1,12 @@
 """
 Meta Agent — BirdCLEF 2026
 ===========================
-Three sequential phases:
-  Phase 1: BirdNET agent explores MLP heads on BirdNET (1024-D) embeddings
-  Phase 2: Perch agent explores MLP heads on Perch (1536-D) embeddings
-  Phase 3: Ensemble — tries different blend weights on a COMMON soundscape val set
+Five sequential phases:
+  Phase 0: Autonomous EDA — explores the dataset, writes eda_insights.txt
+  Phase 1: CNN agent explores scratch CNN architectures on raw audio spectrograms
+  Phase 2: BirdNET agent explores MLP heads on BirdNET (1024-D) embeddings
+  Phase 3: Perch agent explores MLP heads on Perch (1536-D) embeddings
+  Phase 4: Ensemble — tries different blend weights on a COMMON soundscape val set
            so Perch and BirdNET predictions can be directly compared and combined
 
 Run:
@@ -74,17 +76,57 @@ def _run_subprocess(script: str, config_override: dict, base_config: dict) -> in
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 1 — BirdNET
+# Phase 0 — EDA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_phase0_eda(config: dict) -> None:
+    print("\n" + "=" * 60)
+    print("  PHASE 0 — Autonomous EDA")
+    print("=" * 60)
+    rc = _run_subprocess("eda_agent.py", {}, config)
+    if rc != 0:
+        print("  [Phase 0] EDA agent finished with errors (continuing).")
+    else:
+        insights_path = PROJECT_ROOT / "logs" / "eda" / "eda_insights.txt"
+        if insights_path.exists():
+            print(f"  [Phase 0] EDA insights saved → {insights_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 1 — CNN
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_phase1_cnn(config: dict, n_iterations: int) -> float:
+    print("\n" + "=" * 60)
+    print(f"  PHASE 1 — CNN  ({n_iterations} iterations)")
+    print("=" * 60)
+
+    rc = _run_subprocess("cnn_agent.py", {"max_iterations": n_iterations}, config)
+    if rc != 0:
+        print("  [Phase 1] CNN agent finished with errors.")
+
+    auc_path = PROJECT_ROOT / "logs" / "agent" / "best_auc.json"
+    if auc_path.exists():
+        auc = float(json.loads(auc_path.read_text()).get("auc", 0.0))
+    else:
+        auc = 0.0
+
+    print(f"\n  [Phase 1] Best CNN AUC = {auc:.5f}")
+    return auc
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2 — BirdNET
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_phase1_birdnet(config: dict, n_iterations: int) -> float:
     print("\n" + "=" * 60)
-    print(f"  PHASE 1 — BirdNET  ({n_iterations} iterations)")
+    print(f"  PHASE 2 — BirdNET  ({n_iterations} iterations)")
     print("=" * 60)
 
     rc = _run_subprocess("birdnet_agent.py", {"max_iterations": n_iterations}, config)
     if rc != 0:
-        print("  [Phase 1] BirdNET agent finished with errors.")
+        print("  [Phase 2] BirdNET agent finished with errors.")
 
     # Read best AUC
     auc_path = META_LOGS.parent / "birdnet_agent" / "best_auc.json"
@@ -100,7 +142,7 @@ def run_phase1_birdnet(config: dict, n_iterations: int) -> float:
         else:
             auc = 0.0
 
-    print(f"\n  [Phase 1] Best BirdNET AUC = {auc:.5f}")
+    print(f"\n  [Phase 2] Best BirdNET AUC = {auc:.5f}")
     return auc
 
 
@@ -110,12 +152,12 @@ def run_phase1_birdnet(config: dict, n_iterations: int) -> float:
 
 def run_phase2_perch(config: dict, n_iterations: int) -> float:
     print("\n" + "=" * 60)
-    print(f"  PHASE 2 — Perch  ({n_iterations} iterations)")
+    print(f"  PHASE 3 — Perch  ({n_iterations} iterations)")
     print("=" * 60)
 
     rc = _run_subprocess("perch_agent.py", {"max_iterations": n_iterations}, config)
     if rc != 0:
-        print("  [Phase 2] Perch agent finished with errors.")
+        print("  [Phase 3] Perch agent finished with errors.")
 
     info_path = PERCH_MEMORY / "best_model_info.json"
     if info_path.exists():
@@ -123,7 +165,7 @@ def run_phase2_perch(config: dict, n_iterations: int) -> float:
     else:
         auc = 0.0
 
-    print(f"\n  [Phase 2] Best Perch AUC = {auc:.5f}")
+    print(f"\n  [Phase 3] Best Perch AUC = {auc:.5f}")
     return auc
 
 
@@ -259,7 +301,7 @@ def build_common_val(config: dict) -> bool:
 def run_phase3_ensemble(config: dict, n_iterations: int,
                         perch_auc: float, birdnet_auc: float) -> dict:
     print("\n" + "=" * 60)
-    print(f"  PHASE 3 — Ensemble  ({n_iterations} blend weights)")
+    print(f"  PHASE 4 — Ensemble  ({n_iterations} blend weights)")
     print(f"  Perch AUC={perch_auc:.5f}  BirdNET AUC={birdnet_auc:.5f}")
     print("=" * 60)
 
@@ -376,18 +418,22 @@ def main():
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
 
     meta_cfg        = config.get("meta_agent", {})
+    cnn_iters       = int(meta_cfg.get("cnn_iterations",        5))
     birdnet_iters   = int(meta_cfg.get("birdnet_iterations",   10))
     perch_iters     = int(meta_cfg.get("perch_iterations",     10))
     ensemble_iters  = int(meta_cfg.get("ensemble_iterations",   5))
 
     t0 = time.time()
 
+    run_phase0_eda(config)
+    cnn_auc     = run_phase1_cnn(config, cnn_iters)
     birdnet_auc = run_phase1_birdnet(config, birdnet_iters)
     perch_auc   = run_phase2_perch(config, perch_iters)
     ensemble    = run_phase3_ensemble(config, ensemble_iters, perch_auc, birdnet_auc)
 
     print("\n" + "=" * 60)
     print("  META AGENT COMPLETE")
+    print(f"  CNN best AUC:      {cnn_auc:.5f}")
     print(f"  BirdNET best AUC:  {birdnet_auc:.5f}")
     print(f"  Perch best AUC:    {perch_auc:.5f}")
     if ensemble:

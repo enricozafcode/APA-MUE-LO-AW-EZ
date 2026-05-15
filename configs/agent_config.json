@@ -54,7 +54,7 @@
     },
     "transfer_exploration": {
       "enabled": true,
-      "max_iterations": 10,
+      "max_iterations": 2,
       "interactive_pick_final": false
     },
     "medium_stage": {
@@ -82,6 +82,7 @@
     "generate_insights": false
   },
   "meta_agent": {
+    "cnn_iterations": 2,
     "birdnet_iterations": 2,
     "perch_iterations": 2,
     "ensemble_iterations": 1
