@@ -1,9 +1,10 @@
 """
 EDA Phase for the autonomous BirdCLEF agent.
 
-Runs a hardcoded exploratory analysis over the raw data files, captures
-the numerical output, and asks the LLM to distill it into a structured
-eda_insights.txt that is then appended to every subsequent system prompt.
+The LLM generates its own EDA code based on a description of the available
+data files. The generated code is executed in a subprocess and the output is
+fed back to the LLM which distills it into a structured eda_insights.txt.
+The hardcoded EDA_SCRIPT serves as a fallback if LLM code generation fails.
 """
 
 from __future__ import annotations
@@ -253,6 +254,46 @@ _sep()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# LLM CODE GENERATION PROMPT
+# ─────────────────────────────────────────────────────────────────────────────
+
+_EDA_CODEGEN_SYSTEM = """\
+You are an autonomous ML research agent preparing to train a BirdCLEF+ 2026 model.
+Before writing any model code you must explore the dataset yourself.
+Write a self-contained Python EDA script that analyses the available data files
+and prints structured findings to stdout.
+Return ONLY a ```python``` code block — nothing else."""
+
+_EDA_CODEGEN_USER = """\
+You are about to start training a multi-label bird sound classifier for BirdCLEF+ 2026.
+Before writing any model, explore the dataset to understand it.
+
+Available data files (all under the `data/` folder relative to project root):
+- data/train.csv               — metadata for every training recording (species label, filename, rating, lat/lon, collection, secondary_labels, ...)
+- data/taxonomy.csv            — species taxonomy mapping (primary_label, scientific_name, common_name, class_name, ...)
+- data/train_soundscapes_labels.csv — labeled segments from soundscape recordings (filename, start, end, primary_label)
+- data/sample_submission.csv   — defines the exact 234 species columns the submission must contain
+- data/train_audio/            — directory of .ogg audio clips, one file per row in train.csv
+- data/train_soundscapes/      — longer soundscape .ogg recordings
+
+Write a Python script that:
+1. Locates the project root by walking up from __file__ until a folder containing both `src/` and `data/` is found
+2. Loads and inspects each CSV file (shape, columns, missing values)
+3. Analyses the species/class distribution in train.csv (unique species, min/max/median recordings per species, taxonomic class breakdown, species with very few samples)
+4. Checks the multi-label structure (fraction of recordings with secondary_labels, average count)
+5. Checks recording quality signals (rating distribution, XC vs iNat split)
+6. Counts audio files in train_audio/ and train_soundscapes/
+7. Identifies the submission gap: species in sample_submission.csv that have NO entries in train_audio/
+8. Samples ~20 random audio files with librosa to report typical duration and sample rate
+9. Identifies species present ONLY in soundscapes (not in train_audio)
+
+Print every finding clearly with section headers using `print()`.
+Use only: pathlib, csv, collections, random, ast — plus librosa for audio sampling (wrap in try/except ImportError).
+Do NOT use pandas, matplotlib, or any plotting library.
+Do NOT produce any files or side effects — only print to stdout."""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # LLM SUMMARISATION PROMPT
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -309,6 +350,13 @@ Write the summary now. Start directly with '### 1. DATASET STRUCTURE'."""
 # PUBLIC ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _extract_python_block(text: str) -> str:
+    """Extract code from a ```python ... ``` block, or return text as-is."""
+    import re
+    match = re.search(r"```python\s*(.*?)```", text, re.DOTALL)
+    return match.group(1).strip() if match else text.strip()
+
+
 def run_eda_phase(
     executor,
     llm,
@@ -318,9 +366,11 @@ def run_eda_phase(
     """
     Run the autonomous EDA phase.
 
-    Executes the hardcoded EDA script, feeds the output to the LLM for
-    summarisation, writes logs/eda_insights.txt, and returns the insight text
-    so callers can inject it into subsequent system prompts.
+    1. LLM generates EDA code from a description of available data files.
+    2. The generated code is executed in a subprocess.
+    3. If generation or execution fails, falls back to the hardcoded EDA_SCRIPT.
+    4. LLM summarises the output into logs/eda_insights.txt.
+    Returns the insight text so callers can inject it into subsequent system prompts.
     """
     print("\n" + "=" * 60)
     print("  PHASE EDA: AUTONOMOUS DATA EXPLORATION")
@@ -333,12 +383,30 @@ def run_eda_phase(
         print("  EDA insights already exist — loading from cache.")
         return insights_path.read_text(encoding="utf-8")
 
-    # ── write the EDA script to a temp file and execute ───────────────────────
     code_dir = logs_dir / "eda_code"
     code_dir.mkdir(parents=True, exist_ok=True)
     script_path = code_dir / "eda_script.py"
-    script_path.write_text(EDA_SCRIPT, encoding="utf-8")
 
+    # ── Step 1: LLM generates EDA code ───────────────────────────────────────
+    print("  Asking LLM to generate EDA code …")
+    llm_response = llm.generate_from_messages(
+        messages=[
+            {"role": "system", "content": _EDA_CODEGEN_SYSTEM},
+            {"role": "user",   "content": _EDA_CODEGEN_USER},
+        ],
+        temperature=temperature,
+    )
+    generated_code = _extract_python_block(llm_response) if llm_response else ""
+
+    if generated_code and not llm_response.startswith("Error"):
+        print("  LLM generated EDA code — writing to eda_script.py")
+        script_path.write_text(generated_code, encoding="utf-8")
+        (code_dir / "eda_script_llm.py").write_text(generated_code, encoding="utf-8")
+    else:
+        print("  LLM code generation failed — using fallback EDA script")
+        script_path.write_text(EDA_SCRIPT, encoding="utf-8")
+
+    # ── Step 2: Execute (with fallback on failure) ────────────────────────────
     print("  Running EDA script …")
     t0 = time.time()
     result = executor.run_file(script_path)
@@ -348,13 +416,20 @@ def run_eda_phase(
     raw_output = result.stdout or ""
     stderr     = result.stderr or ""
 
+    if not raw_output.strip() or result.return_code != 0:
+        print(f"  LLM-generated script failed — falling back to hardcoded EDA script")
+        script_path.write_text(EDA_SCRIPT, encoding="utf-8")
+        result = executor.run_file(script_path)
+        raw_output = result.stdout or ""
+        stderr     = result.stderr or ""
+
     if not raw_output.strip():
         raw_output = f"[EDA script produced no stdout]\nSTDERR:\n{stderr[:2000]}"
 
     # Save raw output for debugging
     raw_path = logs_dir / "eda_raw_output.txt"
     raw_path.write_text(raw_output, encoding="utf-8")
-    print(f"  Raw EDA output saved → {raw_path.name}")
+    print(f"  Raw EDA output saved -> {raw_path.name}")
 
     # ── ask LLM to summarise into structured insights ─────────────────────────
     print("  Asking LLM to summarise EDA findings …")
