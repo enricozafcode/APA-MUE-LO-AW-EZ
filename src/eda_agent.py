@@ -340,8 +340,11 @@ Write only factual statements grounded in the numbers shown — do not speculate
 - Whether the 5-second clip assumption from the competition rules holds.
 
 ### 7. KEY CONSTRAINTS FOR MODEL DESIGN
-Bullet list of the most important facts the training agent MUST keep in mind \
-(class imbalance handling, submission gap species, multi-label output head size, etc.).
+Bullet list of the most important facts the training agent MUST keep in mind.
+IMPORTANT: num_classes for the output layer is ALWAYS determined by sample_submission.csv \
+(number of species columns), NOT by the number of species in train_audio. \
+If the submission requires 234 species, the output layer must have 234 units — even if \
+only 206 species have training audio clips. State this explicitly.
 
 Write the summary now. Start directly with '### 1. DATASET STRUCTURE'."""
 
