@@ -380,7 +380,7 @@ def run_eda_phase(
 
     # ── skip if already done ──────────────────────────────────────────────────
     if insights_path.exists():
-        print("  EDA insights already exist — loading from cache.")
+        print("  EDA insights already exist - loading from cache.")
         return insights_path.read_text(encoding="utf-8")
 
     code_dir = logs_dir / "eda_code"
@@ -399,11 +399,11 @@ def run_eda_phase(
     generated_code = _extract_python_block(llm_response) if llm_response else ""
 
     if generated_code and not llm_response.startswith("Error"):
-        print("  LLM generated EDA code — writing to eda_script.py")
+        print("  LLM generated EDA code - writing to eda_script.py")
         script_path.write_text(generated_code, encoding="utf-8")
         (code_dir / "eda_script_llm.py").write_text(generated_code, encoding="utf-8")
     else:
-        print("  LLM code generation failed — using fallback EDA script")
+        print("  LLM code generation failed - using fallback EDA script")
         script_path.write_text(EDA_SCRIPT, encoding="utf-8")
 
     # ── Step 2: Execute (with fallback on failure) ────────────────────────────
@@ -417,7 +417,7 @@ def run_eda_phase(
     stderr     = result.stderr or ""
 
     if not raw_output.strip() or result.return_code != 0:
-        print(f"  LLM-generated script failed — falling back to hardcoded EDA script")
+        print(f"  LLM-generated script failed - falling back to hardcoded EDA script")
         script_path.write_text(EDA_SCRIPT, encoding="utf-8")
         result = executor.run_file(script_path)
         raw_output = result.stdout or ""
@@ -446,7 +446,7 @@ def run_eda_phase(
 
     if not insights or insights.startswith("Error"):
         # Fallback: use the raw output directly as insights
-        print("  LLM summarisation failed — using raw output as fallback.")
+        print("  LLM summarisation failed - using raw output as fallback.")
         insights = raw_output
 
     # ── write insights file ───────────────────────────────────────────────────
@@ -457,7 +457,7 @@ def run_eda_phase(
     )
     full_text = header + insights.strip()
     insights_path.write_text(full_text, encoding="utf-8")
-    print(f"  EDA insights saved → {insights_path}")
+    print(f"  EDA insights saved -> {insights_path}")
     print("=" * 60)
 
     return full_text
