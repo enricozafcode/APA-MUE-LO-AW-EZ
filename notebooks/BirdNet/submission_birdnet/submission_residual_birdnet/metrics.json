@@ -1,0 +1,12 @@
+{
+  "auc_old_mlp": 0.6019300765452005,
+  "auc_residual": 0.5703180826361036,
+  "auc_ensemble_50_50": 0.6153334684428431,
+  "delta_vs_old": -0.03161199390909686,
+  "delta_vs_old_ensemble": 0.013403391897642614,
+  "k3_old": 64,
+  "k3_residual": 64,
+  "n_focal": 106647,
+  "n_pseudo": 10912,
+  "pseudo_weight": 0.5
+}

@@ -1,0 +1,10 @@
+{
+  "auc_old": 0.6019300765452005,
+  "auc_pseudo": 0.6303002594541834,
+  "delta": 0.028370182908982966,
+  "n_focal": 106647,
+  "n_pseudo": 10912,
+  "pseudo_weight": 0.5,
+  "top1_threshold": 0.5,
+  "runnerup_max": 0.4
+}

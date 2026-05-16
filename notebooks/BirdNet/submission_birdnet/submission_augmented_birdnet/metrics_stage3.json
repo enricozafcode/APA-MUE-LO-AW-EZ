@@ -1,0 +1,24 @@
+{
+  "train_npz": "/Users/enricozafiris/Desktop/Catolica/T4 Advanced Predictive Analytics/APA-Project/notebooks/birdnet_cache/train_embeddings_mix_emb1024.npz",
+  "x_train_shape": [
+    106647,
+    1024
+  ],
+  "x_val_shape": [
+    739,
+    1024
+  ],
+  "auc_b": 0.6019300765452005,
+  "k3_b": 64,
+  "head_b_path": "/Users/enricozafiris/Desktop/Catolica/T4 Advanced Predictive Analytics/APA-Project/notebooks/submission_birdnet/submission_augmented_birdnet/head_b_mlp.keras",
+  "auc_c": 0.5663684055258877,
+  "k3_c": 64,
+  "head_c_path": "/Users/enricozafiris/Desktop/Catolica/T4 Advanced Predictive Analytics/APA-Project/notebooks/submission_birdnet/submission_augmented_birdnet/head_c_mlp_mixup.keras",
+  "scaler_path": "/Users/enricozafiris/Desktop/Catolica/T4 Advanced Predictive Analytics/APA-Project/notebooks/submission_birdnet/submission_augmented_birdnet/feature_scaler_stage3.npz",
+  "auc_b_norm": 0.5767353833600003,
+  "k3_b_norm": 64,
+  "head_b_norm_path": "/Users/enricozafiris/Desktop/Catolica/T4 Advanced Predictive Analytics/APA-Project/notebooks/submission_birdnet/submission_augmented_birdnet/head_b_mlp_norm.keras",
+  "auc_c_norm": 0.5380873658810948,
+  "k3_c_norm": 64,
+  "head_c_norm_path": "/Users/enricozafiris/Desktop/Catolica/T4 Advanced Predictive Analytics/APA-Project/notebooks/submission_birdnet/submission_augmented_birdnet/head_c_mlp_mixup_norm.keras"
+}

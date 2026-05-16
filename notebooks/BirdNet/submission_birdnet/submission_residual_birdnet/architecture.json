@@ -1,0 +1,11 @@
+{
+  "architecture": "residual",
+  "emb_dim": 1024,
+  "n_classes": 234,
+  "n_blocks": 2,
+  "hidden_block": 1024,
+  "projection": 512,
+  "dropout_block": 0.3,
+  "dropout_final": 0.4,
+  "n_params": 4855530
+}

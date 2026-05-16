@@ -1,0 +1,33 @@
+{
+  "individual_heads": {
+    "old_mlp": 0.6019300765452005,
+    "residual": 0.5703180826361036,
+    "mlp_seed123": 0.6326069990518859,
+    "mlp_wide_seed42": 0.6130458498117319,
+    "mlp_pseudo03": 0.5806387755080265
+  },
+  "ensemble_aucs": {
+    "all_5_equal": 0.6166864763567226,
+    "top3_equal": 0.6170173368764239,
+    "top3_names": [
+      "mlp_seed123",
+      "mlp_wide_seed42",
+      "old_mlp"
+    ],
+    "old_residual_50_50": 0.6153334684428431
+  },
+  "weights_files": {
+    "old_mlp": "head_b_weights.weights.h5  (in AUTOSAVE_DIR)",
+    "residual": "submission_residual_birdnet/head_b_weights.weights.h5",
+    "mlp_seed123": "submission_ensemble_birdnet/head_mlp_seed123.weights.h5",
+    "mlp_wide_seed42": "submission_ensemble_birdnet/head_mlp_wide_seed42.weights.h5",
+    "mlp_pseudo03": "submission_ensemble_birdnet/head_mlp_pseudo03.weights.h5"
+  },
+  "architectures": {
+    "old_mlp": "mlp_512",
+    "residual": "residual_2blocks_1024",
+    "mlp_seed123": "mlp_512",
+    "mlp_wide_seed42": "mlp_1024",
+    "mlp_pseudo03": "mlp_512"
+  }
+}

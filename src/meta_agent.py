@@ -1,13 +1,16 @@
 """
 Meta Agent — BirdCLEF 2026
 ===========================
-Five sequential phases:
-  Phase 0: Autonomous EDA — explores the dataset, writes eda_insights.txt
-  Phase 1: CNN agent explores scratch CNN architectures on raw audio spectrograms
-  Phase 2: BirdNET agent explores MLP heads on BirdNET (1024-D) embeddings
-  Phase 3: Perch agent explores MLP heads on Perch (1536-D) embeddings
-  Phase 4: Ensemble — blend search on labeled train_soundscapes; ranking uses
-           macro_average_precision (v2 benchmark metric, configurable)
+Legacy pipeline (``meta_agent.pipeline``: ``legacy``):
+  Phase 0: EDA
+  Phase 1–3: CNN / BirdNET / Perch single-pass agents
+  Phase 4: Ensemble
+
+Staged pipeline (``meta_agent.pipeline``: ``staged_1a``) — architecture search only:
+  For each track (CNN, BirdNET, Perch) and each aug baseline (light / medium / high):
+    run the track agent with locked augmentation → pick track winner by soundscape AP.
+
+Later stages (1b aug sweep, 1c full train, pseudo-label, …) are added incrementally.
 
 Run:
     python src/meta_agent.py --config configs/agent_config.json
@@ -26,6 +29,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from augmentation import (
+    describe_baseline,
+    get_audio_embedding_aug,
+    get_cnn_baseline_aug,
+    list_baseline_aug_names,
+)
 from soundscape_evaluator import (
     PRIMARY_META_METRIC,
     SoundscapeEvalSuite,
@@ -52,6 +61,7 @@ TRAIN_SOUNDSCAPES = DATA_DIR / "train_soundscapes"
 BIRDNET_VAL_CACHE = CACHE_DIR / "val_emb1024.npz"
 META_VAL_CACHE    = META_LOGS / "common_val.npz"
 SOUNDSCAPE_LEADERBOARD = META_LOGS / "soundscape_leaderboard.json"
+ARCH_SEARCH_1A_RESULTS = META_LOGS / "arch_search_1a_results.json"
 
 SR           = 32_000
 CLIP_SEC     = 5.0
@@ -84,10 +94,66 @@ def _print_soundscape_score(label: str, score: SoundscapeScore | None) -> None:
     )
 
 
+def _meta_cfg(config: dict) -> dict:
+    return config.get("meta_agent", {})
+
+
+def _baseline_names(config: dict) -> list[str]:
+    names = _meta_cfg(config).get("aug_baselines")
+    if names:
+        return [str(n).lower() for n in names]
+    return list_baseline_aug_names()
+
+
+def _arch_iters_per_baseline(config: dict, track_iters: int) -> int:
+    """Iterations per aug baseline when running staged 1a."""
+    per = _meta_cfg(config).get("arch_search_iterations_per_aug")
+    # Explicit positive value wins; 0 / null → split track_iters across aug baselines.
+    if per is not None and int(per) > 0:
+        return int(per)
+    n_aug = max(1, len(_baseline_names(config)))
+    return max(1, int(track_iters) // n_aug)
+
+
+def _score_cnn_arch_search(logs_dir: Path, suite: SoundscapeEvalSuite) -> SoundscapeScore | None:
+    """Score best CNN search run from saved soundscape eval artifacts (no final keras needed)."""
+    rr_path = logs_dir / "random_results.json"
+    if not rr_path.exists():
+        return None
+    results = json.loads(rr_path.read_text(encoding="utf-8"))
+    ok = [r for r in results if r.get("success")]
+    if not ok:
+        return None
+    rank_key = (
+        "macro_average_precision"
+        if suite.primary_metric == PRIMARY_META_METRIC
+        else "macro_roc_auc"
+    )
+
+    def _rank_val(r: dict) -> float:
+        v = r.get("ranking_value") or r.get(rank_key) or r.get("macro_roc_auc")
+        return float(v) if v is not None else -1.0
+
+    best = max(ok, key=_rank_val)
+    run_id = str(best.get("run_id", ""))
+    eval_dir = logs_dir / "eval_artifacts"
+    for suffix in ("_a5", "_a4", "_a3", "_a2", "_a1", ""):
+        yp_path = eval_dir / f"y_pred_{run_id}{suffix}.npy"
+        if yp_path.exists():
+            y_pred = np.load(yp_path).astype(np.float32)
+            return suite.score_arrays(y_pred)
+    return None
+
+
 def _run_subprocess(script: str, config_override: dict, base_config: dict) -> int:
     """Write a temp config with overrides and run a script as subprocess."""
     cfg = json.loads(json.dumps(base_config))
     cfg.update(config_override)
+    # Child agents (CNN / BirdNET / Perch) must not re-run EDA — only meta Phase 0 does.
+    if script != "eda_agent.py":
+        cfg.setdefault("eda", {})
+        if not config_override.get("eda", {}).get("enabled", False):
+            cfg["eda"]["enabled"] = False
     tmp = Path(tempfile.gettempdir()) / f"meta_{Path(script).stem}_config.json"
     tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     result = subprocess.run(
@@ -438,6 +504,242 @@ def run_phase3_ensemble(
     return ensemble_cfg
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Staged pipeline — Step 1a: architecture search × aug baselines
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_cnn_baseline_1a(
+    config: dict,
+    baseline: str,
+    n_iters: int,
+    max_samples: int,
+    suite: SoundscapeEvalSuite,
+) -> dict:
+    logs_dir = META_LOGS / "cnn" / baseline
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    cnn_aug = get_cnn_baseline_aug(baseline)
+    base_search = config.get("search", {})
+    override = {
+        "meta_aug_preset": baseline,
+        "arch_search_only": True,
+        "lock_augmentation": True,
+        "cnn_augmentation": cnn_aug,
+        "cnn": {"logs_dir": str(logs_dir)},
+        "search": {
+            **base_search,
+            "skip_final_training": True,
+            "cheap": {
+                **base_search.get("cheap", {}),
+                "max_samples": max_samples,
+            },
+            "linear_budget": 0,
+            "phase2": {
+                **base_search.get("phase2", {}),
+                "random_experiments": n_iters,
+                "focused_experiments": 0,
+                "tweak_experiments": 0,
+                "augmentation_tweak_experiments": 0,
+                "ai_free_experiments": 0,
+                "final_tweak_experiments": 0,
+            },
+            "transfer_exploration": {"enabled": False},
+            "medium_stage": {"enabled": False},
+            "reality_gate": {"enabled": False},
+        },
+    }
+    print(f"\n  [CNN / {baseline}] {describe_baseline(baseline)}")
+    print(f"  logs → {logs_dir}  |  iters={n_iters}  |  max_samples={max_samples}")
+    rc = _run_subprocess("cnn_agent.py", override, config)
+    score = _score_cnn_arch_search(logs_dir, suite)
+    _print_soundscape_score(f"CNN/{baseline}", score)
+    return {
+        "track": "cnn",
+        "aug_baseline": baseline,
+        "logs_dir": str(logs_dir),
+        "subprocess_rc": rc,
+        "score": score.to_dict() if score else None,
+    }
+
+
+def _run_birdnet_baseline_1a(
+    config: dict,
+    baseline: str,
+    n_iters: int,
+    embed_frac: float,
+    suite: SoundscapeEvalSuite,
+) -> dict:
+    logs_dir = META_LOGS / "birdnet" / baseline
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = CACHE_DIR / f"train_emb1024_{baseline}.npz"
+    override = {
+        "meta_aug_preset": baseline,
+        "augmentation": get_audio_embedding_aug(baseline),
+        "aug_preset_sweep": {"enabled": False},
+        "train_sample_frac": embed_frac,
+        "force_rebuild_cache": _meta_cfg(config).get("force_rebuild_embed_cache", False),
+        "max_iterations": n_iters,
+        "birdnet": {"logs_dir": str(logs_dir)},
+        "train_cache_path": str(cache_path),
+    }
+    print(f"\n  [BirdNET / {baseline}] {describe_baseline(baseline)}")
+    print(f"  logs → {logs_dir}  |  cache → {cache_path.name}  |  embed_frac={embed_frac}")
+    if cache_path.exists() and not override.get("force_rebuild_cache"):
+        print(f"  train embeddings on disk → {cache_path.name} (will skip rebuild)")
+    rc = _run_subprocess("birdnet_agent.py", override, config)
+    score = suite.score_birdnet_artifacts(logs_dir, BIRDNET_VAL_CACHE)
+    _print_soundscape_score(f"BirdNET/{baseline}", score)
+    return {
+        "track": "birdnet",
+        "aug_baseline": baseline,
+        "logs_dir": str(logs_dir),
+        "train_cache_path": str(cache_path),
+        "subprocess_rc": rc,
+        "score": score.to_dict() if score else None,
+    }
+
+
+def _run_perch_baseline_1a(
+    config: dict,
+    baseline: str,
+    n_iters: int,
+    embed_frac: float,
+    embed_max: int | None,
+    suite: SoundscapeEvalSuite,
+) -> dict:
+    mem_dir = META_LOGS / "perch" / baseline
+    cache_dir = META_LOGS / "perch_cache" / baseline
+    code_dir = mem_dir / "codes"
+    for d in (mem_dir, cache_dir, code_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    perch_base = dict(config.get("perch", {}))
+    train_cache = cache_dir / f"train_emb_{baseline}.npz"
+    head_train_cap = _meta_cfg(config).get("arch_search_head_train_max_samples")
+    if head_train_cap is None:
+        head_train_cap = perch_base.get("head_train_max_samples")
+    override = {
+        "meta_aug_preset": baseline,
+        "augmentation": get_audio_embedding_aug(baseline),
+        "train_sample_frac": embed_frac,
+        "max_iterations": n_iters,
+        "head_train_max_samples": head_train_cap,
+        "perch": {
+            **perch_base,
+            "logs_dir": str(mem_dir.parent),
+            "memory_dir": str(mem_dir),
+            "cache_dir": str(cache_dir),
+            "code_dir": str(code_dir),
+            "max_train_samples": embed_max,
+            "head_train_max_samples": head_train_cap,
+            "force_rebuild_cache": _meta_cfg(config).get("force_rebuild_embed_cache", False),
+            "skip_final_retrain": True,
+        },
+    }
+    print(f"\n  [Perch / {baseline}] {describe_baseline(baseline)}")
+    cap_msg = f"  |  head_train_cap={head_train_cap}" if head_train_cap else ""
+    print(
+        f"  memory → {mem_dir}  |  cache → {cache_dir}  |  "
+        f"embed_frac={embed_frac} (stratified per species){cap_msg}"
+    )
+    if train_cache.exists() and not override["perch"]["force_rebuild_cache"]:
+        print(f"  train embeddings on disk → {train_cache.name} (will skip rebuild)")
+    rc = _run_subprocess("perch_agent.py", override, config)
+    score = suite.score_perch(mem_dir)
+    _print_soundscape_score(f"Perch/{baseline}", score)
+    return {
+        "track": "perch",
+        "aug_baseline": baseline,
+        "memory_dir": str(mem_dir),
+        "cache_dir": str(cache_dir),
+        "subprocess_rc": rc,
+        "score": score.to_dict() if score else None,
+    }
+
+
+def _pick_track_winner(runs: list[dict], metric: str) -> dict | None:
+    scored = [
+        r for r in runs
+        if r.get("score") and r["score"].get("primary_value") is not None
+    ]
+    if not scored:
+        return None
+    return max(scored, key=lambda r: float(r["score"]["primary_value"]))
+
+
+def run_stage_1a_arch_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
+    """
+    Step 1a: for each track, run architecture search on each aug baseline separately.
+    Returns JSON-serialisable summary (also written to ARCH_SEARCH_1A_RESULTS).
+    """
+    meta = _meta_cfg(config)
+    baselines = _baseline_names(config)
+    metric = _meta_primary_metric(config)
+
+    cnn_iters = int(meta.get("cnn_iterations", 0))
+    bird_iters = int(meta.get("birdnet_iterations", 0))
+    perch_iters = int(meta.get("perch_iterations", 0))
+
+    cnn_max = int(meta.get("arch_search_cnn_max_samples", 2000))
+    embed_frac = float(meta.get("arch_search_embed_sample_frac", 0.5))
+    embed_max = meta.get("arch_search_embed_max_samples")
+    if embed_max is not None:
+        embed_max = int(embed_max)
+
+    print("\n" + "=" * 60)
+    print("  STAGED PIPELINE — Step 1a: Architecture search × aug baselines")
+    print(f"  Baselines: {', '.join(baselines)}")
+    print(f"  Ranking metric: {metric}")
+    print("=" * 60)
+
+    summary: dict = {
+        "stage": "1a_arch_search",
+        "primary_metric": metric,
+        "aug_baselines": baselines,
+        "tracks": {},
+    }
+
+    if cnn_iters > 0:
+        per = _arch_iters_per_baseline(config, cnn_iters)
+        cnn_runs = [
+            _run_cnn_baseline_1a(config, b, per, cnn_max, suite)
+            for b in baselines
+        ]
+        winner = _pick_track_winner(cnn_runs, metric)
+        summary["tracks"]["cnn"] = {"runs": cnn_runs, "winner": winner}
+        if winner:
+            sc = winner["score"]
+            print(
+                f"\n  ★ CNN track winner: aug={winner['aug_baseline']}  "
+                f"{format_soundscape_metrics_line(macro_ap=sc.get('macro_average_precision'), macro_auc=sc.get('competition_macro_auc'), median_auc=sc.get('median_per_class_auc'), ranking_metric=metric)}"
+            )
+
+    if bird_iters > 0:
+        per = _arch_iters_per_baseline(config, bird_iters)
+        bn_runs = [
+            _run_birdnet_baseline_1a(config, b, per, embed_frac, suite)
+            for b in baselines
+        ]
+        winner = _pick_track_winner(bn_runs, metric)
+        summary["tracks"]["birdnet"] = {"runs": bn_runs, "winner": winner}
+        if winner:
+            print(f"\n  ★ BirdNET track winner: aug={winner['aug_baseline']}")
+
+    if perch_iters > 0:
+        per = _arch_iters_per_baseline(config, perch_iters)
+        p_runs = [
+            _run_perch_baseline_1a(config, b, per, embed_frac, embed_max, suite)
+            for b in baselines
+        ]
+        winner = _pick_track_winner(p_runs, metric)
+        summary["tracks"]["perch"] = {"runs": p_runs, "winner": winner}
+        if winner:
+            print(f"\n  ★ Perch track winner: aug={winner['aug_baseline']}")
+
+    META_LOGS.mkdir(parents=True, exist_ok=True)
+    ARCH_SEARCH_1A_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\n  Step 1a summary → {ARCH_SEARCH_1A_RESULTS}")
+    return summary
+
+
 def save_soundscape_leaderboard(
     scores: dict[str, SoundscapeScore | None],
     ensemble_cfg: dict,
@@ -489,7 +791,8 @@ def main():
     args   = parser.parse_args()
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
 
-    meta_cfg        = config.get("meta_agent", {})
+    meta_cfg        = _meta_cfg(config)
+    pipeline        = str(meta_cfg.get("pipeline", "legacy")).lower()
     cnn_iters       = int(meta_cfg.get("cnn_iterations",        5))
     birdnet_iters   = int(meta_cfg.get("birdnet_iterations",   10))
     perch_iters     = int(meta_cfg.get("perch_iterations",     10))
@@ -499,7 +802,16 @@ def main():
 
     metric = _meta_primary_metric(config)
     suite = _soundscape_suite(config)
-    print(f"\n  Meta-agent ranking metric: {metric} on labeled train_soundscapes")
+    print(f"\n  Meta-agent pipeline: {pipeline}")
+    print(f"  Ranking metric: {metric} on labeled train_soundscapes")
+
+    if pipeline == "staged_1a":
+        if meta_cfg.get("run_eda", False):
+            run_phase0_eda(config)
+        run_stage_1a_arch_search(config, suite)
+        print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
+        print("=" * 60)
+        return
 
     if meta_cfg.get("run_eda", True):
         run_phase0_eda(config)

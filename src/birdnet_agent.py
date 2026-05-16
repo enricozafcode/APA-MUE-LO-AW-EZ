@@ -440,6 +440,18 @@ def build_pseudo_cache(max_samples: int = 500) -> None:
     print(f"Pseudo cache saved: {NPZ_PSEUDO} ({len(X_list)} samples)")
 
 
+def _train_cache_path(config: dict | None, use_aug: bool) -> Path:
+    """Resolve train embedding cache path (supports meta-agent per-baseline caches)."""
+    if config:
+        custom = config.get("train_cache_path") or config.get("birdnet", {}).get("train_cache_path")
+        if custom:
+            return Path(custom)
+        preset = config.get("meta_aug_preset")
+        if preset:
+            return CACHE_DIR / f"train_emb1024_{preset}.npz"
+    return NPZ_TRAIN_AUG if use_aug else NPZ_TRAIN
+
+
 def ensure_caches(config: dict | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     global _bird_session
     species_cols, species_to_idx = _build_species_map()
@@ -447,12 +459,22 @@ def ensure_caches(config: dict | None = None) -> tuple[np.ndarray, np.ndarray, n
     max_samples = config.get("max_train_samples") if config else None
     sample_frac = config.get("train_sample_frac", 0.30) if config else 0.30
     aug_config  = config.get("augmentation") if config else None
+    force_rebuild = bool(config.get("force_rebuild_cache")) if config else False
 
     _audio_aug = AudioAugmenter(aug_config.get("audio", {}) if aug_config else {})
     use_aug    = bool(aug_config and (
         aug_config.get("use_snr_mixing") or _audio_aug.active_strategies()
     ))
-    npz_train  = NPZ_TRAIN_AUG if use_aug else NPZ_TRAIN
+    npz_train  = _train_cache_path(config, use_aug)
+
+    if force_rebuild and npz_train.exists():
+        npz_train.unlink()
+        print(f"  Removed cache (force_rebuild): {npz_train.name}")
+
+    if npz_train.exists() and not force_rebuild:
+        print(f"  Reusing existing train embeddings → {npz_train}")
+    if NPZ_VAL.exists():
+        print(f"  Reusing existing val embeddings → {NPZ_VAL}")
 
     if not npz_train.exists() or not NPZ_VAL.exists():
         init_birdnet()
@@ -1472,7 +1494,15 @@ def _save_history(history: list[dict], path: Path) -> None:
 
 
 def agent_loop(config: dict) -> None:
+    global LOGS_DIR
+    bn_cfg = config.get("birdnet", {})
+    if bn_cfg.get("logs_dir"):
+        LOGS_DIR = Path(bn_cfg["logs_dir"])
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+    preset = config.get("meta_aug_preset")
+    if preset:
+        print(f"  Meta aug baseline: {preset}")
 
     # ── Phase 0: augmentation preset sweep (optional, before main cache) ──
     if config.get("aug_preset_sweep", {}).get("enabled", False):

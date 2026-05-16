@@ -45,6 +45,11 @@ else:
     from llm_client import LLMClient
     from eda_agent import run_eda_phase
 
+try:
+    from .soundscape_evaluator import PRIMARY_META_METRIC, format_metrics_dict
+except ImportError:
+    from soundscape_evaluator import PRIMARY_META_METRIC, format_metrics_dict
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # DEFAULT PARAMETERS & SEARCH SPACE
@@ -116,6 +121,57 @@ from src.data_io import (
     validate_required_files,
 )
 
+def _wav_to_mel(wav, sample_rate, n_mels, n_frames):
+    mel = librosa.feature.melspectrogram(
+        y=wav, sr=sample_rate, n_mels=n_mels, n_fft=1024, hop_length=512, power=2.0
+    )
+    mel_db = librosa.power_to_db(mel, ref=np.max)
+    mel_resized = tf.image.resize(mel_db[..., np.newaxis], (n_mels, n_frames)).numpy()
+    return mel_resized.astype(np.float32)
+
+
+def _load_focal_mel(audio_path, sample_rate, clip_seconds, n_mels, n_frames, cfg, paths, rng):
+    # Focal clip -> optional audio aug + soundscape SNR mix -> mel (training only).
+    target_len = int(sample_rate * clip_seconds)
+    wav, _ = librosa.load(str(audio_path), sr=sample_rate, mono=True, duration=clip_seconds)
+    if len(wav) < target_len:
+        wav = np.pad(wav, (0, target_len - len(wav)))
+    else:
+        wav = wav[:target_len]
+
+    preset = cfg.get("aug_preset")
+    if preset:
+        from src.augmentation import (
+            AudioAugmenter,
+            get_audio_embedding_aug,
+            load_random_soundscape_noise,
+            mix_snr,
+        )
+        embed_aug = get_audio_embedding_aug(str(preset))
+        audio_aug = AudioAugmenter(embed_aug.get("audio", {}))
+        wav = audio_aug.apply(wav.astype(np.float32), sample_rate)
+        if embed_aug.get("use_snr_mixing"):
+            mix_prob = float(embed_aug.get("mix_prob", 0.35))
+            if rng.random() < mix_prob:
+                ss_dir = paths.train_soundscapes_dir
+                pool = sorted(ss_dir.glob("*.ogg")) if ss_dir.exists() else []
+                noise = load_random_soundscape_noise(
+                    rng, pool, sr=sample_rate, clip_sec=float(clip_seconds)
+                )
+                if noise is not None:
+                    snr_db = float(rng.uniform(
+                        float(embed_aug.get("snr_min_db", 0.0)),
+                        float(embed_aug.get("snr_max_db", 15.0)),
+                    ))
+                    wav = mix_snr(wav, noise, snr_db)
+        if len(wav) < target_len:
+            wav = np.pad(wav, (0, target_len - len(wav)))
+        else:
+            wav = wav[:target_len]
+
+    return _wav_to_mel(wav, sample_rate, n_mels, n_frames)
+
+
 def _default_load_mel(audio_path, sample_rate, clip_seconds, n_mels, n_frames):
     target_len = int(sample_rate * clip_seconds)
     wav, _ = librosa.load(str(audio_path), sr=sample_rate, mono=True, duration=clip_seconds)
@@ -123,12 +179,7 @@ def _default_load_mel(audio_path, sample_rate, clip_seconds, n_mels, n_frames):
         wav = np.pad(wav, (0, target_len - len(wav)))
     else:
         wav = wav[:target_len]
-    mel = librosa.feature.melspectrogram(
-        y=wav, sr=sample_rate, n_mels=n_mels, n_fft=1024, hop_length=512, power=2.0
-    )
-    mel_db = librosa.power_to_db(mel, ref=np.max)
-    mel_resized = tf.image.resize(mel_db[..., np.newaxis], (n_mels, n_frames)).numpy()
-    return mel_resized.astype(np.float32)
+    return _wav_to_mel(wav, sample_rate, n_mels, n_frames)
 """.strip()
 
 
@@ -184,6 +235,7 @@ def main():
     aug_noise_std = float(cfg.get("aug_noise_std", 0.0))
     aug_time_mask = int(cfg.get("aug_time_mask", 0))
     aug_freq_mask = int(cfg.get("aug_freq_mask", 0))
+    aug_preset    = cfg.get("aug_preset")
 
     optimizer_name = cfg.get("optimizer", "adam")
     if optimizer_name == "sgd_momentum":
@@ -261,11 +313,15 @@ def main():
         "represented_species=", represented_species,
     )
 
-    # 3) Decode selected audio files and build tensors.
+    # 3) Decode selected audio files and build tensors (train: audio aug + soundscape SNR before mel).
+    load_rng = np.random.default_rng(42)
     X_items, y_items = [], []
     for i, (label, ap) in enumerate(selected, start=1):
         try:
-            mel = mel_fn(ap, sample_rate, clip_seconds, n_mels, n_frames)
+            if aug_preset:
+                mel = _load_focal_mel(ap, sample_rate, clip_seconds, n_mels, n_frames, cfg, paths, load_rng)
+            else:
+                mel = mel_fn(ap, sample_rate, clip_seconds, n_mels, n_frames)
         except Exception:
             continue
         yv = np.zeros(len(species_cols), dtype=np.float32)
@@ -292,7 +348,7 @@ def main():
         f"X_val={{X_val.shape}}, y_val={{y_val.shape}}, val_split={{val_split}}, split_mode={{split_mode}}"
     )
     print(
-        f"AUG_CFG: prob={{aug_prob}} noise_std={{aug_noise_std}} "
+        f"AUG_CFG: preset={{aug_preset}} prob={{aug_prob}} noise_std={{aug_noise_std}} "
         f"time_mask={{aug_time_mask}} freq_mask={{aug_freq_mask}}"
     )
     print(
@@ -465,6 +521,7 @@ def generate_slot_code(params):
         "aug_noise_std": {d.get("aug_noise_std", 0.0)},
         "aug_time_mask": {d.get("aug_time_mask", 0)},
         "aug_freq_mask": {d.get("aug_freq_mask", 0)},
+        "aug_preset": {repr(d.get("aug_preset"))},
     }}
 
 
@@ -528,6 +585,7 @@ def describe_params(params):
         f"mels={params.get('n_mels','?')}",
         f"frames={params.get('n_frames','?')}",
         f"bs={params.get('batch_size','?')}",
+        f"aug_preset={params.get('aug_preset')}",
         f"aug_p={params.get('aug_prob', 0.0)}",
         f"aug_n={params.get('aug_noise_std', 0.0)}",
         f"aug_tm={params.get('aug_time_mask', 0)}",
@@ -569,12 +627,74 @@ def _load_saved_search_state(logs_dir):
     if not isinstance(lin_results, list) or not isinstance(rnd_results, list) or not isinstance(lin_best, dict):
         raise ValueError("Saved search files have an unexpected format; refusing to resume from medium.")
 
-    rnd_ok = [r for r in rnd_results if r.get("success") and isinstance(r.get("macro_roc_auc"), (int, float))]
-    best_rnd = max(rnd_ok, key=lambda r: r["macro_roc_auc"]) if rnd_ok else None
+    rnd_ok = [r for r in rnd_results if r.get("success") and _result_rank_value(r) >= 0]
+    best_rnd = max(rnd_ok, key=_result_rank_value) if rnd_ok else None
     return lin_results, lin_best, rnd_results, best_rnd
 
 def _fmt_score(v):
     return f"{v:.6f}" if isinstance(v, (int, float)) else "N/A"
+
+
+def _ranking_metric_from_config(config: dict | None) -> str:
+    if not config:
+        return PRIMARY_META_METRIC
+    return str(config.get("meta_agent", {}).get("primary_metric", PRIMARY_META_METRIC))
+
+
+def _ranking_value_from_metrics(metrics: dict | None) -> float | None:
+    if not metrics or metrics.get("status") != "success":
+        return None
+    if metrics.get("ranking_value") is not None:
+        return float(metrics["ranking_value"])
+    key = metrics.get("ranking_metric", PRIMARY_META_METRIC)
+    if key == PRIMARY_META_METRIC:
+        v = metrics.get("macro_average_precision")
+        if v is not None:
+            return float(v)
+    v = metrics.get("macro_roc_auc")
+    return float(v) if v is not None else None
+
+
+def _fmt_experiment_metrics(metrics: dict | None) -> str:
+    return format_metrics_dict(metrics, ranking_metric=PRIMARY_META_METRIC)
+
+
+def _search_result_entry(
+    run_id: str,
+    search_type: str,
+    params: dict,
+    metrics: dict | None,
+    attempts: int,
+    description: str,
+    slot_code: str,
+) -> dict:
+    rv = _ranking_value_from_metrics(metrics)
+    return {
+        "run_id": run_id,
+        "search_type": search_type,
+        "params": params,
+        "success": rv is not None,
+        "attempts": attempts,
+        "description": description,
+        "slot_code": slot_code,
+        "ranking_metric": (metrics or {}).get("ranking_metric", PRIMARY_META_METRIC),
+        "ranking_value": rv,
+        "macro_roc_auc": (metrics or {}).get("macro_roc_auc"),
+        "macro_average_precision": (metrics or {}).get("macro_average_precision"),
+        "competition_macro_auc_v2": (metrics or {}).get("competition_macro_auc_v2"),
+        "median_per_class_auc": (metrics or {}).get("median_per_class_auc"),
+    }
+
+
+def _result_rank_value(entry: dict) -> float:
+    v = entry.get("ranking_value")
+    if v is not None:
+        return float(v)
+    if entry.get("macro_average_precision") is not None:
+        return float(entry["macro_average_precision"])
+    if entry.get("macro_roc_auc") is not None:
+        return float(entry["macro_roc_auc"])
+    return -1.0
 
 
 def _coverage_adjusted_score_agent(macro_auc: float, scored_columns: int, total_classes: int = 234) -> float:
@@ -1033,14 +1153,16 @@ def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dir
             rid = f"L{rc:03d}_{dn}"
             slot, metrics, result, att = run_experiment_until_success(
                 slot, rid, dirs["linear_codes"], dirs["eval"], executor, evaluator, llm, temperature)
-            auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
-            entry = {"run_id": rid, "dimension": dn, "value": val, "search_type": "coarse",
-                     "params": {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
-                     "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
-                     "best_epoch": metrics.get("best_epoch") if metrics else None,
-                     "description": describe_params(p)}
-            all_results.append(entry); dim_results.append(entry)
-            print(f"    {dn}={val} → {_fmt_score(auc)} (att={att})")
+            entry = _search_result_entry(
+                rid, "coarse",
+                {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
+                metrics, att, describe_params(p), slot,
+            )
+            entry["dimension"] = dn
+            entry["value"] = val
+            all_results.append(entry)
+            dim_results.append(entry)
+            print(f"    {dn}={val} → {_fmt_experiment_metrics(metrics)} (att={att})")
             if not entry["success"]:
                 cf += 1
                 if cf >= 5: print(f"\n  ⚠ {cf} consecutive failures on {dn}={val}")
@@ -1051,9 +1173,13 @@ def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dir
         if not ok:
             print(f"  No successful runs for {dn}. Keeping default={current_best[dn]}")
             continue
-        coarse_best = max(ok, key=lambda r: r["macro_roc_auc"])
+        coarse_best = max(ok, key=_result_rank_value)
         cbv = coarse_best["value"]
-        print(f"  Coarse winner: {dn}={cbv} (AUC={coarse_best['macro_roc_auc']:.6f})")
+        print(
+            f"  Coarse winner: {dn}={cbv} "
+            f"(AP={coarse_best.get('macro_average_precision', 'N/A')}, "
+            f"AUC={coarse_best.get('competition_macro_auc_v2') or coarse_best.get('macro_roc_auc', 'N/A')})"
+        )
 
         zoom_vals = _compute_zoom_values(dim, cbv)
         if zoom_vals:
@@ -1095,8 +1221,25 @@ def _run_linear_search(baseline_slot, executor, evaluator, llm, temperature, dir
 # PHASE 2: RANDOM SEARCH
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _sample_random_params(rng):
-    return {
+def _locked_cnn_aug(config: dict) -> dict:
+    """Fixed spectrogram aug knobs when meta-agent locks a baseline preset."""
+    return dict(config.get("cnn_augmentation") or {})
+
+
+def _apply_locked_aug(params: dict, config: dict) -> dict:
+    if not config.get("lock_augmentation"):
+        return params
+    locked = _locked_cnn_aug(config)
+    if not locked:
+        return params
+    out = dict(params)
+    out.update(locked)
+    return out
+
+
+def _sample_random_params(rng, config: dict | None = None):
+    config = config or {}
+    p = {
         "depth": int(rng.choice([1, 2, 3, 4, 6, 8, 12, 15, 20])),
         "filters_base": int(rng.choice([8, 16, 32, 64, 128])),
         "filter_pattern": "doubling",
@@ -1116,8 +1259,10 @@ def _sample_random_params(rng):
         "aug_time_mask": 0,
         "aug_freq_mask": 0,
     }
+    return _apply_locked_aug(p, config)
 
-def _tweak_params(base, rng):
+def _tweak_params(base, rng, config: dict | None = None):
+    config = config or {}
     p = dict(base)
     dims = rng.choice(["depth", "filters_base", "learning_rate", "weight_decay", "classifier_hidden_units", "residuals"],
                        size=int(rng.choice([1,2])), replace=False)
@@ -1134,7 +1279,7 @@ def _tweak_params(base, rng):
             p["classifier_hidden_units"] = int(rng.choice([0, 128, 256, 512]))
         elif d == "residuals":
             p["residuals"] = bool(rng.choice([True, False]))
-    return p
+    return _apply_locked_aug(p, config)
 
 def _tweak_augmentation_params(base, rng):
     p = dict(base)
@@ -1208,13 +1353,17 @@ def _researcher_analysis(llm_researcher, results, temperature=0.6):
 
 
 def _analyze_random_results(results, llm, temperature):
-    ok = [r for r in results if r.get("success") and r.get("macro_roc_auc")]
+    ok = [r for r in results if r.get("success") and _result_rank_value(r) >= 0]
     if len(ok) < 3:
         return None
-    ok.sort(key=lambda r: r["macro_roc_auc"], reverse=True)
-    lines = ["rank | AUC      | description", "-"*80]
+    ok.sort(key=_result_rank_value, reverse=True)
+    lines = ["rank | macro_AP (ranking) | macro_AUC | description", "-" * 80]
     for i, r in enumerate(ok[:20]):
-        lines.append(f"{i+1:4d} | {r['macro_roc_auc']:.6f} | {r['description']}")
+        ap = r.get("macro_average_precision")
+        auc = r.get("competition_macro_auc_v2") or r.get("macro_roc_auc")
+        ap_s = f"{ap:.5f}" if ap is not None else "N/A"
+        auc_s = f"{auc:.5f}" if auc is not None else "N/A"
+        lines.append(f"{i+1:4d} | {ap_s:>18s} | {auc_s:>9s} | {r['description']}")
     prompt = (
         "Results from random architecture search for bird audio classification.\n\n"
         + "\n".join(lines) + "\n\n"
@@ -1256,8 +1405,8 @@ def _sample_narrowed(ranges, rng):
 
 
 def _best_successful(results, top_k=4):
-    ok = [r for r in results if r.get("success") and isinstance(r.get("macro_roc_auc"), (int, float))]
-    ok.sort(key=lambda r: r["macro_roc_auc"], reverse=True)
+    ok = [r for r in results if r.get("success") and _result_rank_value(r) >= 0]
+    ok.sort(key=_result_rank_value, reverse=True)
     return ok[:top_k]
 
 
@@ -1279,7 +1428,14 @@ def _save_phase2_results(logs_dir, all_results, top_k):
 def _generate_ai_free_slot(llm, temperature, best_results, fallback_slot, cheap_cfg):
     top_lines = []
     for i, r in enumerate(best_results[:4], start=1):
-        top_lines.append(f"{i}. AUC={r['macro_roc_auc']:.6f} | {r['description']}")
+        m = {
+            "status": "success",
+            "macro_average_precision": r.get("macro_average_precision"),
+            "macro_roc_auc": r.get("macro_roc_auc"),
+            "competition_macro_auc_v2": r.get("competition_macro_auc_v2"),
+            "median_per_class_auc": r.get("median_per_class_auc"),
+        }
+        top_lines.append(f"{i}. {_fmt_experiment_metrics(m)} | {r['description']}")
     top_summary = "\n".join(top_lines) if top_lines else "No successful prior runs yet."
 
     prompt = (
@@ -1665,9 +1821,11 @@ def _run_reality_check_gate(candidates, executor, evaluator, dirs, search_cfg):
 
 
 def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dirs, search_cfg,
-                       llm_researcher=None, researcher_temp=0.6):
+                       llm_researcher=None, researcher_temp=0.6, config=None):
+    config = config or {}
     print("\n" + "=" * 60)
     print("  PHASE 2: RANDOM SEARCH")
+    print(f"  Ranking: {_ranking_metric_from_config(config)} on labeled train_soundscapes")
     print("=" * 60)
 
     budget = search_cfg.get("random_budget", 50)
@@ -1677,7 +1835,9 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
     explore_count = int(phase2_cfg.get("random_experiments", budget))
     focused_count = int(phase2_cfg.get("focused_experiments", 50))
     tweak_count = int(phase2_cfg.get("tweak_experiments", 50))
-    aug_tweak_count = int(phase2_cfg.get("augmentation_tweak_experiments", 5))
+    aug_tweak_count = 0 if config.get("lock_augmentation") else int(
+        phase2_cfg.get("augmentation_tweak_experiments", 5)
+    )
     ai_free_count = int(phase2_cfg.get("ai_free_experiments", 50))
     final_tweak_count = int(phase2_cfg.get("final_tweak_experiments", 15))
     top_keep = int(phase2_cfg.get("top_results_keep", 4))
@@ -1690,21 +1850,20 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
     print(f"\n  ── A: {explore_count} random experiments ──")
     for _ in range(explore_count):
         rc += 1
-        p = _sample_random_params(rng); p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
+        p = _sample_random_params(rng, config); p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
         slot = generate_slot_code(p)
         rid = f"R{rc:03d}_explore"
         slot, metrics, result, att = run_experiment_until_success(
             slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
-        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
-        entry = {"run_id": rid, "search_type": "explore",
-                 "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
-                 "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
-                 "best_epoch": metrics.get("best_epoch") if metrics else None,
-                 "description": describe_params(p), "slot_code": slot}
+        entry = _search_result_entry(
+            rid, "explore",
+            {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
+            metrics, att, describe_params(p), slot,
+        )
         all_results.append(entry)
         if entry["success"]:
             current_best_slot = slot
-        print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+        print(f"    R{rc:03d}: {_fmt_experiment_metrics(metrics)} | {describe_params(p)}")
     _save_phase2_results(dirs["logs"], all_results, top_keep)
 
     # Sub-phase C-aug: augmentation tweaks of top configs
@@ -1720,16 +1879,15 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         rid = f"R{rc:03d}_tweak_aug"
         slot, metrics, result, att = run_experiment_until_success(
             slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
-        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
-        entry = {"run_id": rid, "search_type": "tweak_aug",
-            "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
-            "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
-            "best_epoch": metrics.get("best_epoch") if metrics else None,
-            "description": describe_params(p), "slot_code": slot}
+        entry = _search_result_entry(
+            rid, "tweak_aug",
+            {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
+            metrics, att, describe_params(p), slot,
+        )
         all_results.append(entry)
         if entry["success"]:
             current_best_slot = slot
-        print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+        print(f"    R{rc:03d}: {_fmt_experiment_metrics(metrics)} | {describe_params(p)}")
     _save_phase2_results(dirs["logs"], all_results, top_keep)
 
     # Researcher analysis (dual-LLM: DeepSeek reasons, then coder acts)
@@ -1753,16 +1911,15 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         rid = f"R{rc:03d}_focused"
         slot, metrics, result, att = run_experiment_until_success(
             slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
-        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
-        entry = {"run_id": rid, "search_type": "focused",
-            "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
-            "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
-            "best_epoch": metrics.get("best_epoch") if metrics else None,
-            "description": describe_params(p), "slot_code": slot}
+        entry = _search_result_entry(
+            rid, "focused",
+            {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
+            metrics, att, describe_params(p), slot,
+        )
         all_results.append(entry)
         if entry["success"]:
             current_best_slot = slot
-        print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+        print(f"    R{rc:03d}: {_fmt_experiment_metrics(metrics)} | {describe_params(p)}")
     _save_phase2_results(dirs["logs"], all_results, top_keep)
 
     # Sub-phase C: broad tweak pass
@@ -1770,25 +1927,24 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
     for i in range(tweak_count):
         ok = _best_parametric_successful(all_results, 5)
         if not ok:
-            p = _sample_random_params(rng)
+            p = _sample_random_params(rng, config)
         else:
-            p = _tweak_params(ok[i % len(ok)]["params"], rng)
+            p = _tweak_params(ok[i % len(ok)]["params"], rng, config)
         rc += 1
         p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
         slot = generate_slot_code(p)
         rid = f"R{rc:03d}_tweak"
         slot, metrics, result, att = run_experiment_until_success(
             slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
-        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
-        entry = {"run_id": rid, "search_type": "tweak",
-            "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
-            "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
-            "best_epoch": metrics.get("best_epoch") if metrics else None,
-            "description": describe_params(p), "slot_code": slot}
+        entry = _search_result_entry(
+            rid, "tweak",
+            {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
+            metrics, att, describe_params(p), slot,
+        )
         all_results.append(entry)
         if entry["success"]:
             current_best_slot = slot
-        print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+        print(f"    R{rc:03d}: {_fmt_experiment_metrics(metrics)} | {describe_params(p)}")
     _save_phase2_results(dirs["logs"], all_results, top_keep)
 
     # Sub-phase D: AI free experiments
@@ -1820,27 +1976,24 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         rid = f"R{rc:03d}_ai_free"
         ai_slot, metrics, result, att = run_experiment_until_success(
             ai_slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature, max_attempts=7)
-        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
-        success = auc is not None
+        entry = _search_result_entry(
+            rid,
+            "ai_free",
+            top_param_now[0]["params"] if top_param_now else dict(DEFAULT_PARAMS),
+            metrics,
+            att,
+            f"AI free generation candidate #{ai_candidates}",
+            ai_slot,
+        )
+        entry["counts_toward_budget"] = entry["success"]
+        success = entry["success"]
         if success:
             ai_success += 1
-        entry = {
-            "run_id": rid,
-            "search_type": "ai_free",
-            "params": top_param_now[0]["params"] if top_param_now else dict(DEFAULT_PARAMS),
-            "macro_roc_auc": auc,
-            "success": success,
-            "counts_toward_budget": success,
-            "attempts": att,
-            "best_epoch": metrics.get("best_epoch") if metrics else None,
-            "description": f"AI free generation candidate #{ai_candidates}",
-            "slot_code": ai_slot,
-        }
         all_results.append(entry)
         ai_free_history.append(entry)
         if success:
             current_best_slot = ai_slot
-            print(f"    R{rc:03d}: {_fmt_score(auc)} | accepted ({ai_success}/{ai_free_count})")
+            print(f"    R{rc:03d}: {_fmt_experiment_metrics(metrics)} | accepted ({ai_success}/{ai_free_count})")
         else:
             print(f"    R{rc:03d}: failed after {att} attempts, does not count toward AI-free budget. Moving on.")
     if ai_success < ai_free_count:
@@ -1854,28 +2007,37 @@ def _run_random_search(baseline_slot, executor, evaluator, llm, temperature, dir
         if not ok:
             break
         rc += 1
-        p = _tweak_params(ok[i % len(ok)]["params"], rng)
+        p = _tweak_params(ok[i % len(ok)]["params"], rng, config)
         p["max_samples"] = s; p["epochs"] = e; p["val_split"] = vs
         slot = generate_slot_code(p)
         rid = f"R{rc:03d}_tweak_final"
         slot, metrics, result, att = run_experiment_until_success(
             slot, rid, dirs["random_codes"], dirs["eval"], executor, evaluator, llm, temperature)
-        auc = metrics["macro_roc_auc"] if metrics and metrics.get("status") == "success" else None
-        entry = {"run_id": rid, "search_type": "tweak_final",
-            "params": {k:v for k,v in p.items() if k not in ("max_samples","epochs")},
-            "macro_roc_auc": auc, "success": auc is not None, "attempts": att,
-            "best_epoch": metrics.get("best_epoch") if metrics else None,
-            "description": describe_params(p), "slot_code": slot}
+        entry = _search_result_entry(
+            rid, "tweak_final",
+            {k: v for k, v in p.items() if k not in ("max_samples", "epochs")},
+            metrics, att, describe_params(p), slot,
+        )
         all_results.append(entry)
         if entry["success"]:
             current_best_slot = slot
-        print(f"    R{rc:03d}: {_fmt_score(auc)} | {describe_params(p)}")
+        print(f"    R{rc:03d}: {_fmt_experiment_metrics(metrics)} | {describe_params(p)}")
     _save_phase2_results(dirs["logs"], all_results, top_keep)
 
-    all_ok = [r for r in all_results if r.get("success") and r.get("macro_roc_auc")]
-    best = max(all_ok, key=lambda r: r["macro_roc_auc"]) if all_ok else None
+    all_ok = [r for r in all_results if r.get("success") and _result_rank_value(r) >= 0]
+    best = max(all_ok, key=_result_rank_value) if all_ok else None
     print(f"\n  Random done: {rc} iters, {len(all_ok)} successful")
-    if best: print(f"  Best: AUC={best['macro_roc_auc']:.6f} | {best['description']}")
+    if best:
+        best_m = {
+            "status": "success",
+            "macro_average_precision": best.get("macro_average_precision"),
+            "macro_roc_auc": best.get("macro_roc_auc"),
+            "competition_macro_auc_v2": best.get("competition_macro_auc_v2"),
+            "median_per_class_auc": best.get("median_per_class_auc"),
+            "ranking_metric": best.get("ranking_metric"),
+            "ranking_value": best.get("ranking_value"),
+        }
+        print(f"  Best: {_fmt_experiment_metrics(best_m)} | {best['description']}")
     return all_results, best
 
 
@@ -2653,7 +2815,11 @@ def agent_loop(config):
     global GENERATION_SYSTEM_PROMPT, TRANSFER_SYSTEM_PROMPT
 
     root = Path(__file__).resolve().parents[1]
-    logs = root / "logs"
+    cnn_cfg = config.get("cnn", {})
+    logs = Path(cnn_cfg["logs_dir"]) if cnn_cfg.get("logs_dir") else root / "logs"
+    preset = config.get("meta_aug_preset")
+    if preset:
+        print(f"  Meta aug baseline: {preset}")
     dirs = {k: logs / v for k, v in {
         "logs": "", "eval": "eval_artifacts", "linear_codes": "linear_codes",
         "random_codes": "random_codes", "baseline_codes": "baseline_codes"}.items()}
@@ -2663,7 +2829,12 @@ def agent_loop(config):
 
     # ── Phase EDA: autonomous data exploration before any model training ──────
     eda_cfg = config.get("eda", {})
-    if eda_cfg.get("enabled", True):
+    # Meta-agent subprocesses (staged 1a per baseline) must not re-run EDA each time.
+    if config.get("arch_search_only") or config.get("meta_aug_preset"):
+        eda_default = False
+    else:
+        eda_default = True
+    if eda_cfg.get("enabled", eda_default):
         py_exe = config["execution"]["python_executable"]
         _eda_executor = CodeExecutor(python_executable=py_exe, timeout_seconds=120)
         _eda_llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
@@ -2681,6 +2852,14 @@ def agent_loop(config):
         print("  EDA phase disabled (eda.enabled=false in config)")
 
     sc = config.get("search", {})
+    if config.get("arch_search_only"):
+        sc["linear_budget"] = 0
+        sc.setdefault("phase2", {})["augmentation_tweak_experiments"] = 0
+        sc.setdefault("cnn_exploration", {})["enabled"] = True
+        sc.setdefault("transfer_exploration", {})["enabled"] = False
+        sc.setdefault("medium_stage", {})["enabled"] = False
+        sc.setdefault("reality_gate", {})["enabled"] = False
+        sc["skip_final_training"] = True
     sc.setdefault("cheap", {"max_samples": 1000, "epochs": 3, "val_split": 0.2})
     sc.setdefault("medium", {"max_samples": 10000, "epochs": 15, "val_split": 0.2})
     sc.setdefault("final", {"max_samples": None, "epochs": 20, "val_split": 0.1})
@@ -2784,6 +2963,19 @@ def agent_loop(config):
         print("=" * 60)
         lin_results, lin_best = [], dict(DEFAULT_PARAMS)
         rnd_results, best_rnd = [], None
+    elif config.get("arch_search_only"):
+        print("\n" + "=" * 60)
+        print("  ARCH SEARCH ONLY — random search with locked augmentation baseline")
+        print("=" * 60)
+        locked = _locked_cnn_aug(config)
+        lin_best = {**dict(DEFAULT_PARAMS), **locked}
+        baseline_slot = generate_slot_code({**lin_best, **sc["cheap"]})
+        lin_results = []
+        rnd_results, best_rnd = _run_random_search(
+            baseline_slot, executor_search, evaluator, llm, temp, dirs, sc,
+            llm_researcher=llm_researcher, researcher_temp=researcher_temp,
+            config=config,
+        )
     else:
         baseline_slot, _ = _run_baseline(executor_search, evaluator, llm, temp, dirs, sc)
         lin_results, lin_best = _run_linear_search(baseline_slot, executor_search, evaluator, llm, temp, dirs, sc)
@@ -2791,6 +2983,7 @@ def agent_loop(config):
         rnd_results, best_rnd = _run_random_search(
             baseline_slot, executor_search, evaluator, llm, temp, dirs, sc,
             llm_researcher=llm_researcher, researcher_temp=researcher_temp,
+            config=config,
         )
         _maybe_generate_insights(config, llm, rnd_results, "random", dirs, temp)
 

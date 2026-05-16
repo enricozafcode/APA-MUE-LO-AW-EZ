@@ -1,0 +1,1 @@
+BirdNET submission bundle (mix-trained).\nCreated: 2026-05-02T10:24:02\nFiles:\n- head_a_logreg.pkl\n- head_b_mlp.keras\n- head_c_mlp_mixup.keras\n- metadata.npz\n- kaggle_inference.ipynb\n\nKaggle usage:\n1) Upload this folder as a Kaggle Dataset.\n2) Open kaggle_inference.ipynb and set MODEL_DIR.\n3) Run all cells to create /kaggle/working/submission.csv.\n

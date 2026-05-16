@@ -89,8 +89,16 @@
     "generate_insights": false
   },
   "meta_agent": {
+    "pipeline": "staged_1a",
     "primary_metric": "macro_average_precision",
     "run_eda": false,
+    "aug_baselines": ["light", "medium", "high"],
+    "arch_search_iterations_per_aug": null,
+    "arch_search_cnn_max_samples": 2000,
+    "arch_search_head_train_max_samples": 2000,
+    "arch_search_embed_sample_frac": 0.5,
+    "arch_search_embed_max_samples": null,
+    "force_rebuild_embed_cache": false,
     "cnn_iterations": 0,
     "birdnet_iterations": 0,
     "perch_iterations": 30,
@@ -101,6 +109,7 @@
     "perch_labels_model": "google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu",
     "max_train_samples": null,
     "embed_batch_size": 16,
+    "head_train_max_samples": 2000,
     "force_rebuild_cache": false,
     "skip_final_retrain": true
   },

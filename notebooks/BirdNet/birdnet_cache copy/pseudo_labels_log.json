@@ -1,0 +1,15 @@
+{
+  "n_files": 10592,
+  "n_files_failed": 0,
+  "n_windows_total": 127104,
+  "n_kept": 10912,
+  "keep_rate": 0.08585095669687814,
+  "n_species_with_pseudo": 133,
+  "min_per_species": 1,
+  "max_per_species": 2043,
+  "median_per_species": 20,
+  "thresholds": {
+    "top1": 0.5,
+    "runnerup_max": 0.4
+  }
+}
