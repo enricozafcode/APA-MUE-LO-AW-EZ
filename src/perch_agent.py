@@ -13,7 +13,7 @@ Pipeline:
      a. Researcher reads memory → produces JSON spec
      b. Coder writes build_head(emb_dim, n_classes) + get_training_config()
      c. Harness loads caches, trains head, blends with Perch logit scores
-     d. Evaluate macro ROC-AUC on soundscape windows
+     d. Evaluate soundscape metrics (macro AP = ranking, macro AUC = diagnostic)
      e. Log to persistent memory
 
 Run:
@@ -37,6 +37,7 @@ from code_executor import CodeExecutor
 from evaluator import Evaluator
 from llm_client import LLMClient
 from memory import ExperimentMemory
+from soundscape_evaluator import PRIMARY_META_METRIC, format_metrics_dict
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -459,7 +460,7 @@ Final predictions blend the head output with direct Perch logit scores:
   y_pred = perch_weight * perch_scores + (1 - perch_weight) * head_output
 
 Reason carefully about:
-- Which head depth (n_blocks), width (hidden_dim, proj_dim), and dropout improved AUC
+- Which head depth (n_blocks), width (hidden_dim, proj_dim), and dropout improved macro_average_precision
 - Whether a higher perch_weight (trusting Perch's own labels more) helps
 - Which learning rates and batch sizes worked
 - What has NOT been tried yet
@@ -482,22 +483,21 @@ class PerchResearcher:
     def next_experiment(self) -> dict:
         history  = self.memory.researcher_context()
         best     = self.memory.best_runs(1)
-        best_auc = best[0]["macro_roc_auc"] if best else None
         total    = self.memory.total()
-        best_str = f"{best_auc:.5f}" if best_auc is not None else "none"
+        best_str = self.memory._format_run_score(best[0]) if best else "none"
 
         user_prompt = (
             f"{history}\n\n"
             f"Search space:\n{json.dumps(PERCH_SEARCH_SPACE, indent=2)}\n\n"
             f"Total experiments: {total}\n"
-            f"Best AUC: {best_str}\n\n"
+            f"Best so far ({self.memory.ranking_metric}): {best_str}\n\n"
             "Pick the next experiment. Respond with ONLY a JSON object — no prose, no markdown.\n"
             "Start with { and end with }. Include all keys: "
             "n_blocks, hidden_dim, proj_dim, dropout_block, dropout_final, learning_rate, "
             "batch_size, optimizer, epochs, patience, perch_weight, reasoning, hypothesis, strategy."
         )
 
-        print(f"\n  [Researcher] Analyzing {total} experiments, best AUC={best_str}...")
+        print(f"\n  [Researcher] Analyzing {total} experiments, best {best_str}...")
         response = self.llm.generate_from_messages(
             messages=[
                 {"role": "system", "content": PERCH_RESEARCHER_SYSTEM_PROMPT},
@@ -921,6 +921,23 @@ print("FINAL_RETRAIN_DONE")
 # Main agent loop
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ranking_metric_from_config(config: dict) -> str:
+    return str(config.get("meta_agent", {}).get("primary_metric", PRIMARY_META_METRIC))
+
+
+def _ranking_value_from_metrics(metrics: dict | None) -> float | None:
+    if not metrics or metrics.get("status") != "success":
+        return None
+    key = metrics.get("ranking_metric", PRIMARY_META_METRIC)
+    if key == "macro_roc_auc":
+        return metrics.get("macro_roc_auc")
+    return metrics.get("macro_average_precision")
+
+
+def _format_iteration_metrics(metrics: dict | None) -> str:
+    return format_metrics_dict(metrics, ranking_metric=PRIMARY_META_METRIC)
+
+
 def run(config: dict) -> None:
     logs_dir  = ROOT / "logs"
     code_dir  = logs_dir / "perch_agent_codes"
@@ -1034,7 +1051,8 @@ def run(config: dict) -> None:
     # ── Step 7: Set up agent components ──────────────────────────────────
     researcher_llm = LLMClient(provider=provider, model=researcher_model)
     coder_llm      = LLMClient(provider=provider, model=coder_model)
-    memory         = ExperimentMemory(mem_dir)
+    ranking_metric = _ranking_metric_from_config(config)
+    memory         = ExperimentMemory(mem_dir, ranking_metric=ranking_metric)
     researcher     = PerchResearcher(researcher_llm, memory, temperature=researcher_temp)
     executor       = CodeExecutor(python_executable=py_exe, timeout_seconds=timeout)
     evaluator      = Evaluator(row_id_column_name="row_id")
@@ -1042,12 +1060,15 @@ def run(config: dict) -> None:
     print(f"\n  Researcher model : {researcher_model}")
     print(f"  Coder model      : {coder_model}")
     print(f"  Max iterations   : {max_iterations}")
+    print(
+        f"  Ranking metric   : {ranking_metric} "
+        f"(each run logs macro_AP, macro_AUC, median_AUC)"
+    )
     prior = memory.total()
     if prior:
-        best     = memory.best_runs(1)
-        best_auc = best[0]["macro_roc_auc"] if best else None
-        best_str = f"{best_auc:.5f}" if best_auc is not None else "none"
-        print(f"  Memory           : {prior} prior runs | best AUC={best_str}")
+        best = memory.best_runs(1)
+        best_str = memory._format_run_score(best[0]) if best else "none"
+        print(f"  Memory           : {prior} prior runs | best {best_str}")
     else:
         print("  Memory           : fresh start")
     print("=" * 60)
@@ -1057,8 +1078,8 @@ def run(config: dict) -> None:
     y_pred_path        = Path(tempfile.gettempdir()) / "_y_pred.npy"
     trained_head_path  = Path(tempfile.gettempdir()) / "_trained_head.keras"
     best_head_path     = mem_dir / "best_head.keras"
-    _prior_best        = memory.best_runs(1)
-    best_auc_ever      = _prior_best[0]["macro_roc_auc"] if _prior_best else -1.0
+    _prior_best = memory.best_runs(1)
+    best_score_ever = memory._ranking_value(_prior_best[0]) if _prior_best else -1.0
 
     for iteration in range(1, max_iterations + 1):
         print(f"\n{'─'*60}")
@@ -1086,18 +1107,20 @@ def run(config: dict) -> None:
                 summary = evaluator.evaluate_from_files(y_true_path, y_pred_path)
                 metrics = summary.metrics
 
-        auc    = metrics.get("macro_roc_auc") if metrics else None
-        status = f"AUC={auc:.5f}" if auc is not None else "FAILED"
-        print(f"  [Result] {status}")
+        rank_val = _ranking_value_from_metrics(metrics)
+        print(f"  [Result] {_format_iteration_metrics(metrics)}")
         if not result.success and result.stderr:
             # TF logs to stderr too — show the tail where the real Python error is
             print(f"  [Error]  {result.stderr[-600:]}")
 
         memory.log(spec=spec, metrics=metrics, code=slot_code)
 
-        # Promote to best model if this run beat the previous best
-        if auc is not None and auc > best_auc_ever:
-            best_auc_ever = auc
+        # Promote to best model if this run beat the previous best (by ranking metric)
+        if rank_val is not None and rank_val > best_score_ever:
+            best_score_ever = rank_val
+            auc = metrics.get("macro_roc_auc") if metrics else None
+            ap = metrics.get("macro_average_precision") if metrics else None
+            med = metrics.get("median_per_class_auc") if metrics else None
             if trained_head_path.exists():
                 import shutil
                 shutil.copy2(str(trained_head_path), str(best_head_path))
@@ -1106,7 +1129,16 @@ def run(config: dict) -> None:
                 if _weights_src.exists():
                     shutil.copy2(str(_weights_src), str(mem_dir / "best_head.weights.h5"))
                 with open(mem_dir / "best_model_info.json", "w") as _f:
-                    json.dump({"auc": auc, "iteration": iteration, "spec": spec}, _f, indent=2)
+                    json.dump({
+                        "ranking_metric": ranking_metric,
+                        "ranking_value": rank_val,
+                        "macro_average_precision": ap,
+                        "macro_roc_auc": auc,
+                        "median_per_class_auc": med,
+                        "auc": auc,
+                        "iteration": iteration,
+                        "spec": spec,
+                    }, _f, indent=2)
                 # Save val preds for meta-agent ensemble phase
                 _y_pred_tmp = Path(tempfile.gettempdir()) / "_y_pred.npy"
                 _y_true_tmp = Path(tempfile.gettempdir()) / "_y_true.npy"
@@ -1114,20 +1146,28 @@ def run(config: dict) -> None:
                     shutil.copy2(str(_y_pred_tmp), str(mem_dir / "best_val_preds.npy"))
                 if _y_true_tmp.exists():
                     shutil.copy2(str(_y_true_tmp), str(mem_dir / "y_val.npy"))
-                print(f"  [Best] NEW BEST AUC={auc:.5f} — head saved to {best_head_path.name}")
+                print(
+                    f"  [Best] NEW BEST {_format_iteration_metrics(metrics)} "
+                    f"— head saved to {best_head_path.name}"
+                )
 
         best = memory.best_runs(1)
         if best:
-            print(f"  [Best so far] AUC={best[0]['macro_roc_auc']:.5f}")
+            print(f"  [Best so far] {memory._format_run_score(best[0])}")
 
     print(f"\n{'='*60}")
     print("  DONE")
     best = memory.best_runs(3)
     for i, r in enumerate(best, 1):
-        print(f"  #{i} AUC={r['macro_roc_auc']:.5f} | {r['reasoning'][:80]}")
+        print(f"  #{i} {memory._format_run_score(r)} | {r['reasoning'][:80]}")
     print(f"{'='*60}")
 
     # ── Final retrain on full data (train + val) with best spec ──────────────
+    if config.get("perch", {}).get("skip_final_retrain", False):
+        print("\n  Final retrain skipped (perch.skip_final_retrain=true).")
+        print("  Use logs/perch_memory/best_head.weights.h5 from the search loop.")
+        return
+
     best_runs = memory.best_runs(1)
     if best_runs:
         best_spec = best_runs[0]["spec"]

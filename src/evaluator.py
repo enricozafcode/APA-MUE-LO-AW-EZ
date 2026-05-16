@@ -123,8 +123,13 @@ class Evaluator:
                 "num_classes": class_count,
                 "num_samples": row_count,
             }
+            from soundscape_evaluator import enrich_soundscape_metrics
+
+            metrics = enrich_soundscape_metrics(metrics, y_true, y_pred)
             analysis_prompt = (
-                "The experiment succeeded and was externally evaluated with the competition metric. "
+                "The experiment succeeded and was externally evaluated on soundscape validation. "
+                f"Use macro_average_precision as the primary score for model selection "
+                f"(better local proxy for Kaggle LB than macro_roc_auc alone). "
                 f"Metrics: {metrics}. Analyze this result, propose a small architectural improvement, "
                 "and provide a complete updated script."
             )

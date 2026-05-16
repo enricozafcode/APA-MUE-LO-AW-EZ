@@ -15,6 +15,7 @@ torch
 torchaudio
 torchvision
 tensorflow
+birdnet
 
 # Audio processing
 librosa

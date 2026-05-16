@@ -2891,7 +2891,11 @@ def agent_loop(config):
         or best_gate_auc > 0
         or (transfer_pack and transfer_pack.get("effective_slot_code") is not None)
     )
-    if ran_anything and best_slot_code:
+    skip_final = bool(sc.get("skip_final_training", False))
+    if skip_final:
+        print("\n  Final training skipped (search.skip_final_training=true).")
+        print("  Use best search checkpoint / winner_slot_code.py for submission artifacts.")
+    elif ran_anything and best_slot_code:
         _run_final_training(
             best_params,
             executor_final,

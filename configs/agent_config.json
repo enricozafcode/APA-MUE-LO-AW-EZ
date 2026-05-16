@@ -5,11 +5,17 @@
   "max_iterations": 2,
   "llm": {
     "provider": "ollama",
-    "model": "llama3.2:3b",
+    "model": "qwen2.5-coder:7b",
     "temperature": 0.2
   },
+  "llm_researcher": {
+    "enabled": true,
+    "provider": "ollama",
+    "model": "deepseek-r1:8b",
+    "temperature": 0.6
+  },
   "researcher": {
-    "model": "llama3.2:3b",
+    "model": "deepseek-r1:8b",
     "temperature": 0.6
   },
   "execution": {
@@ -73,7 +79,8 @@
       "val_split": 0.2,
       "split_mode": "group_holdout"
     },
-    "random_seed": 42
+    "random_seed": 42,
+    "skip_final_training": true
   },
   "logging": {
     "log_dir": "logs",
@@ -82,16 +89,22 @@
     "generate_insights": false
   },
   "meta_agent": {
-    "cnn_iterations": 1,
-    "birdnet_iterations": 1,
-    "perch_iterations": 1,
-    "ensemble_iterations": 1
+    "primary_metric": "macro_average_precision",
+    "run_eda": false,
+    "cnn_iterations": 0,
+    "birdnet_iterations": 0,
+    "perch_iterations": 30,
+    "ensemble_iterations": 0
   },
   "perch": {
     "onnx_dataset": "rishikeshjani/perch-onnx-for-birdclef-2026",
     "perch_labels_model": "google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu",
     "max_train_samples": null,
     "embed_batch_size": 16,
-    "force_rebuild_cache": false
+    "force_rebuild_cache": false,
+    "skip_final_retrain": true
+  },
+  "final_retrain": {
+    "enabled": false
   }
 }

@@ -22,14 +22,39 @@ data/*
 
 logs/
 models/
+
+# Submission outputs (regenerate locally)
 submission/*.csv
 submission/*.parquet
 submission/*.ipynb
+submission/model.keras
 
 # OS / editor
 .DS_Store
 .idea/
 .vscode/
 
-# Trained model artifacts (we store the code not the keras model)
+# Trained model / embedding artifacts (regenerate locally — do not push to GitHub)
 *.keras
+*.h5
+*.hdf5
+*.weights.h5
+*.npz
+*.npy
+*.pkl
+*.pickle
+*.tflite
+*.onnx
+*.pb
+
+# BirdNET / agent caches and notebook junk
+notebooks/birdnet_cache/
+notebooks/**/birdnet_cache/
+notebooks/**/birdnet_cache */
+notebooks/cache/submission_preds/
+notebooks/BirdNet/.jupyter_home_fake/
+notebooks/BirdNet/ensemble_upload/
+notebooks/BirdNet/submission_birdnet/
+
+# Keep benchmark notebooks + small CSV summaries under notebooks/cache/
+# (ipynb and *.csv are not ignored)

@@ -6,8 +6,8 @@ Five sequential phases:
   Phase 1: CNN agent explores scratch CNN architectures on raw audio spectrograms
   Phase 2: BirdNET agent explores MLP heads on BirdNET (1024-D) embeddings
   Phase 3: Perch agent explores MLP heads on Perch (1536-D) embeddings
-  Phase 4: Ensemble — tries different blend weights on a COMMON soundscape val set
-           so Perch and BirdNET predictions can be directly compared and combined
+  Phase 4: Ensemble — blend search on labeled train_soundscapes; ranking uses
+           macro_average_precision (v2 benchmark metric, configurable)
 
 Run:
     python src/meta_agent.py --config configs/agent_config.json
@@ -26,10 +26,24 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from soundscape_evaluator import (
+    PRIMARY_META_METRIC,
+    SoundscapeEvalSuite,
+    SoundscapeScore,
+    competition_macro_auc,
+    format_soundscape_metrics_line,
+    format_soundscape_score,
+    macro_average_precision,
+    median_per_class_auc,
+    primary_score,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR     = PROJECT_ROOT / "data"
 CACHE_DIR    = PROJECT_ROOT / "notebooks" / "birdnet_cache"
 PERCH_MEMORY = PROJECT_ROOT / "logs" / "perch_memory"
+BIRDNET_LOGS = PROJECT_ROOT / "logs" / "birdnet_agent"
+CNN_SUBMISSION = PROJECT_ROOT / "submission" / "model.keras"
 META_LOGS    = PROJECT_ROOT / "logs" / "meta_agent"
 
 SOUNDSCAPE_LABELS = DATA_DIR / "train_soundscapes_labels.csv"
@@ -37,6 +51,7 @@ TRAIN_SOUNDSCAPES = DATA_DIR / "train_soundscapes"
 
 BIRDNET_VAL_CACHE = CACHE_DIR / "val_emb1024.npz"
 META_VAL_CACHE    = META_LOGS / "common_val.npz"
+SOUNDSCAPE_LEADERBOARD = META_LOGS / "soundscape_leaderboard.json"
 
 SR           = 32_000
 CLIP_SEC     = 5.0
@@ -49,17 +64,24 @@ PYTHON       = sys.executable
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _macro_auc(y_true: np.ndarray, y_score: np.ndarray, min_pos: int = 3) -> tuple[float, int]:
-    from sklearn.metrics import roc_auc_score
-    aucs = []
-    for c in range(y_true.shape[1]):
-        if y_true[:, c].sum() < min_pos:
-            continue
-        try:
-            aucs.append(roc_auc_score(y_true[:, c], y_score[:, c]))
-        except Exception:
-            pass
-    return (float(np.mean(aucs)) if aucs else 0.0), len(aucs)
+def _meta_primary_metric(config: dict) -> str:
+    return str(
+        config.get("meta_agent", {}).get("primary_metric", PRIMARY_META_METRIC)
+    )
+
+
+def _soundscape_suite(config: dict) -> SoundscapeEvalSuite:
+    return SoundscapeEvalSuite(DATA_DIR, primary_metric=_meta_primary_metric(config))
+
+
+def _print_soundscape_score(label: str, score: SoundscapeScore | None) -> None:
+    if score is None:
+        print(f"  [{label}] soundscape eval skipped (missing artifacts)")
+        return
+    print(
+        f"  [{label}] {format_soundscape_score(score)} "
+        f"| n_windows={score.n_windows} n_classes={score.n_scored_classes}"
+    )
 
 
 def _run_subprocess(script: str, config_override: dict, base_config: dict) -> int:
@@ -96,7 +118,11 @@ def run_phase0_eda(config: dict) -> None:
 # Phase 1 — CNN
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_phase1_cnn(config: dict, n_iterations: int) -> float:
+def run_phase1_cnn(config: dict, n_iterations: int, suite: SoundscapeEvalSuite) -> SoundscapeScore | None:
+    if n_iterations <= 0:
+        print("\n  [Phase 1] CNN skipped (cnn_iterations=0)")
+        return None
+
     print("\n" + "=" * 60)
     print(f"  PHASE 1 — CNN  ({n_iterations} iterations)")
     print("=" * 60)
@@ -129,24 +155,25 @@ def run_phase1_cnn(config: dict, n_iterations: int) -> float:
     if rc != 0:
         print("  [Phase 1] CNN agent finished with errors.")
 
-    # CNN agent logs to logs/agent/
-    auc_path = PROJECT_ROOT / "logs" / "agent" / "final_results.json"
-    if auc_path.exists():
-        results = json.loads(auc_path.read_text())
-        aucs = [r.get("macro_roc_auc", 0.0) for r in results if r.get("macro_roc_auc")]
-        auc  = float(max(aucs)) if aucs else 0.0
-    else:
-        auc = 0.0
+    if not CNN_SUBMISSION.exists():
+        print(f"  [Phase 1] No CNN model at {CNN_SUBMISSION} — skipping soundscape eval.")
+        return None
 
-    print(f"\n  [Phase 1] Best CNN AUC = {auc:.5f}")
-    return auc
+    print("  [Phase 1] Soundscape eval (labeled train_soundscapes) …")
+    score = suite.score_cnn(CNN_SUBMISSION)
+    _print_soundscape_score("CNN", score)
+    return score
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 2 — BirdNET
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_phase1_birdnet(config: dict, n_iterations: int) -> float:
+def run_phase1_birdnet(config: dict, n_iterations: int, suite: SoundscapeEvalSuite) -> SoundscapeScore | None:
+    if n_iterations <= 0:
+        print("\n  [Phase 2] BirdNET skipped (birdnet_iterations=0)")
+        return None
+
     print("\n" + "=" * 60)
     print(f"  PHASE 2 — BirdNET  ({n_iterations} iterations)")
     print("=" * 60)
@@ -155,29 +182,21 @@ def run_phase1_birdnet(config: dict, n_iterations: int) -> float:
     if rc != 0:
         print("  [Phase 2] BirdNET agent finished with errors.")
 
-    # Read best AUC
-    auc_path = META_LOGS.parent / "birdnet_agent" / "best_auc.json"
-    if auc_path.exists():
-        info = json.loads(auc_path.read_text())
-        auc  = float(info.get("auc", 0.0))
-    else:
-        hist = META_LOGS.parent / "birdnet_agent" / "history.json"
-        if hist.exists():
-            history = json.loads(hist.read_text())
-            aucs = [e.get("macro_auc_ge3", 0.0) for e in history if e.get("status") == "success"]
-            auc  = float(max(aucs)) if aucs else 0.0
-        else:
-            auc = 0.0
-
-    print(f"\n  [Phase 2] Best BirdNET AUC = {auc:.5f}")
-    return auc
+    print("  [Phase 2] Soundscape eval on best BirdNET val predictions …")
+    score = suite.score_birdnet_artifacts(BIRDNET_LOGS, BIRDNET_VAL_CACHE)
+    _print_soundscape_score("BirdNET", score)
+    return score
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 2 — Perch
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_phase2_perch(config: dict, n_iterations: int) -> float:
+def run_phase2_perch(config: dict, n_iterations: int, suite: SoundscapeEvalSuite) -> SoundscapeScore | None:
+    if n_iterations <= 0:
+        print("\n  [Phase 3] Perch skipped (perch_iterations=0)")
+        return None
+
     print("\n" + "=" * 60)
     print(f"  PHASE 3 — Perch  ({n_iterations} iterations)")
     print("=" * 60)
@@ -186,14 +205,17 @@ def run_phase2_perch(config: dict, n_iterations: int) -> float:
     if rc != 0:
         print("  [Phase 3] Perch agent finished with errors.")
 
-    info_path = PERCH_MEMORY / "best_model_info.json"
-    if info_path.exists():
-        auc = float(json.loads(info_path.read_text()).get("auc", 0.0))
-    else:
-        auc = 0.0
+    head = PERCH_MEMORY / "best_head.keras"
+    if not head.exists():
+        head = PERCH_MEMORY / "final_head.keras"
+    if not head.exists():
+        print("  [Phase 3] No Perch head in logs/perch_memory — skipping soundscape eval.")
+        return None
 
-    print(f"\n  [Phase 3] Best Perch AUC = {auc:.5f}")
-    return auc
+    print("  [Phase 3] Soundscape eval (ONNX Perch + best head) …")
+    score = suite.score_perch(PERCH_MEMORY)
+    _print_soundscape_score("Perch", score)
+    return score
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,112 +347,135 @@ def build_common_val(config: dict) -> bool:
     return True
 
 
-def run_phase3_ensemble(config: dict, n_iterations: int,
-                        perch_auc: float, birdnet_auc: float) -> dict:
+def run_phase3_ensemble(
+    config: dict,
+    n_iterations: int,
+    suite: SoundscapeEvalSuite,
+    perch_score: SoundscapeScore | None,
+    birdnet_score: SoundscapeScore | None,
+) -> dict:
+    if n_iterations <= 0:
+        print("\n  [Phase 4] Ensemble skipped (ensemble_iterations=0)")
+        return {}
+
+    metric = suite.primary_metric
     print("\n" + "=" * 60)
     print(f"  PHASE 4 — Ensemble  ({n_iterations} blend weights)")
-    print(f"  Perch AUC={perch_auc:.5f}  BirdNET AUC={birdnet_auc:.5f}")
+    p_val = perch_score.primary_value if perch_score else 0.0
+    b_val = birdnet_score.primary_value if birdnet_score else 0.0
+    print(f"  Perch {metric}={p_val:.5f}  BirdNET {metric}={b_val:.5f}")
     print("=" * 60)
 
     META_LOGS.mkdir(parents=True, exist_ok=True)
 
-    # Build common val if not already done
-    if not META_VAL_CACHE.exists():
-        ok = build_common_val(config)
-        if not ok:
-            print("  [Phase 3] Cannot build common val — skipping.")
-            return {}
-
-    val     = np.load(str(META_VAL_CACHE))
-    X_perch = val["X_perch"].astype(np.float32)
-    X_bn    = val["X_birdnet"].astype(np.float32)
-    y_val   = val["y_val"].astype(np.float32)
-    print(f"  Common val: {y_val.shape}")
-
-    # Load best Perch head and get its predictions on common val
-    info_path = PERCH_MEMORY / "best_model_info.json"
-    weights_path = PERCH_MEMORY / "best_head.weights.h5"
-    if not info_path.exists() or not weights_path.exists():
-        print("  [Phase 3] Best Perch model not found — skipping ensemble.")
+    print("  Building aligned soundscape predictions for blend search …")
+    y_true = suite.y_true
+    perch_preds = suite.aligned_perch_preds(PERCH_MEMORY)
+    birdnet_preds = suite.aligned_birdnet_preds(BIRDNET_LOGS, BIRDNET_VAL_CACHE)
+    if birdnet_preds is None:
+        print("  [Phase 4] BirdNET val preds missing — skipping ensemble.")
         return {}
 
-    spec      = json.loads(info_path.read_text())["spec"]
-    n_classes = y_val.shape[1]
-    print("  Loading best Perch head...")
-    perch_head = _build_perch_head(spec, PERCH_DIM, n_classes)
-    perch_head.load_weights(str(weights_path))
-    perch_preds = perch_head.predict(X_perch, verbose=0)
-    perch_self_auc, _ = _macro_auc(y_val, perch_preds)
-    print(f"  Perch on common val: AUC={perch_self_auc:.5f}")
+    perch_self = suite.score_arrays(perch_preds)
+    bn_self = suite.score_arrays(birdnet_preds)
+    print(f"  Perch alone:   {format_soundscape_score(perch_self)}")
+    print(f"  BirdNET alone: {format_soundscape_score(bn_self)}")
 
-    # Load best BirdNET slot and get its predictions on common val
-    slot_path = PROJECT_ROOT / "logs" / "birdnet_agent" / "best_slot.py"
-    if not slot_path.exists():
-        print("  [Phase 3] Best BirdNET slot not found — skipping ensemble.")
-        return {}
+    total = perch_self.primary_value + bn_self.primary_value
+    w_start = (
+        round(perch_self.primary_value / total, 2) if total > 0 else 0.5
+    )
 
-    print("  Running best BirdNET head on common val...")
-    slot_code = slot_path.read_text(encoding="utf-8")
-    # We need BirdNET training data to re-train the head (slot code trains from scratch)
-    birdnet_train = np.load(str(BIRDNET_VAL_CACHE), allow_pickle=True)  # use val as proxy
-    # Actually run the slot against the birdnet val embeddings on our common val X_bn
-    try:
-        ns: dict = {}
-        exec(slot_code, ns)
-        import inspect
-        sig = inspect.signature(ns["build_head"])
-        if "y_train" in sig.parameters:
-            birdnet_model = ns["build_head"](X_bn.shape[1], n_classes, y_val)
-        else:
-            birdnet_model = ns["build_head"](X_bn.shape[1], n_classes)
-        birdnet_preds = birdnet_model.predict(X_bn, verbose=0)
-        bn_self_auc, _ = _macro_auc(y_val, birdnet_preds)
-        print(f"  BirdNET on common val: AUC={bn_self_auc:.5f}")
-    except Exception as e:
-        print(f"  [Phase 3] Could not run BirdNET slot: {e}")
-        print("  Falling back to saved val preds...")
-        bn_preds_path = PROJECT_ROOT / "logs" / "birdnet_agent" / "best_val_preds.npy"
-        if not bn_preds_path.exists():
-            print("  [Phase 3] No BirdNET val preds saved — skipping.")
-            return {}
-        birdnet_preds = np.load(str(bn_preds_path))
-        bn_self_auc = birdnet_auc
+    n_blend = max(1, int(n_iterations))
+    grid_n = max(n_blend, 9)
+    candidates = sorted({round(float(w), 4) for w in np.linspace(0.01, 0.99, grid_n)})
+    candidates = sorted(candidates, key=lambda w: abs(w - w_start))[:n_blend]
 
-    # Grid search over blend weights
-    total   = perch_self_auc + bn_self_auc if (perch_self_auc + bn_self_auc) > 0 else 1.0
-    w_start = round(perch_self_auc / total, 1)
-
-    candidates = sorted(set(
-        [round(w, 1) for w in np.linspace(0.1, 0.9, 9)]
-    ))
-
-    # Put the theoretically best weight first, then explore around it
-    candidates = sorted(candidates, key=lambda w: abs(w - w_start))[:n_iterations]
-
-    results = []
+    results: list[dict] = []
     for i, w in enumerate(candidates, 1):
-        blended      = w * perch_preds + (1 - w) * birdnet_preds
-        auc, n_scored= _macro_auc(y_val, blended)
-        print(f"  [{i}/{len(candidates)}] perch_weight={w:.1f}  AUC={auc:.5f}  (scored on {n_scored} species)")
-        results.append({"perch_weight": w, "auc": auc, "n_scored": n_scored})
+        blended = w * perch_preds + (1.0 - w) * birdnet_preds
+        ap, n_scored = macro_average_precision(y_true, blended)
+        auc, _ = competition_macro_auc(y_true, blended)
+        med, _ = median_per_class_auc(y_true, blended)
+        primary = primary_score(y_true, blended, metric)
+        print(
+            f"  [{i}/{len(candidates)}] perch_weight={w:.2f}  "
+            f"{format_soundscape_metrics_line(macro_ap=ap, macro_auc=auc, median_auc=med, ranking_metric=metric)}"
+        )
+        results.append({
+            "perch_weight": w,
+            "primary_metric": metric,
+            "primary_value": primary,
+            "macro_average_precision": ap,
+            "competition_macro_auc": auc,
+            "median_per_class_auc": med,
+            "n_scored": n_scored,
+        })
 
-    best        = max(results, key=lambda r: r["auc"])
+    best = max(results, key=lambda r: r["primary_value"])
     best_weight = best["perch_weight"]
-    best_auc    = best["auc"]
-    print(f"\n  [Phase 3] Best blend: perch_weight={best_weight:.1f}  AUC={best_auc:.5f}")
+    best_primary = best["primary_value"]
+    print(
+        f"\n  [Phase 4] Best blend: perch_weight={best_weight:.2f}  "
+        f"{format_soundscape_metrics_line(macro_ap=best['macro_average_precision'], macro_auc=best['competition_macro_auc'], median_auc=best['median_per_class_auc'], ranking_metric=metric)}"
+    )
 
     ensemble_cfg = {
-        "perch_weight":    best_weight,
-        "birdnet_weight":  round(1.0 - best_weight, 1),
-        "perch_val_auc":   perch_self_auc,
-        "birdnet_val_auc": bn_self_auc,
-        "best_ensemble_auc": best_auc,
-        "all_results":     results,
+        "primary_metric": metric,
+        "perch_weight": best_weight,
+        "birdnet_weight": round(1.0 - best_weight, 4),
+        "perch_soundscape": perch_self.to_dict(),
+        "birdnet_soundscape": bn_self.to_dict(),
+        "best_ensemble_primary": best_primary,
+        "best_ensemble_macro_ap": best["macro_average_precision"],
+        "best_ensemble_macro_auc": best["competition_macro_auc"],
+        "best_ensemble_median_auc": best["median_per_class_auc"],
+        "all_results": results,
     }
     out = META_LOGS / "ensemble_config.json"
     out.write_text(json.dumps(ensemble_cfg, indent=2), encoding="utf-8")
     print(f"  Ensemble config saved → {out}")
     return ensemble_cfg
+
+
+def save_soundscape_leaderboard(
+    scores: dict[str, SoundscapeScore | None],
+    ensemble_cfg: dict,
+    config: dict,
+) -> None:
+    """Persist ranked soundscape metrics for all tracks (v2 primary metric)."""
+    META_LOGS.mkdir(parents=True, exist_ok=True)
+    metric = _meta_primary_metric(config)
+    rows = []
+    for track, sc in scores.items():
+        if sc is None:
+            continue
+        row = {"track": track, **sc.to_dict()}
+        rows.append(row)
+    if ensemble_cfg:
+        rows.append({
+            "track": "ensemble",
+            "primary_metric": ensemble_cfg.get("primary_metric", metric),
+            "primary_value": ensemble_cfg.get("best_ensemble_primary"),
+            "macro_average_precision": ensemble_cfg.get("best_ensemble_macro_ap"),
+            "competition_macro_auc": ensemble_cfg.get("best_ensemble_macro_auc"),
+            "perch_weight": ensemble_cfg.get("perch_weight"),
+            "birdnet_weight": ensemble_cfg.get("birdnet_weight"),
+        })
+    rows.sort(key=lambda r: float(r.get("primary_value") or -1.0), reverse=True)
+    payload = {
+        "primary_metric": metric,
+        "evaluation": "labeled_train_soundscapes",
+        "n_windows": scores.get("cnn") and scores["cnn"].n_windows,
+        "ranking": rows,
+    }
+    SOUNDSCAPE_LEADERBOARD.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    print(f"\n  Soundscape leaderboard ({metric}) → {SOUNDSCAPE_LEADERBOARD}")
+    for i, row in enumerate(rows, 1):
+        print(
+            f"    #{i} {row['track']:10s}  "
+            f"{format_soundscape_metrics_line(macro_ap=row.get('macro_average_precision'), macro_auc=row.get('competition_macro_auc'), median_auc=row.get('median_per_class_auc'), ranking_metric=metric)}"
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -452,20 +497,48 @@ def main():
 
     t0 = time.time()
 
-    run_phase0_eda(config)
-    cnn_auc     = run_phase1_cnn(config, cnn_iters)
-    birdnet_auc = run_phase1_birdnet(config, birdnet_iters)
-    perch_auc   = run_phase2_perch(config, perch_iters)
-    ensemble    = run_phase3_ensemble(config, ensemble_iters, perch_auc, birdnet_auc)
+    metric = _meta_primary_metric(config)
+    suite = _soundscape_suite(config)
+    print(f"\n  Meta-agent ranking metric: {metric} on labeled train_soundscapes")
+
+    if meta_cfg.get("run_eda", True):
+        run_phase0_eda(config)
+    else:
+        print("\n  [Phase 0] EDA skipped (meta_agent.run_eda=false)")
+
+    cnn_score = run_phase1_cnn(config, cnn_iters, suite)
+    birdnet_score = run_phase1_birdnet(config, birdnet_iters, suite)
+    perch_score = run_phase2_perch(config, perch_iters, suite)
+    ensemble = run_phase3_ensemble(
+        config, ensemble_iters, suite, perch_score, birdnet_score
+    )
+
+    save_soundscape_leaderboard(
+        {"cnn": cnn_score, "birdnet": birdnet_score, "perch": perch_score},
+        ensemble,
+        config,
+    )
+
+    def _line(sc: SoundscapeScore | None, name: str) -> None:
+        if sc is None:
+            print(f"  {name}:      (skipped)")
+            return
+        print(f"  {name}:      {format_soundscape_score(sc)}")
 
     print("\n" + "=" * 60)
     print("  META AGENT COMPLETE")
-    print(f"  CNN best AUC:      {cnn_auc:.5f}")
-    print(f"  BirdNET best AUC:  {birdnet_auc:.5f}")
-    print(f"  Perch best AUC:    {perch_auc:.5f}")
+    print(
+        f"  Model ranking uses macro_AP on labeled train_soundscapes; "
+        f"also reports macro_AUC and median_AUC (v2 benchmark)"
+    )
+    _line(cnn_score, "CNN")
+    _line(birdnet_score, "BirdNET")
+    _line(perch_score, "Perch")
     if ensemble:
-        print(f"  Ensemble best AUC: {ensemble['best_ensemble_auc']:.5f}"
-              f"  (perch={ensemble['perch_weight']:.1f} / birdnet={ensemble['birdnet_weight']:.1f})")
+        print(
+            f"  Ensemble: {format_soundscape_metrics_line(macro_ap=ensemble.get('best_ensemble_macro_ap'), macro_auc=ensemble.get('best_ensemble_macro_auc'), median_auc=ensemble.get('best_ensemble_median_auc'), ranking_metric=metric)}  "
+            f"(perch={ensemble['perch_weight']:.2f} / birdnet={ensemble['birdnet_weight']:.2f})"
+        )
     print(f"  Total time: {(time.time()-t0)/60:.1f} min")
     print("=" * 60)
 
