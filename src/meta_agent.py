@@ -462,6 +462,7 @@ def main():
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
 
     meta_cfg        = config.get("meta_agent", {})
+    skip_cnn        = bool(meta_cfg.get("skip_cnn", False))
     cnn_iters       = int(meta_cfg.get("cnn_iterations",        5))
     birdnet_iters   = int(meta_cfg.get("birdnet_iterations",   10))
     perch_iters     = int(meta_cfg.get("perch_iterations",     10))
@@ -470,19 +471,26 @@ def main():
     t0 = time.time()
 
     run_phase0_eda(config)
-    cnn_auc     = run_phase1_cnn(config, cnn_iters)
+    if skip_cnn:
+        print("\n  [CNN] Skipped (skip_cnn=true in config)")
+        cnn_auc = 0.0
+    else:
+        cnn_auc = run_phase1_cnn(config, cnn_iters)
     birdnet_auc = run_phase1_birdnet(config, birdnet_iters)
     perch_auc   = run_phase2_perch(config, perch_iters)
     ensemble    = run_phase3_ensemble(config, ensemble_iters, perch_auc, birdnet_auc)
 
     # Pick overall winner and retrain only that model on full data
-    candidates  = [("cnn", cnn_auc), ("birdnet", birdnet_auc), ("perch", perch_auc)]
+    candidates  = [("birdnet", birdnet_auc), ("perch", perch_auc)]
+    if not skip_cnn:
+        candidates.append(("cnn", cnn_auc))
     winner, winner_auc = max(candidates, key=lambda x: x[1])
     run_winner_final_retrain(winner, winner_auc, config)
 
     print("\n" + "=" * 60)
     print("  META AGENT COMPLETE")
-    print(f"  CNN best AUC:      {cnn_auc:.5f}")
+    if not skip_cnn:
+        print(f"  CNN best AUC:      {cnn_auc:.5f}")
     print(f"  BirdNET best AUC:  {birdnet_auc:.5f}")
     print(f"  Perch best AUC:    {perch_auc:.5f}")
     print(f"  Overall winner:    {winner.upper()} (AUC={winner_auc:.5f})")

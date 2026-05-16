@@ -9,7 +9,7 @@
     "temperature": 0.2
   },
   "researcher": {
-    "model": "llama3.2:3b",
+    "model": "deepseek-r1:8b",
     "temperature": 0.6
   },
   "execution": {
@@ -82,10 +82,11 @@
     "generate_insights": false
   },
   "meta_agent": {
-    "cnn_iterations": 1,
-    "birdnet_iterations": 1,
-    "perch_iterations": 1,
-    "ensemble_iterations": 1
+    "skip_cnn": true,
+    "cnn_iterations": 5,
+    "birdnet_iterations": 5,
+    "perch_iterations": 10,
+    "ensemble_iterations": 3
   },
   "perch": {
     "onnx_dataset": "rishikeshjani/perch-onnx-for-birdclef-2026",
