@@ -47,14 +47,17 @@ submission/model.keras
 *.onnx
 *.pb
 
-# BirdNET / agent caches and notebook junk
+# BirdNET / agent caches and notebook junk (keep only *.ipynb if you choose to commit them)
 notebooks/birdnet_cache/
 notebooks/**/birdnet_cache/
 notebooks/**/birdnet_cache */
 notebooks/cache/submission_preds/
-notebooks/BirdNet/.jupyter_home_fake/
-notebooks/BirdNet/ensemble_upload/
-notebooks/BirdNet/submission_birdnet/
+notebooks/BirdNet/
+!notebooks/BirdNet/*.ipynb
+
+# Other local notebook experiments (uncomment !.../*.ipynb to track selectively)
+notebooks/Perch/
+notebooks/ProtoSSM/
 
 # Keep benchmark notebooks + small CSV summaries under notebooks/cache/
 # (ipynb and *.csv are not ignored)
