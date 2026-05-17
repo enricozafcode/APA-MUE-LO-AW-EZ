@@ -89,11 +89,12 @@
     "generate_insights": false
   },
   "meta_agent": {
-    "pipeline": "staged_1a",
+    "pipeline": "staged_full",
+    "skip_completed_stages": false,
     "primary_metric": "macro_average_precision",
     "run_eda": false,
     "aug_baselines": ["light", "medium", "high"],
-    "arch_search_iterations_per_aug": null,
+    "arch_search_iterations_per_aug": 10,
     "arch_search_cnn_max_samples": 2000,
     "arch_search_head_train_max_samples": 2000,
     "arch_search_embed_sample_frac": 0.5,
@@ -102,7 +103,41 @@
     "cnn_iterations": 0,
     "birdnet_iterations": 0,
     "perch_iterations": 30,
-    "ensemble_iterations": 0
+    "ensemble_iterations": 0,
+    "stage_1b": {
+      "enabled": true,
+      "top_k_models": 2,
+      "initial_iterations": 5,
+      "bonus_iterations_on_improve": 5,
+      "max_iterations_per_model": 25
+    },
+    "stage_1c": {
+      "enabled": true,
+      "mode": "llm",
+      "head_train_samples": 2000,
+      "embed_subset_only": true,
+      "force_rebuild_embed_cache": false,
+      "explore": {
+        "iterations": 10,
+        "temperature": 0.7,
+        "researcher_timeout_seconds": 300
+      },
+      "refine": {
+        "enabled": true,
+        "initial_iterations": 5,
+        "bonus_iterations_on_improve": 5,
+        "max_iterations": 15,
+        "temperature": 0.5,
+        "researcher_timeout_seconds": 300
+      }
+    },
+    "stage_1d": {
+      "enabled": true,
+      "embed_sample_frac": 1.0,
+      "rebuild_full_train_cache": true,
+      "copy_to_submission": true,
+      "final_timeout_seconds": 7200
+    }
   },
   "perch": {
     "onnx_dataset": "rishikeshjani/perch-onnx-for-birdclef-2026",

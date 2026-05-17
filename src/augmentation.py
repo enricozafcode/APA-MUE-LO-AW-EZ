@@ -117,6 +117,23 @@ def list_baseline_aug_names() -> list[str]:
     return list(BASELINE_AUG_NAMES)
 
 
+def _clone_audio_baseline(name: str, **overrides) -> dict[str, Any]:
+    """Copy a baseline embedding aug dict with top-level overrides."""
+    base = get_audio_embedding_aug(name)
+    out = json_deepcopy(base)
+    for k, v in overrides.items():
+        if k == "audio" and isinstance(v, dict):
+            out.setdefault("audio", {}).update(v)
+        else:
+            out[k] = v
+    return out
+
+
+def json_deepcopy(d: dict) -> dict:
+    import copy
+    return copy.deepcopy(d)
+
+
 def get_audio_embedding_aug(name: str) -> dict[str, Any]:
     """Full augmentation dict for embedding caches (BirdNET / Perch)."""
     key = str(name).strip().lower()
@@ -124,6 +141,148 @@ def get_audio_embedding_aug(name: str) -> dict[str, Any]:
         raise KeyError(f"Unknown audio baseline {name!r}; choose from {list(BASELINE_AUG_NAMES)}")
     preset = AUDIO_EMBEDDING_BASELINES[key]
     return {k: v for k, v in preset.items() if k != "name"}
+
+
+# Stage 1c: up to 10 named presets (3 baselines + variants). Caches must share row order
+# with the same embed_frac / stratified clip selection as stage 1a.
+AUG_SEARCH_PRESETS: dict[str, dict[str, Any]] = {
+    "light": get_audio_embedding_aug("light"),
+    "medium": get_audio_embedding_aug("medium"),
+    "high": get_audio_embedding_aug("high"),
+    "light_low_mix": _clone_audio_baseline("light", mix_prob=0.10, snr_min_db=10.0, snr_max_db=25.0),
+    "light_high_mix": _clone_audio_baseline("light", mix_prob=0.35, snr_min_db=5.0, snr_max_db=18.0),
+    "medium_low_mix": _clone_audio_baseline("medium", mix_prob=0.20),
+    "medium_high_mix": _clone_audio_baseline("medium", mix_prob=0.50, snr_max_db=12.0),
+    "high_low_mix": _clone_audio_baseline("high", mix_prob=0.35),
+    "high_high_mix": _clone_audio_baseline("high", mix_prob=0.65, snr_max_db=8.0),
+    "medium_no_snr": _clone_audio_baseline("medium", use_snr_mixing=False),
+}
+
+
+def list_aug_search_preset_names() -> list[str]:
+    return list(AUG_SEARCH_PRESETS.keys())
+
+
+def get_aug_search_preset(name: str) -> dict[str, Any]:
+    key = str(name).strip().lower()
+    if key in AUG_SEARCH_PRESETS:
+        return json_deepcopy(AUG_SEARCH_PRESETS[key])
+    if key in AUDIO_EMBEDDING_BASELINES:
+        return get_audio_embedding_aug(key)
+    raise KeyError(f"Unknown aug search preset {name!r}")
+
+
+_AUDIO_STRATEGIES = (
+    "time_stretch",
+    "pitch_shift",
+    "noise_injection",
+    "time_shift",
+    "gain_jitter",
+)
+
+_AUG_META_KEYS = frozenset(
+    {"preset_name", "strategy", "reasoning", "hypothesis", "name", "phase", "iteration"}
+)
+
+
+def describe_embedding_aug_compact(name: str) -> str:
+    """One-line summary of an embedding aug preset."""
+    try:
+        aug = get_audio_embedding_aug(name)
+    except KeyError:
+        return str(name)
+    snr = "SNR" if aug.get("use_snr_mixing") else "no-SNR"
+    active = [
+        s
+        for s in _AUDIO_STRATEGIES
+        if (aug.get("audio") or {}).get(s, {}).get("enabled")
+    ]
+    return (
+        f"{name}[{snr} p={aug.get('mix_prob')}] "
+        f"audio=[{','.join(active) or 'none'}]"
+    )
+
+
+def _clamp_prob(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(max(0.0, min(1.0, float(v))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_audio_strategy(cfg: dict | None, name: str) -> dict[str, Any]:
+    c = dict(cfg or {})
+    out: dict[str, Any] = {"enabled": bool(c.get("enabled", False))}
+    out["probability"] = _clamp_prob(c.get("probability", 0.5), 0.5)
+    if name == "time_stretch":
+        out["rate_min"] = float(c.get("rate_min", 0.9))
+        out["rate_max"] = float(c.get("rate_max", 1.1))
+        if out["rate_min"] > out["rate_max"]:
+            out["rate_min"], out["rate_max"] = out["rate_max"], out["rate_min"]
+    elif name == "pitch_shift":
+        out["steps_min"] = int(c.get("steps_min", -2))
+        out["steps_max"] = int(c.get("steps_max", 2))
+        if out["steps_min"] > out["steps_max"]:
+            out["steps_min"], out["steps_max"] = out["steps_max"], out["steps_min"]
+    elif name == "noise_injection":
+        out["noise_level"] = float(max(0.0, min(0.05, float(c.get("noise_level", 0.005)))))
+    elif name == "time_shift":
+        out["shift_max_fraction"] = float(max(0.05, min(0.75, float(c.get("shift_max_fraction", 0.4)))))
+    elif name == "gain_jitter":
+        out["min_db"] = float(c.get("min_db", -6.0))
+        out["max_db"] = float(c.get("max_db", 6.0))
+        if out["min_db"] > out["max_db"]:
+            out["min_db"], out["max_db"] = out["max_db"], out["min_db"]
+    return out
+
+
+def validate_embedding_aug(spec: dict) -> tuple[dict[str, Any], dict[str, Any]]:
+    """
+    Normalize LLM / JSON aug spec → (embedding_aug_dict, metadata).
+    Raises ValueError on invalid structure.
+    """
+    if not isinstance(spec, dict):
+        raise ValueError("Aug spec must be a JSON object")
+
+    meta = {
+        k: spec[k]
+        for k in _AUG_META_KEYS
+        if k in spec
+    }
+    if not meta.get("preset_name"):
+        meta["preset_name"] = "llm_custom"
+
+    audio_in = spec.get("audio") if isinstance(spec.get("audio"), dict) else {}
+    audio_out = {
+        s: _normalize_audio_strategy(audio_in.get(s), s) for s in _AUDIO_STRATEGIES
+    }
+
+    use_snr = bool(spec.get("use_snr_mixing", False))
+    mix_prob = _clamp_prob(spec.get("mix_prob", 0.0), 0.0)
+    snr_min = float(spec.get("snr_min_db", 0.0))
+    snr_max = float(spec.get("snr_max_db", 15.0))
+    if snr_min > snr_max:
+        snr_min, snr_max = snr_max, snr_min
+    snr_min = float(max(-10.0, min(40.0, snr_min)))
+    snr_max = float(max(-10.0, min(40.0, snr_max)))
+
+    aug_dict: dict[str, Any] = {
+        "use_snr_mixing": use_snr,
+        "mix_prob": mix_prob,
+        "snr_min_db": snr_min,
+        "snr_max_db": snr_max,
+        "audio": audio_out,
+    }
+    meta.setdefault("strategy", str(spec.get("strategy", "explore")))
+    meta.setdefault("reasoning", str(spec.get("reasoning", "")))
+    meta.setdefault("hypothesis", str(spec.get("hypothesis", "")))
+    return aug_dict, meta
+
+
+def spec_to_embedding_aug(spec: dict) -> dict[str, Any]:
+    """Extract cache-build augmentation dict from a logged experiment spec."""
+    aug, _ = validate_embedding_aug(spec)
+    return aug
 
 
 def get_cnn_spectrogram_aug(name: str) -> dict[str, float | int]:

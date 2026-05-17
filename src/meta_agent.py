@@ -10,7 +10,11 @@ Staged pipeline (``meta_agent.pipeline``: ``staged_1a``) — architecture search
   For each track (CNN, BirdNET, Perch) and each aug baseline (light / medium / high):
     run the track agent with locked augmentation → pick track winner by soundscape AP.
 
-Later stages (1b aug sweep, 1c full train, pseudo-label, …) are added incrementally.
+Stage 1b (optional): refine top-K perch models from 1a with adaptive iteration budget.
+Stage 1c: LLM aug explore (wide search) + optional refine on winner; fixed 2000 head-train indices.
+Stage 1d: full-data final retrain (best aug + best head) → ``logs/meta_agent/perch/final/``.
+Use ``pipeline: staged_1c_only`` to run only 1c+1d after 1a/1b are done.
+Set ``stage_1c.mode`` to ``llm`` | ``presets`` | ``both``; tune ``explore`` / ``refine`` blocks in config.
 
 Run:
     python src/meta_agent.py --config configs/agent_config.json
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -31,8 +36,10 @@ import pandas as pd
 
 from augmentation import (
     describe_baseline,
+    get_aug_search_preset,
     get_audio_embedding_aug,
     get_cnn_baseline_aug,
+    list_aug_search_preset_names,
     list_baseline_aug_names,
 )
 from soundscape_evaluator import (
@@ -62,6 +69,12 @@ BIRDNET_VAL_CACHE = CACHE_DIR / "val_emb1024.npz"
 META_VAL_CACHE    = META_LOGS / "common_val.npz"
 SOUNDSCAPE_LEADERBOARD = META_LOGS / "soundscape_leaderboard.json"
 ARCH_SEARCH_1A_RESULTS = META_LOGS / "arch_search_1a_results.json"
+ARCH_SEARCH_1B_RESULTS = META_LOGS / "arch_search_1b_results.json"
+ARCH_SEARCH_1C_RESULTS = META_LOGS / "arch_search_1c_results.json"
+HEAD_TRAIN_INDICES = META_LOGS / "perch" / "head_train_indices_2000.npy"
+HEAD_TRAIN_CLIPS = META_LOGS / "perch" / "head_train_clips_2000.jsonl"
+PERCH_SHARED_VAL_CACHE = META_LOGS / "perch_cache" / "val_emb.npz"
+PERCH_FINAL_DIR = META_LOGS / "perch" / "final"
 
 SR           = 32_000
 CLIP_SEC     = 5.0
@@ -103,6 +116,18 @@ def _baseline_names(config: dict) -> list[str]:
     if names:
         return [str(n).lower() for n in names]
     return list_baseline_aug_names()
+
+
+def _stage_1b_cfg(config: dict) -> dict:
+    return dict(_meta_cfg(config).get("stage_1b") or {})
+
+
+def _stage_1c_cfg(config: dict) -> dict:
+    return dict(_meta_cfg(config).get("stage_1c") or {})
+
+
+def _stage_1d_cfg(config: dict) -> dict:
+    return dict(_meta_cfg(config).get("stage_1d") or {})
 
 
 def _arch_iters_per_baseline(config: dict, track_iters: int) -> int:
@@ -665,11 +690,1366 @@ def _pick_track_winner(runs: list[dict], metric: str) -> dict | None:
     return max(scored, key=lambda r: float(r["score"]["primary_value"]))
 
 
+def _ranking_value_from_run(entry: dict, metric: str) -> float:
+    if metric == "macro_roc_auc":
+        v = entry.get("macro_roc_auc")
+    else:
+        v = entry.get("macro_average_precision")
+        if v is None:
+            v = (entry.get("metrics") or {}).get("macro_average_precision")
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return -1.0
+
+
+def _load_perch_baseline_champion(aug_baseline: str, mem_dir: Path, metric: str) -> dict | None:
+    """Best successful run from a stage-1a perch memory dir."""
+    jsonl = mem_dir / "experiment_memory.jsonl"
+    best_entry: dict | None = None
+    best_val = -1.0
+    best_typed_entry: dict | None = None
+    best_typed_val = -1.0
+    if jsonl.exists():
+        with jsonl.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not entry.get("success"):
+                    continue
+                val = _ranking_value_from_run(entry, metric)
+                spec = entry.get("spec") or {}
+                if spec.get("arch_type"):
+                    if val > best_typed_val:
+                        best_typed_val = val
+                        best_typed_entry = entry
+                if val > best_val:
+                    best_val = val
+                    best_entry = entry
+    # Prefer best run that has arch_type (required for stage-1b refine locking).
+    if best_typed_entry is not None:
+        best_entry = best_typed_entry
+        best_val = best_typed_val
+    elif best_entry is not None:
+        spec0 = best_entry.get("spec") or {}
+        if not spec0.get("arch_type"):
+            best_entry = None
+            best_val = -1.0
+
+    info_path = mem_dir / "best_model_info.json"
+    if info_path.exists():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            spec_info = info.get("spec") or {}
+            if spec_info.get("arch_type"):
+                val = float(info.get("ranking_value", info.get("macro_average_precision", -1)))
+                if val > best_val:
+                    best_val = val
+                    best_entry = {
+                        "success": True,
+                        "spec": spec_info,
+                        "macro_average_precision": info.get("macro_average_precision"),
+                        "macro_roc_auc": info.get("macro_roc_auc"),
+                        "metrics": info,
+                    }
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    if best_entry is None:
+        return None
+
+    spec = dict(best_entry.get("spec") or {})
+    if not spec.get("arch_type"):
+        digest_path = mem_dir / "memory_digest.json"
+        if digest_path.exists():
+            try:
+                digest = json.loads(digest_path.read_text(encoding="utf-8"))
+                snap = digest.get("best_snapshot") or {}
+                if snap.get("arch_type"):
+                    spec["arch_type"] = snap["arch_type"]
+                    spec.update(snap.get("spec_compact") or {})
+            except (json.JSONDecodeError, OSError):
+                pass
+    spec.setdefault("arch_type", "residual_mlp")
+
+    cache_dir = META_LOGS / "perch_cache" / aug_baseline
+    return {
+        "aug_baseline": aug_baseline,
+        "memory_dir": str(mem_dir),
+        "cache_dir": str(cache_dir),
+        "arch_type": spec.get("arch_type"),
+        "spec": spec,
+        "ranking_metric": metric,
+        "ranking_value": best_val,
+        "macro_average_precision": best_entry.get("macro_average_precision"),
+        "macro_roc_auc": best_entry.get("macro_roc_auc"),
+        "median_per_class_auc": best_entry.get("median_per_class_auc"),
+    }
+
+
+def collect_perch_1a_top_candidates(config: dict, top_k: int = 2) -> list[dict]:
+    """
+    Pick top-K perch models from stage-1a (one champion per aug baseline, then global top-K).
+    """
+    metric = _meta_primary_metric(config)
+    baselines = _baseline_names(config)
+
+    if ARCH_SEARCH_1A_RESULTS.exists():
+        try:
+            summary = json.loads(ARCH_SEARCH_1A_RESULTS.read_text(encoding="utf-8"))
+            perch_runs = (summary.get("tracks") or {}).get("perch", {}).get("runs") or []
+            if perch_runs:
+                baselines = [r["aug_baseline"] for r in perch_runs if r.get("aug_baseline")]
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    candidates: list[dict] = []
+    for baseline in baselines:
+        mem_dir = META_LOGS / "perch" / baseline
+        champ = _load_perch_baseline_champion(baseline, mem_dir, metric)
+        if champ:
+            candidates.append(champ)
+
+    candidates.sort(key=lambda c: float(c["ranking_value"]), reverse=True)
+
+    # Prefer distinct (aug_baseline, arch_type); then fill to top_k
+    picked: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for c in candidates:
+        key = (c["aug_baseline"], str(c.get("arch_type", "?")))
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append(c)
+        if len(picked) >= top_k:
+            break
+
+    if len(picked) < top_k:
+        for c in candidates:
+            if c in picked:
+                continue
+            picked.append(c)
+            if len(picked) >= top_k:
+                break
+
+    return picked[:top_k]
+
+
+def _enrich_perch_winner_metrics(
+    winner: dict,
+    metric: str,
+    suite: SoundscapeEvalSuite | None = None,
+) -> dict:
+    """Fill macro AP / AUC / median on winner dict from disk or one soundscape eval."""
+    mem_dir = Path(winner["memory_dir"])
+    ap = winner.get("macro_average_precision")
+    auc = winner.get("macro_roc_auc")
+    med = winner.get("median_per_class_auc")
+
+    info_path = mem_dir / "best_model_info.json"
+    if info_path.exists() and (ap is None or auc is None):
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            ap = ap if ap is not None else info.get("macro_average_precision")
+            auc = auc if auc is not None else info.get("macro_roc_auc")
+            med = med if med is not None else info.get("median_per_class_auc")
+            if winner.get("ranking_value") is None and info.get("ranking_value") is not None:
+                winner["ranking_value"] = float(info["ranking_value"])
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass
+
+    score = winner.get("score") or {}
+    if ap is None and score.get("macro_average_precision") is not None:
+        ap = score["macro_average_precision"]
+    if auc is None and score.get("macro_roc_auc") is not None:
+        auc = score["macro_roc_auc"]
+    if med is None and score.get("median_per_class_auc") is not None:
+        med = score["median_per_class_auc"]
+
+    if suite is not None and _perch_memory_has_head(mem_dir) and ap is None:
+        try:
+            sc = suite.score_perch(mem_dir)
+            if sc is not None:
+                ap = sc.macro_average_precision
+                auc = sc.competition_macro_auc
+                med = sc.median_per_class_auc
+                winner["score"] = sc.to_dict()
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            print(f"  [1c] Soundscape re-score skipped: {exc}")
+
+    if ap is not None:
+        winner["macro_average_precision"] = float(ap)
+    if auc is not None:
+        winner["macro_roc_auc"] = float(auc)
+    if med is not None:
+        winner["median_per_class_auc"] = float(med)
+    if winner.get("ranking_value") is None and ap is not None:
+        winner["ranking_value"] = float(ap) if metric != "macro_roc_auc" else float(auc or ap)
+    winner.setdefault("ranking_metric", metric)
+    return winner
+
+
+def _print_stage_1c_locked_head(winner: dict, ranking_metric: str) -> None:
+    """Show soundscape scores for the head locked before aug search."""
+    mem_name = Path(winner.get("memory_dir", "?")).name
+    arch = winner.get("arch_type", "?")
+    aug = winner.get("aug_baseline", "?")
+    ap = winner.get("macro_average_precision")
+    auc = winner.get("macro_roc_auc")
+    med = winner.get("median_per_class_auc")
+    metrics_line = format_soundscape_metrics_line(
+        macro_ap=float(ap) if ap is not None else None,
+        macro_auc=float(auc) if auc is not None else None,
+        median_auc=float(med) if med is not None else None,
+        ranking_metric=ranking_metric,
+        mark_ranking=True,
+    )
+    print("\n  STAGE 1C — LOCKED HEAD (current best before augmentation search)")
+    print("  " + "─" * 72)
+    print(f"  Memory dir     : {mem_name}")
+    print(f"  arch_type      : {arch}")
+    print(f"  aug baseline   : {aug}")
+    print(f"  {metrics_line}")
+    rv = winner.get("ranking_value")
+    if rv is not None:
+        print(
+            f"  Seed {ranking_metric} for aug refine phase: {float(rv):.5f} "
+            f"(must beat this to earn bonus refine tries)"
+        )
+    print("  " + "─" * 72)
+    print("  Architecture is fixed in 1c — only augmentation configs change.\n")
+
+
+def _print_stage_1b_champions(candidates: list[dict], ranking_metric: str) -> None:
+    """Terminal summary of top-1a models selected for refine."""
+    print(f"\n  STAGE 1B — TOP {len(candidates)} CHAMPIONS FROM STAGE 1A (soundscape val)")
+    print("  " + "─" * 72)
+    for i, c in enumerate(candidates, 1):
+        arch = c.get("arch_type", "?")
+        aug = c.get("aug_baseline", "?")
+        ap = c.get("macro_average_precision")
+        auc = c.get("macro_roc_auc")
+        med = c.get("median_per_class_auc")
+        metrics_line = format_soundscape_metrics_line(
+            macro_ap=float(ap) if ap is not None else None,
+            macro_auc=float(auc) if auc is not None else None,
+            median_auc=float(med) if med is not None else None,
+            ranking_metric=ranking_metric,
+            mark_ranking=True,
+        )
+        print(f"  Winner #{i}: arch_type = {arch}")
+        print(f"            aug baseline = {aug}")
+        print(f"            {metrics_line}")
+        if i < len(candidates):
+            print("  " + "·" * 72)
+    print("  " + "─" * 72)
+    print(f"  Ranking metric for refine: {ranking_metric} (must beat seed macro_AP to earn bonus tries)\n")
+
+
+def _run_perch_refine_1b(config: dict, candidate: dict, rank: int, refine_cfg: dict) -> dict:
+    """Run one stage-1b refine campaign for a 1a champion."""
+    aug = candidate["aug_baseline"]
+    arch = str(candidate.get("arch_type", "residual_mlp"))
+    slug = f"rank{rank}_{aug}_{arch}".replace("/", "_")[:80]
+    mem_dir = META_LOGS / "perch" / "refine" / slug
+    code_dir = mem_dir / "codes"
+    cache_dir = Path(candidate["cache_dir"])
+
+    for d in (mem_dir, code_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    perch_base = dict(config.get("perch", {}))
+    head_train_cap = _meta_cfg(config).get("arch_search_head_train_max_samples")
+    if head_train_cap is None:
+        head_train_cap = perch_base.get("head_train_max_samples")
+
+    override = {
+        "meta_aug_preset": aug,
+        "augmentation": get_audio_embedding_aug(aug),
+        "perch_refine": {
+            "enabled": True,
+            "aug_baseline": aug,
+            "locked_arch_type": arch,
+            "seed_spec": candidate["spec"],
+            "seed_score": float(candidate["ranking_value"]),
+            "seed_macro_ap": candidate.get("macro_average_precision"),
+            "seed_macro_auc": candidate.get("macro_roc_auc"),
+            "seed_median_auc": candidate.get("median_per_class_auc"),
+            "parent_memory_dir": candidate["memory_dir"],
+            "initial_iterations": int(refine_cfg.get("initial_iterations", 5)),
+            "bonus_iterations_on_improve": int(refine_cfg.get("bonus_iterations_on_improve", 5)),
+            "max_iterations_per_model": int(refine_cfg.get("max_iterations_per_model", 25)),
+        },
+        "head_train_max_samples": head_train_cap,
+        "perch": {
+            **perch_base,
+            "logs_dir": str(mem_dir.parent),
+            "memory_dir": str(mem_dir),
+            "cache_dir": str(cache_dir),
+            "code_dir": str(code_dir),
+            "force_rebuild_cache": False,
+            "skip_final_retrain": True,
+        },
+    }
+
+    print(f"\n  [Perch refine 1b / rank {rank}] aug={aug} arch={arch}")
+    print(
+        f"  seed {candidate['ranking_metric']}={float(candidate['ranking_value']):.5f}  "
+        f"→ {mem_dir}"
+    )
+    rc = _run_subprocess("perch_agent.py", override, config)
+    return {
+        "rank": rank,
+        "aug_baseline": aug,
+        "arch_type": arch,
+        "seed_ranking_value": float(candidate["ranking_value"]),
+        "memory_dir": str(mem_dir),
+        "cache_dir": str(cache_dir),
+        "subprocess_rc": rc,
+    }
+
+
+def run_stage_1b_perch_refine(config: dict, suite: SoundscapeEvalSuite) -> dict:
+    """Refine top-K perch champions from stage 1a with adaptive iteration budgets."""
+    refine_cfg = _stage_1b_cfg(config)
+    if not refine_cfg.get("enabled", False):
+        print("\n  [Stage 1b] Skipped (stage_1b.enabled=false)")
+        return {}
+
+    if _skip_if_completed(config, ARCH_SEARCH_1B_RESULTS, "Stage 1b"):
+        try:
+            return json.loads(ARCH_SEARCH_1B_RESULTS.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    top_k = max(1, int(refine_cfg.get("top_k_models", 2)))
+    metric = _meta_primary_metric(config)
+
+    print("\n" + "=" * 60)
+    print(f"  STAGED PIPELINE — Step 1b: Refine top-{top_k} Perch models from 1a")
+    print(
+        f"  Budget per model: {refine_cfg.get('initial_iterations', 5)} initial, "
+        f"+{refine_cfg.get('bonus_iterations_on_improve', 5)} on improve, "
+        f"max {refine_cfg.get('max_iterations_per_model', 25)}"
+    )
+    print("=" * 60)
+
+    candidates = collect_perch_1a_top_candidates(config, top_k=top_k)
+    if not candidates:
+        print("  [Stage 1b] No 1a candidates found — run stage 1a first.")
+        return {"stage": "1b_perch_refine", "candidates": [], "refine_runs": []}
+
+    _print_stage_1b_champions(candidates, metric)
+
+    refine_runs = [
+        _run_perch_refine_1b(config, cand, rank=i, refine_cfg=refine_cfg)
+        for i, cand in enumerate(candidates, 1)
+    ]
+
+    scored: list[dict] = []
+    for run in refine_runs:
+        mem = Path(run["memory_dir"])
+        sc = suite.score_perch(mem)
+        _print_soundscape_score(f"Perch/refine/{run['arch_type']}", sc)
+        entry = {**run, "score": sc.to_dict() if sc else None}
+        if sc:
+            entry["refined_ranking_value"] = sc.primary_value
+        scored.append(entry)
+
+    winner = _pick_track_winner(scored, metric)
+    summary = {
+        "stage": "1b_perch_refine",
+        "primary_metric": metric,
+        "top_k_models": top_k,
+        "refine_config": {
+            "initial_iterations": refine_cfg.get("initial_iterations", 5),
+            "bonus_iterations_on_improve": refine_cfg.get("bonus_iterations_on_improve", 5),
+            "max_iterations_per_model": refine_cfg.get("max_iterations_per_model", 25),
+        },
+        "candidates_from_1a": candidates,
+        "refine_runs": scored,
+        "winner": winner,
+    }
+    ARCH_SEARCH_1B_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\n  Step 1b summary → {ARCH_SEARCH_1B_RESULTS}")
+    if winner:
+        print(
+            f"\n  ★ Perch refine winner: aug={winner.get('aug_baseline')} "
+            f"arch={winner.get('arch_type')}  "
+            f"{metric}={float((winner.get('score') or {}).get('primary_value', 0)):.5f}"
+        )
+    return summary
+
+
+def _perch_memory_has_head(mem_dir: Path) -> bool:
+    """True if a refine / memory dir has artifacts needed for stage 1c."""
+    if not (mem_dir / "best_head_code.py").exists():
+        return False
+    return (mem_dir / "best_head.keras").exists() or (
+        mem_dir / "best_head.weights.h5"
+    ).exists()
+
+
+def _ranking_from_refine_memory(mem_dir: Path, metric: str) -> float:
+    """Read ranking score from best_model_info or experiment_memory (no ONNX eval)."""
+    info_path = mem_dir / "best_model_info.json"
+    if info_path.exists():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            if metric == "macro_roc_auc":
+                v = info.get("macro_roc_auc")
+            else:
+                v = info.get("macro_average_precision") or info.get("ranking_value")
+            if v is not None:
+                return float(v)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    jsonl = mem_dir / "experiment_memory.jsonl"
+    if jsonl.exists():
+        best_val = -1.0
+        with jsonl.open(encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not entry.get("success"):
+                    continue
+                best_val = max(best_val, _ranking_value_from_run(entry, metric))
+        if best_val >= 0:
+            return best_val
+    return -1.0
+
+
+def _refine_dir_to_candidate(mem_dir: Path, metric: str) -> dict | None:
+    """Build a 1b-style winner dict from a refine memory directory."""
+    if not _perch_memory_has_head(mem_dir):
+        return None
+    parts = mem_dir.name.split("_", 2)
+    aug = parts[1] if len(parts) > 1 else "medium"
+    arch = parts[2] if len(parts) > 2 else "unknown"
+    val = _ranking_from_refine_memory(mem_dir, metric)
+    spec: dict = {}
+    info_path = mem_dir / "best_model_info.json"
+    if info_path.exists():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            spec = dict(info.get("spec") or {})
+        except (json.JSONDecodeError, OSError):
+            pass
+    spec.setdefault("arch_type", arch)
+    macro_ap: float | None = None
+    macro_auc: float | None = None
+    median_auc: float | None = None
+    if info_path.exists():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            macro_ap = info.get("macro_average_precision")
+            macro_auc = info.get("macro_roc_auc")
+            median_auc = info.get("median_per_class_auc")
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {
+        "memory_dir": str(mem_dir),
+        "cache_dir": str(META_LOGS / "perch_cache" / aug),
+        "aug_baseline": aug,
+        "arch_type": arch,
+        "spec": spec,
+        "ranking_metric": metric,
+        "ranking_value": val,
+        "macro_average_precision": macro_ap,
+        "macro_roc_auc": macro_auc,
+        "median_per_class_auc": median_auc,
+    }
+
+
+def _pick_perch_1b_winner(config: dict) -> dict | None:
+    """Best refined perch model from stage 1b (by soundscape ranking metric)."""
+    metric = _meta_primary_metric(config)
+
+    if ARCH_SEARCH_1B_RESULTS.exists():
+        try:
+            summary = json.loads(ARCH_SEARCH_1B_RESULTS.read_text(encoding="utf-8"))
+            winner = summary.get("winner")
+            if winner and winner.get("memory_dir"):
+                mem = Path(winner["memory_dir"])
+                if _perch_memory_has_head(mem):
+                    return winner
+                print(
+                    f"  [1c] 1b results winner has no head ({mem.name}) — scanning refine dirs."
+                )
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    refine_root = META_LOGS / "perch" / "refine"
+    if not refine_root.exists():
+        return _pick_perch_1a_fallback_champion(config, metric)
+
+    best_run: dict | None = None
+    best_val = -1.0
+    for mem_dir in sorted(refine_root.iterdir()):
+        if not mem_dir.is_dir():
+            continue
+        cand = _refine_dir_to_candidate(mem_dir, metric)
+        if cand is None:
+            if mem_dir.name.startswith("rank"):
+                print(f"  [1c] Skipping incomplete refine run (no head): {mem_dir.name}")
+            continue
+        val = float(cand.get("ranking_value", -1.0))
+        if val > best_val:
+            best_val = val
+            best_run = cand
+
+    if best_run is not None:
+        return best_run
+    return _pick_perch_1a_fallback_champion(config, metric)
+
+
+def _pick_perch_1a_fallback_champion(config: dict, metric: str) -> dict | None:
+    """If 1b never produced a head, use best stage-1a perch baseline champion."""
+    for baseline in _baseline_names(config):
+        mem_dir = META_LOGS / "perch" / baseline
+        champ = _load_perch_baseline_champion(baseline, mem_dir, metric)
+        if champ and _perch_memory_has_head(mem_dir):
+            champ["memory_dir"] = str(mem_dir)
+            print(f"  [1c] Using stage-1a champion (no 1b head): {baseline} / {champ.get('arch_type')}")
+            return champ
+    return None
+
+
+def _copy_perch_mapping_artifacts(src_mem: Path, dst_mem: Path) -> None:
+    """Copy species / mapping files needed for soundscape scoring."""
+    dst_mem.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "bc_indices.npy",
+        "proxy_map.json",
+        "species_cols.json",
+        "mapping_meta.json",
+    ):
+        src = src_mem / name
+        if src.exists():
+            shutil.copy2(src, dst_mem / name)
+
+
+def _ensure_head_train_clips(
+    config: dict,
+    source_train_cache: Path,
+    indices_path: Path,
+    species_to_idx: dict,
+) -> Path:
+    """Clip list (label + filename) for the fixed head-train subset — fast 1c re-embed."""
+    if HEAD_TRAIN_CLIPS.exists():
+        n = sum(1 for _ in HEAD_TRAIN_CLIPS.open(encoding="utf-8") if _.strip())
+        print(f"  [1c] Reusing head-train clip list ({n} clips) → {HEAD_TRAIN_CLIPS}")
+        return HEAD_TRAIN_CLIPS
+
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    from data_io import load_core_tables, resolve_birdclef_paths
+    from perch_agent import save_head_train_clip_subset
+
+    paths = resolve_birdclef_paths()
+    tables = load_core_tables(paths)
+    return save_head_train_clip_subset(
+        source_train_cache,
+        indices_path,
+        HEAD_TRAIN_CLIPS,
+        tables["train"],
+        species_to_idx,
+        paths.train_audio_dir,
+    )
+
+
+def _ensure_head_train_indices(
+    config: dict,
+    source_train_cache: Path,
+    *,
+    cap: int | None = None,
+    seed: int = 42,
+) -> Path:
+    """Compute once and reuse the same 2000 head-train row indices across aug search."""
+    if HEAD_TRAIN_INDICES.exists():
+        idx = np.load(HEAD_TRAIN_INDICES)
+        print(f"  [1c] Reusing head-train indices ({len(idx)} rows) → {HEAD_TRAIN_INDICES}")
+        return HEAD_TRAIN_INDICES
+
+    if cap is None:
+        cap = _meta_cfg(config).get("arch_search_head_train_max_samples")
+        if cap is None:
+            cap = config.get("perch", {}).get("head_train_max_samples", 2000)
+    cap = int(cap)
+
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    from perch_agent import compute_and_save_head_train_indices
+
+    if not source_train_cache.exists():
+        raise FileNotFoundError(
+            f"Cannot build head-train indices — cache missing: {source_train_cache}"
+        )
+    return compute_and_save_head_train_indices(
+        source_train_cache, HEAD_TRAIN_INDICES, cap, random_state=seed
+    )
+
+
+def _perch_aug_search_cache_dir(preset: str, baselines: list[str]) -> Path:
+    """Reuse stage-1a caches for light/medium/high; custom presets get aug_search/."""
+    key = preset.strip().lower()
+    if key in baselines:
+        return META_LOGS / "perch_cache" / key
+    return META_LOGS / "perch_cache" / "aug_search" / key
+
+
+def _ensure_shared_1c_val_cache(config: dict) -> Path:
+    """Build the shared soundscape val embedding cache once for all of stage 1c."""
+    if PERCH_SHARED_VAL_CACHE.exists():
+        import numpy as np
+
+        d = np.load(str(PERCH_SHARED_VAL_CACHE))
+        print(
+            f"  [1c] Shared val cache ready: {PERCH_SHARED_VAL_CACHE.name} "
+            f"(X={d['X'].shape})"
+        )
+        return PERCH_SHARED_VAL_CACHE
+
+    print("\n  [1c] Building shared soundscape val cache (once for all aug trials)…")
+    mem_dir = META_LOGS / "perch" / "aug_search" / "_val_build"
+    code_dir = mem_dir / "codes"
+    perch_base = dict(config.get("perch", {}))
+    override = {
+        "perch_build_val_only": True,
+        "perch": {
+            **perch_base,
+            "logs_dir": str(META_LOGS / "perch"),
+            "memory_dir": str(mem_dir),
+            "cache_dir": str(META_LOGS / "perch_cache" / "aug_search"),
+            "code_dir": str(code_dir),
+            "val_cache_path": str(PERCH_SHARED_VAL_CACHE),
+            "skip_final_retrain": True,
+        },
+    }
+    _run_subprocess("perch_agent.py", override, config)
+    return PERCH_SHARED_VAL_CACHE
+
+
+def _run_perch_1c_trial(
+    config: dict,
+    *,
+    preset: str,
+    head_code_path: Path,
+    train_cache: Path,
+    val_cache: Path,
+    indices_path: Path | None,
+    mapping_src: Path,
+    spec: dict,
+    aug_dict: dict,
+    force_rebuild_train: bool,
+    clip_subset_path: Path | None,
+) -> dict:
+    """
+    Single perch subprocess: embed train clips (if needed) + train head + eval on cached val.
+    One ONNX load per iteration (not three).
+    """
+    mem_dir = META_LOGS / "perch" / "aug_search" / preset
+    code_dir = mem_dir / "codes"
+    cache_dir = train_cache.parent
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    _copy_perch_mapping_artifacts(mapping_src, mem_dir)
+
+    perch_base = dict(config.get("perch", {}))
+    fixed_train: dict = {
+        "enabled": True,
+        "label": f"aug_{preset}",
+        "head_code_path": str(head_code_path),
+        "aug_preset": preset,
+        "spec": spec,
+    }
+    if indices_path is not None:
+        fixed_train["head_train_indices_path"] = str(indices_path)
+
+    override: dict = {
+        "meta_aug_preset": preset,
+        "augmentation": aug_dict,
+        "perch_fixed_train": fixed_train,
+        "perch": {
+            **perch_base,
+            "logs_dir": str(META_LOGS / "perch"),
+            "memory_dir": str(mem_dir),
+            "cache_dir": str(cache_dir),
+            "code_dir": str(code_dir),
+            "val_cache_path": str(val_cache),
+            "force_rebuild_cache": force_rebuild_train,
+            "skip_final_retrain": True,
+        },
+    }
+    if clip_subset_path is not None:
+        override["perch_embed_clip_subset"] = str(clip_subset_path)
+
+    print(
+        f"\n  [1c trial] One pass: embed (if needed) + head train + cached-val metrics "
+        f"→ {preset}"
+    )
+    rc = _run_subprocess("perch_agent.py", override, config)
+    return {
+        "aug_preset": preset,
+        "memory_dir": str(mem_dir),
+        "train_cache": str(train_cache),
+        "subprocess_rc": rc,
+    }
+
+
+def _run_stage_1c_preset_grid(
+    config: dict,
+    suite: SoundscapeEvalSuite,
+    *,
+    winner: dict,
+    winner_mem: Path,
+    head_code_path: Path,
+    indices_path: Path | None,
+    head_spec: dict,
+    baselines: list[str],
+    embed_frac: float,
+    embed_max: int | None,
+    presets: list[str],
+    clip_subset_path: Path | None = None,
+) -> list[dict]:
+    """Fixed preset grid (legacy 1c mode)."""
+    val_cache = PERCH_SHARED_VAL_CACHE
+    runs: list[dict] = []
+    for preset in presets:
+        cache_dir = _perch_aug_search_cache_dir(preset, baselines)
+        train_cache = cache_dir / f"train_emb_{preset}.npz"
+        try:
+            aug_dict = get_aug_search_preset(preset)
+        except KeyError:
+            aug_dict = get_audio_embedding_aug(preset)
+        run = _run_perch_1c_trial(
+            config,
+            preset=preset,
+            head_code_path=head_code_path,
+            train_cache=train_cache,
+            val_cache=val_cache,
+            indices_path=indices_path if clip_subset_path is None else None,
+            mapping_src=winner_mem,
+            spec=head_spec,
+            aug_dict=aug_dict,
+            force_rebuild_train=not train_cache.exists(),
+            clip_subset_path=clip_subset_path,
+        )
+        if not train_cache.exists():
+            print(f"  [1c] Skip {preset} — train cache not built.")
+            continue
+        sc = suite.score_perch_mem_dir(Path(run["memory_dir"]))
+        if sc is None:
+            sc = suite.score_perch(Path(run["memory_dir"]))
+        _print_soundscape_score(f"Perch/aug/{preset}", sc)
+        run["score"] = sc.to_dict() if sc else None
+        runs.append(run)
+    return runs
+
+
+def _run_one_llm_aug_trial(
+    config: dict,
+    suite: SoundscapeEvalSuite,
+    *,
+    iteration: int,
+    phase: str,
+    researcher,
+    memory,
+    winner_mem: Path,
+    head_code_path: Path,
+    indices_path: Path | None,
+    head_spec: dict,
+    baselines: list[str],
+    embed_frac: float,
+    embed_max: int | None,
+    metric: str,
+    clip_subset_path: Path | None = None,
+) -> dict | None:
+    """One LLM aug proposal → cache build → fixed head train → soundscape score."""
+    from aug_researcher import aug_dict_from_logged_spec, slug_from_spec
+    from augmentation import validate_embedding_aug
+
+    spec = researcher.next_experiment()
+    spec["phase"] = phase
+    spec["iteration"] = iteration
+    try:
+        aug_dict, _meta = validate_embedding_aug(spec)
+        spec = {**_meta, **aug_dict}
+    except ValueError as exc:
+        print(f"  [1c LLM] Invalid aug spec: {exc}")
+        memory.log(spec=spec, metrics={"status": "failed", "error": str(exc)}, code="")
+        return None
+
+    preset = slug_from_spec(spec, iteration, phase)
+    val_cache = PERCH_SHARED_VAL_CACHE
+    cache_dir = _perch_aug_search_cache_dir(preset, baselines)
+    train_cache = cache_dir / f"train_emb_{preset}.npz"
+    force_train = bool(_stage_1c_cfg(config).get("force_rebuild_embed_cache", False))
+
+    print(f"\n  [1c LLM / {phase}] iter {iteration} → preset '{preset}'")
+
+    aug_cfg_path = cache_dir / f"{preset}_aug_config.json"
+    aug_cfg_path.write_text(json.dumps(aug_dict_from_logged_spec(spec), indent=2), encoding="utf-8")
+
+    run = _run_perch_1c_trial(
+        config,
+        preset=preset,
+        head_code_path=head_code_path,
+        train_cache=train_cache,
+        val_cache=val_cache,
+        indices_path=indices_path if clip_subset_path is None else None,
+        mapping_src=winner_mem,
+        spec={**head_spec, "aug_preset": preset, "aug_phase": phase},
+        aug_dict=aug_dict_from_logged_spec(spec),
+        force_rebuild_train=force_train or not train_cache.exists(),
+        clip_subset_path=clip_subset_path,
+    )
+    if not train_cache.exists():
+        print(f"  [1c LLM] Train cache missing after trial: {train_cache}")
+        memory.log(spec=spec, metrics={"status": "failed", "error": "cache_build"}, code="")
+        return None
+
+    mem_dir = Path(run["memory_dir"])
+    metrics = None
+    info_path = mem_dir / "best_model_info.json"
+    if info_path.exists():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            metrics = {
+                "status": "success",
+                "macro_average_precision": info.get("macro_average_precision"),
+                "macro_roc_auc": info.get("macro_roc_auc"),
+                "median_per_class_auc": info.get("median_per_class_auc"),
+            }
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    sc = suite.score_perch_mem_dir(mem_dir)
+    if sc is None:
+        print("  [1c] No cached val preds — falling back to full soundscape ONNX eval")
+        sc = suite.score_perch(mem_dir)
+    _print_soundscape_score(f"Perch/aug/{preset}", sc)
+    run["score"] = sc.to_dict() if sc else None
+    run["aug_spec"] = spec
+    run["aug_config_path"] = str(aug_cfg_path)
+
+    memory.log(spec=spec, metrics=metrics, code=json.dumps(aug_dict_from_logged_spec(spec)))
+
+    if sc:
+        run["ranking_value"] = float(sc.primary_value)
+    return run
+
+
+def _run_stage_1c_llm_explore(
+    config: dict,
+    suite: SoundscapeEvalSuite,
+    explore_cfg: dict,
+    **common,
+) -> tuple[list[dict], dict | None]:
+    """Wide LLM exploration of augmentation configs."""
+    from aug_researcher import AugResearcher
+    from llm_client import LLMClient
+    from memory import ExperimentMemory
+
+    n_iters = int(explore_cfg.get("iterations", 10))
+    mem_dir = META_LOGS / "perch" / "aug_search" / "memory_explore"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+
+    researcher_cfg = config.get("researcher", {})
+    llm_cfg = config.get("llm_researcher", {}) or {}
+    provider = llm_cfg.get("provider") or config.get("llm", {}).get("provider", "ollama")
+    model = researcher_cfg.get("model") or llm_cfg.get("model", "deepseek-r1:8b")
+    temp = float(
+        explore_cfg.get("temperature", researcher_cfg.get("temperature", 0.7))
+    )
+
+    llm_timeout = float(explore_cfg.get("researcher_timeout_seconds", 300))
+    llm = LLMClient(provider=provider, model=model, timeout_seconds=llm_timeout)
+    memory = ExperimentMemory(mem_dir, ranking_metric=common["metric"])
+    researcher = AugResearcher(llm, memory, temperature=temp, refine_mode=False)
+    print(f"  [1c explore] Researcher LLM timeout: {llm_timeout:.0f}s")
+
+    print("\n" + "─" * 60)
+    print(f"  STAGE 1c — EXPLORE: {n_iters} LLM augmentation experiments (wide search)")
+    print("─" * 60)
+
+    runs: list[dict] = []
+    for it in range(1, n_iters + 1):
+        run = _run_one_llm_aug_trial(
+            config,
+            suite,
+            iteration=it,
+            phase="explore",
+            researcher=researcher,
+            memory=memory,
+            **common,
+        )
+        if run:
+            runs.append(run)
+
+    winner = _pick_track_winner(runs, common["metric"])
+    return runs, winner
+
+
+def _run_stage_1c_llm_refine(
+    config: dict,
+    suite: SoundscapeEvalSuite,
+    refine_cfg: dict,
+    explore_winner: dict,
+    **common,
+) -> tuple[list[dict], dict | None]:
+    """Refine the explore-phase aug winner with adaptive iteration budget."""
+    from aug_researcher import AugResearcher, aug_dict_from_logged_spec
+    from llm_client import LLMClient
+    from memory import ExperimentMemory
+
+    seed_spec = explore_winner.get("aug_spec") or {}
+    seed_score = float(
+        (explore_winner.get("score") or {}).get("primary_value", -1.0)
+    )
+    seed_aug = aug_dict_from_logged_spec(seed_spec) if seed_spec else {}
+
+    mem_dir = META_LOGS / "perch" / "aug_search" / "memory_refine"
+    mem_dir.mkdir(parents=True, exist_ok=True)
+
+    researcher_cfg = config.get("researcher", {})
+    llm_cfg = config.get("llm_researcher", {}) or {}
+    provider = llm_cfg.get("provider") or config.get("llm", {}).get("provider", "ollama")
+    model = researcher_cfg.get("model") or llm_cfg.get("model", "deepseek-r1:8b")
+    temp = float(refine_cfg.get("temperature", researcher_cfg.get("temperature", 0.5)))
+
+    llm_timeout = float(refine_cfg.get("researcher_timeout_seconds", 300))
+    llm = LLMClient(provider=provider, model=model, timeout_seconds=llm_timeout)
+    memory = ExperimentMemory(mem_dir, ranking_metric=common["metric"])
+    researcher = AugResearcher(
+        llm,
+        memory,
+        temperature=temp,
+        refine_mode=True,
+        seed_aug=seed_aug,
+        seed_score=seed_score,
+    )
+    print(f"  [1c refine] Researcher LLM timeout: {llm_timeout:.0f}s")
+
+    initial = int(refine_cfg.get("initial_iterations", 5))
+    bonus = int(refine_cfg.get("bonus_iterations_on_improve", 5))
+    max_iters = int(refine_cfg.get("max_iterations", 15))
+
+    print("\n" + "─" * 60)
+    print(
+        f"  STAGE 1c — REFINE: seed {common['metric']}={seed_score:.5f} "
+        f"({explore_winner.get('aug_preset', '?')})"
+    )
+    print(
+        f"  Budget: {initial} initial + {bonus} on improve, max {max_iters}"
+    )
+    print("─" * 60)
+
+    runs: list[dict] = []
+    best_val = seed_score
+    it = 0
+    remaining = initial
+
+    while remaining > 0 and it < max_iters:
+        it += 1
+        remaining -= 1
+        run = _run_one_llm_aug_trial(
+            config,
+            suite,
+            iteration=it,
+            phase="refine",
+            researcher=researcher,
+            memory=memory,
+            **common,
+        )
+        if not run:
+            continue
+        runs.append(run)
+        val = run.get("ranking_value")
+        if val is not None and val > best_val:
+            print(
+                f"  [1c refine] Improved {common['metric']}: "
+                f"{best_val:.5f} → {val:.5f} (+{bonus} bonus tries)"
+            )
+            best_val = val
+            remaining += bonus
+
+    winner = _pick_track_winner(runs, common["metric"])
+    if winner is None:
+        winner = explore_winner
+    return runs, winner
+
+
+def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
+    """
+    Stage 1c: lock best 1b head; search augmentation (LLM explore + optional refine).
+    """
+    cfg = _stage_1c_cfg(config)
+    if not cfg.get("enabled", False):
+        print("\n  [Stage 1c] Skipped (stage_1c.enabled=false)")
+        return {}
+
+    if _skip_if_completed(config, ARCH_SEARCH_1C_RESULTS, "Stage 1c"):
+        try:
+            return json.loads(ARCH_SEARCH_1C_RESULTS.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    winner = _pick_perch_1b_winner(config)
+    if not winner:
+        print("\n  [Stage 1c] No 1b winner — run stage 1b first.")
+        return {"stage": "1c_aug_search", "runs": [], "winner": None}
+
+    winner_mem = Path(winner["memory_dir"])
+    head_code_path = winner_mem / "best_head_code.py"
+    if not head_code_path.exists():
+        print(f"\n  [Stage 1c] Missing {head_code_path} — cannot lock head.")
+        return {"stage": "1c_aug_search", "runs": [], "winner": None}
+
+    metric = _meta_primary_metric(config)
+    winner = _enrich_perch_winner_metrics(winner, metric, suite)
+    _print_stage_1c_locked_head(winner, metric)
+
+    baselines = _baseline_names(config)
+    embed_frac = float(_meta_cfg(config).get("arch_search_embed_sample_frac", 0.5))
+    embed_max = _meta_cfg(config).get("arch_search_embed_max_samples")
+    if embed_max is not None:
+        embed_max = int(embed_max)
+
+    aug_preset = winner.get("aug_baseline", "medium")
+    source_cache = Path(winner.get("cache_dir", META_LOGS / "perch_cache" / aug_preset))
+    source_train = source_cache / f"train_emb_{aug_preset}.npz"
+    if not source_train.exists():
+        source_train = source_cache / "train_emb.npz"
+
+    mode = str(cfg.get("mode", "llm")).lower()
+    explore_cfg = dict(cfg.get("explore") or {})
+    refine_cfg = dict(cfg.get("refine") or {})
+    explore_cfg.setdefault("iterations", cfg.get("iterations", 10))
+
+    _ensure_shared_1c_val_cache(config)
+
+    print("=" * 60)
+    print(f"  STAGED PIPELINE — Step 1c: Augmentation search (mode={mode})")
+    print("=" * 60)
+
+    indices_path = _ensure_head_train_indices(
+        config, source_train, cap=cfg.get("head_train_samples")
+    )
+
+    species_cols = json.loads((winner_mem / "species_cols.json").read_text(encoding="utf-8"))
+    species_to_idx = {s: i for i, s in enumerate(species_cols)}
+    clip_subset_path: Path | None = None
+    if cfg.get("embed_subset_only", True):
+        clip_subset_path = _ensure_head_train_clips(
+            config, source_train, indices_path, species_to_idx
+        )
+        print(
+            f"  [1c] Fast mode: each aug trial embeds {cfg.get('head_train_samples', 2000)} "
+            f"clips only (not the full {int(np.load(source_train)['X'].shape[0])} cache)"
+        )
+
+    head_spec: dict = {}
+    info_path = winner_mem / "best_model_info.json"
+    if info_path.exists():
+        try:
+            head_spec = json.loads(info_path.read_text(encoding="utf-8")).get("spec") or {}
+        except (json.JSONDecodeError, OSError):
+            pass
+    head_spec.setdefault("arch_type", winner.get("arch_type"))
+
+    common = {
+        "winner_mem": winner_mem,
+        "head_code_path": head_code_path,
+        "indices_path": indices_path,
+        "head_spec": head_spec,
+        "baselines": baselines,
+        "embed_frac": embed_frac,
+        "embed_max": embed_max,
+        "metric": metric,
+        "clip_subset_path": clip_subset_path,
+    }
+
+    explore_runs: list[dict] = []
+    refine_runs: list[dict] = []
+    preset_runs: list[dict] = []
+    explore_winner: dict | None = None
+    refine_winner: dict | None = None
+    final_winner: dict | None = None
+
+    if mode in ("llm", "both"):
+        explore_runs, explore_winner = _run_stage_1c_llm_explore(
+            config, suite, explore_cfg, **common
+        )
+        if explore_winner and refine_cfg.get("enabled", True):
+            refine_runs, refine_winner = _run_stage_1c_llm_refine(
+                config, suite, refine_cfg, explore_winner, **common
+            )
+        final_winner = refine_winner or explore_winner
+
+    if mode in ("presets", "both"):
+        n_iters = int(explore_cfg.get("iterations", cfg.get("iterations", 10)))
+        preset_names = cfg.get("aug_presets")
+        if preset_names:
+            presets = [str(p).lower() for p in preset_names][:n_iters]
+        else:
+            presets = list_aug_search_preset_names()[:n_iters]
+        preset_runs = _run_stage_1c_preset_grid(
+            config, suite, winner=winner, presets=presets, **common
+        )
+        preset_winner = _pick_track_winner(preset_runs, metric)
+        if final_winner is None or (
+            preset_winner
+            and float((preset_winner.get("score") or {}).get("primary_value", -1))
+            > float((final_winner.get("score") or {}).get("primary_value", -1))
+        ):
+            final_winner = preset_winner
+
+    best_aug_config: dict | None = None
+    if final_winner and final_winner.get("aug_spec"):
+        from aug_researcher import aug_dict_from_logged_spec
+
+        try:
+            best_aug_config = aug_dict_from_logged_spec(final_winner["aug_spec"])
+        except ValueError:
+            best_aug_config = None
+    if best_aug_config:
+        best_aug_path = META_LOGS / "perch" / "aug_search" / "best_aug_config.json"
+        best_aug_path.parent.mkdir(parents=True, exist_ok=True)
+        best_aug_path.write_text(json.dumps(best_aug_config, indent=2), encoding="utf-8")
+
+    summary = {
+        "stage": "1c_aug_search",
+        "mode": mode,
+        "primary_metric": metric,
+        "head_train_indices": str(indices_path),
+        "locked_head_code": str(head_code_path),
+        "refine_winner_1b": winner,
+        "explore_runs": explore_runs,
+        "explore_winner": explore_winner,
+        "refine_runs": refine_runs,
+        "refine_winner": refine_winner,
+        "preset_runs": preset_runs,
+        "winner": final_winner,
+        "best_aug_config": str(META_LOGS / "perch" / "aug_search" / "best_aug_config.json")
+        if best_aug_config
+        else None,
+    }
+    ARCH_SEARCH_1C_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\n  Step 1c summary → {ARCH_SEARCH_1C_RESULTS}")
+    if final_winner:
+        print(
+            f"\n  ★ Aug-search winner: {final_winner.get('aug_preset')}  "
+            f"{metric}={float((final_winner.get('score') or {}).get('primary_value', 0)):.5f}"
+        )
+    return summary
+
+
+def run_stage_1d_final_train(config: dict) -> dict:
+    """Stage 1d: full-data retrain with best 1b head + best 1c augmentation."""
+    cfg = _stage_1d_cfg(config)
+    if not cfg.get("enabled", False):
+        print("\n  [Stage 1d] Skipped (stage_1d.enabled=false)")
+        return {}
+
+    if not ARCH_SEARCH_1C_RESULTS.exists():
+        print("\n  [Stage 1d] No 1c results — run stage 1c first.")
+        return {}
+
+    try:
+        s1c = json.loads(ARCH_SEARCH_1C_RESULTS.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        print("\n  [Stage 1d] Could not read 1c results.")
+        return {}
+
+    aug_winner = s1c.get("winner")
+    refine_winner = s1c.get("refine_winner_1b") or _pick_perch_1b_winner(config)
+    if not aug_winner or not refine_winner:
+        print("\n  [Stage 1d] Missing 1b/1c winners.")
+        return {}
+
+    preset = aug_winner.get("aug_preset", "medium")
+    head_code_path = Path(s1c.get("locked_head_code", ""))
+    if not head_code_path.exists():
+        head_code_path = Path(refine_winner["memory_dir"]) / "best_head_code.py"
+    if not head_code_path.exists():
+        print(f"\n  [Stage 1d] Head code missing: {head_code_path}")
+        return {}
+
+    baselines = _baseline_names(config)
+    full_frac = float(cfg.get("embed_sample_frac", 1.0))
+    val_cache = PERCH_SHARED_VAL_CACHE if PERCH_SHARED_VAL_CACHE.exists() else (
+        META_LOGS / "perch_cache" / "val_emb.npz"
+    )
+
+    best_aug_path = META_LOGS / "perch" / "aug_search" / "best_aug_config.json"
+    aug_dict: dict | None = None
+    if best_aug_path.exists():
+        try:
+            aug_dict = json.loads(best_aug_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    if aug_dict is None:
+        try:
+            aug_dict = get_aug_search_preset(preset)
+        except KeyError:
+            aug_dict = get_audio_embedding_aug(
+                preset if preset in baselines else "medium"
+            )
+
+    final_cache_dir = META_LOGS / "perch_cache" / "final"
+    train_cache = final_cache_dir / f"train_emb_{preset}_full.npz"
+    if cfg.get("rebuild_full_train_cache", True) or not train_cache.exists():
+        print(
+            f"\n  [Stage 1d] Building FULL train embeddings "
+            f"(sample_frac={full_frac}, aug={preset}) — for Kaggle submission"
+        )
+        final_cache_dir.mkdir(parents=True, exist_ok=True)
+        mem_dir = META_LOGS / "perch" / "final" / "_cache_build"
+        code_dir = mem_dir / "codes"
+        perch_base = dict(config.get("perch", {}))
+        override = {
+            "meta_aug_preset": f"{preset}_full",
+            "augmentation": aug_dict,
+            "train_sample_frac": full_frac,
+            "perch_build_cache_only": True,
+            "perch": {
+                **perch_base,
+                "logs_dir": str(META_LOGS / "perch"),
+                "memory_dir": str(mem_dir),
+                "cache_dir": str(final_cache_dir),
+                "code_dir": str(code_dir),
+                "val_cache_path": str(val_cache),
+                "force_rebuild_cache": bool(cfg.get("rebuild_full_train_cache", True)),
+                "skip_final_retrain": True,
+            },
+        }
+        _run_subprocess("perch_agent.py", override, config)
+        built = final_cache_dir / f"train_emb_{preset}_full.npz"
+        if built.exists():
+            train_cache = built
+        elif not train_cache.exists():
+            cache_dir = _perch_aug_search_cache_dir(preset, baselines)
+            train_cache = cache_dir / f"train_emb_{preset}.npz"
+            print(
+                f"  [Stage 1d] Full cache build missing — falling back to search cache: "
+                f"{train_cache.name}"
+            )
+
+    if not train_cache.exists():
+        print(f"\n  [Stage 1d] Train cache missing: {train_cache}")
+        return {}
+
+    PERCH_FINAL_DIR.mkdir(parents=True, exist_ok=True)
+    code_dir = PERCH_FINAL_DIR / "codes"
+    code_dir.mkdir(parents=True, exist_ok=True)
+    _copy_perch_mapping_artifacts(Path(refine_winner["memory_dir"]), PERCH_FINAL_DIR)
+
+    head_code = head_code_path.read_text(encoding="utf-8")
+    print("\n" + "=" * 60)
+    print("  STAGED PIPELINE — Step 1d: Final full-data retrain")
+    print(f"  Head: {head_code_path.name}  |  Aug: {preset}")
+    print("=" * 60)
+
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    from code_executor import CodeExecutor
+    from perch_agent import _build_final_retrain_script
+
+    py_exe = config.get("execution", {}).get("python_executable", "python3")
+    timeout = config.get("execution", {}).get("timeout_seconds", 1800)
+    if cfg.get("final_timeout_seconds"):
+        timeout = int(cfg["final_timeout_seconds"])
+    executor = CodeExecutor(python_executable=py_exe, timeout_seconds=timeout)
+
+    script = _build_final_retrain_script(
+        head_code, PERCH_FINAL_DIR, train_cache, val_cache
+    )
+    script_path = code_dir / "final_retrain.py"
+    script_path.write_text(script, encoding="utf-8")
+    result = executor.run_file(script_path)
+
+    ok = result.success and "FINAL_RETRAIN_DONE" in (result.stdout or "")
+    if ok:
+        weights = PERCH_FINAL_DIR / "final_head.weights.h5"
+        keras_model = PERCH_FINAL_DIR / "final_head.keras"
+        print(f"  Final model → {weights}")
+        if cfg.get("copy_to_submission", True):
+            sub = PROJECT_ROOT / "submission"
+            sub.mkdir(parents=True, exist_ok=True)
+            if weights.exists():
+                shutil.copy2(weights, sub / "perch_final_head.weights.h5")
+            if keras_model.exists():
+                shutil.copy2(keras_model, sub / "perch_final_head.keras")
+            shutil.copy2(head_code_path, sub / "perch_best_head_code.py")
+            for name in (
+                "bc_indices.npy",
+                "proxy_map.json",
+                "species_cols.json",
+                "mapping_meta.json",
+            ):
+                src = PERCH_FINAL_DIR / name
+                if src.exists():
+                    shutil.copy2(src, sub / name)
+            if best_aug_path.exists():
+                shutil.copy2(best_aug_path, sub / "perch_best_aug_config.json")
+            readme = sub / "PERCH_KAGGLE_README.txt"
+            readme.write_text(
+                "Perch overnight pipeline outputs (BirdCLEF 2026)\n"
+                "============================================\n"
+                f"Head code:     perch_best_head_code.py  (build_head + get_training_config)\n"
+                f"Weights:       perch_final_head.weights.h5\n"
+                f"Mapping:       bc_indices.npy, proxy_map.json, species_cols.json\n"
+                f"Aug config:    perch_best_aug_config.json\n"
+                f"Full train NPZ: ../logs/meta_agent/perch_cache/final/train_emb_{preset}_full.npz\n"
+                f"Val NPZ:        ../logs/meta_agent/perch_cache/val_emb.npz\n"
+                f"Run kaggle_inference.ipynb or your notebook with these paths.\n",
+                encoding="utf-8",
+            )
+            print(f"  Kaggle-ready artifacts → {sub}")
+    else:
+        print(f"  [Stage 1d] Final retrain failed: {(result.stderr or '')[-500:]}")
+
+    summary = {
+        "stage": "1d_final_train",
+        "aug_preset": preset,
+        "train_cache": str(train_cache),
+        "output_dir": str(PERCH_FINAL_DIR),
+        "success": ok,
+    }
+    (META_LOGS / "arch_search_1d_results.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    return summary
+
+
+def _skip_if_completed(config: dict, results_path: Path, stage_label: str) -> bool:
+    if not _meta_cfg(config).get("skip_completed_stages", False):
+        return False
+    if results_path.exists():
+        print(f"\n  [{stage_label}] Skipped — results already at {results_path.name}")
+        return True
+    return False
+
+
 def run_stage_1a_arch_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
     """
     Step 1a: for each track, run architecture search on each aug baseline separately.
     Returns JSON-serialisable summary (also written to ARCH_SEARCH_1A_RESULTS).
     """
+    if _skip_if_completed(config, ARCH_SEARCH_1A_RESULTS, "Stage 1a"):
+        try:
+            return json.loads(ARCH_SEARCH_1A_RESULTS.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
     meta = _meta_cfg(config)
     baselines = _baseline_names(config)
     metric = _meta_primary_metric(config)
@@ -805,12 +2185,44 @@ def main():
     print(f"\n  Meta-agent pipeline: {pipeline}")
     print(f"  Ranking metric: {metric} on labeled train_soundscapes")
 
-    if pipeline == "staged_1a":
+    if pipeline == "staged_1c_only":
+        if meta_cfg.get("run_eda", False):
+            run_phase0_eda(config)
+        run_stage_1c_aug_search(config, suite)
+        if _stage_1d_cfg(config).get("enabled", False):
+            run_stage_1d_final_train(config)
+        print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
+        print("=" * 60)
+        return
+
+    staged_pipelines = (
+        "staged_1a",
+        "staged_1a_1b",
+        "staged_1a_1b_1c",
+        "staged_full",
+    )
+    if pipeline in staged_pipelines:
         if meta_cfg.get("run_eda", False):
             run_phase0_eda(config)
         run_stage_1a_arch_search(config, suite)
+        if pipeline in ("staged_1a_1b", "staged_1a_1b_1c", "staged_full") or _stage_1b_cfg(
+            config
+        ).get("enabled", False):
+            run_stage_1b_perch_refine(config, suite)
+        if pipeline in ("staged_1a_1b_1c", "staged_full") or _stage_1c_cfg(config).get(
+            "enabled", False
+        ):
+            run_stage_1c_aug_search(config, suite)
+        if pipeline == "staged_full" or _stage_1d_cfg(config).get("enabled", False):
+            if _skip_if_completed(config, META_LOGS / "arch_search_1d_results.json", "Stage 1d"):
+                pass
+            else:
+                run_stage_1d_final_train(config)
         print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
         print("=" * 60)
+        print("\n  Overnight perch pipeline finished.")
+        print(f"  Kaggle bundle (if 1d succeeded): {PROJECT_ROOT / 'submission'}")
+        print(f"  Full model dir: {PERCH_FINAL_DIR}")
         return
 
     if meta_cfg.get("run_eda", True):

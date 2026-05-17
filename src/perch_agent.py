@@ -37,6 +37,7 @@ from code_executor import CodeExecutor
 from evaluator import Evaluator
 from llm_client import LLMClient
 from memory import ExperimentMemory
+from perch_memory import PerchExperimentMemory
 from soundscape_evaluator import PRIMARY_META_METRIC, format_metrics_dict
 
 
@@ -127,7 +128,7 @@ def _load_onnx_session(onnx_path: Path):
 
 
 def _perch_embed_batch(sess, inp_name: str, emb_idx: int, logit_idx: int, waveforms):
-    """Run a batch of 5-second waveforms through Perch → (embeddings, logits)."""
+    """Run a batch of audio waveforms through Perch → (embeddings, logits)."""
     import numpy as np
     PERCH_SAMPLES = 160_000
     if isinstance(waveforms, list):
@@ -252,6 +253,10 @@ def _embedding_cache_meta_path(npz_path: Path) -> Path:
     return npz_path.parent / f"{npz_path.stem}.meta.json"
 
 
+def _embedding_cache_clips_path(npz_path: Path) -> Path:
+    return npz_path.parent / f"{npz_path.stem}_clips.jsonl"
+
+
 def _write_embedding_cache_manifest(npz_path: Path, meta: dict) -> None:
     _embedding_cache_meta_path(npz_path).write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
@@ -291,19 +296,17 @@ def _select_train_df_stratified(
     return df, lcol, fcol
 
 
-def _subsample_cached_train(
-    X,
-    S,
+def _subsample_train_indices(
     y,
     max_samples: int | None,
     random_state: int = 42,
-):
-    """Stratified subsample of cached rows (for fast head training); full cache unchanged on disk."""
+) -> np.ndarray:
+    """Stratified row indices for head training (same logic as harness subsample)."""
     import numpy as np
 
-    n = int(X.shape[0])
+    n = int(y.shape[0])
     if max_samples is None or max_samples <= 0 or n <= max_samples:
-        return X, S, y
+        return np.arange(n, dtype=np.int64)
 
     rng = np.random.default_rng(random_state)
     labels = np.argmax(y, axis=1)
@@ -321,7 +324,145 @@ def _subsample_cached_train(
         need = min(max_samples - len(idx), len(pool))
         if need:
             idx = np.concatenate([idx, rng.choice(pool, size=need, replace=False)])
-    idx = np.sort(idx)
+    return np.sort(idx.astype(np.int64))
+
+
+def compute_and_save_head_train_indices(
+    train_cache: Path,
+    out_path: Path,
+    max_samples: int,
+    random_state: int = 42,
+) -> Path:
+    """Persist fixed head-train row indices so all aug-search runs use the same clips."""
+    import numpy as np
+
+    d = np.load(str(train_cache), allow_pickle=True)
+    y = d["y"].astype(np.float32)
+    idx = _subsample_train_indices(y, max_samples, random_state=random_state)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    np.save(str(out_path), idx)
+    print(
+        f"  [Indices] Saved {len(idx)} head-train indices → {out_path} "
+        f"(from {y.shape[0]} cached rows, seed={random_state})"
+    )
+    return out_path
+
+
+def _load_clip_rows_jsonl(path: Path) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    with Path(path).open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            rows.append({"label": str(row["label"]), "filename": str(row["filename"])})
+    return rows
+
+
+def _save_clip_rows_jsonl(path: Path, rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row) + "\n")
+
+
+def backfill_cache_clips_manifest(
+    train_cache: Path,
+    train_df,
+    species_to_idx: dict,
+    audio_dir: Path,
+    *,
+    sr: int = 32_000,
+    clip_sec: float = 5.0,
+) -> Path:
+    """
+    Reconstruct per-row clip list for an existing cache (no re-embedding).
+    Matches cache-build skips (missing files / load errors).
+    """
+    clips_path = _embedding_cache_clips_path(train_cache)
+    if clips_path.exists():
+        return clips_path
+
+    import numpy as np
+
+    meta = _read_embedding_cache_manifest(train_cache) or {}
+    sample_frac = float(meta.get("sample_frac", 1.0))
+    max_samples = meta.get("max_samples")
+    if max_samples is not None:
+        max_samples = int(max_samples)
+
+    train_df, lcol, fcol = _select_train_df_stratified(
+        train_df,
+        species_to_idx,
+        audio_dir,
+        sample_frac=sample_frac,
+        max_samples=max_samples,
+        random_state=42,
+    )
+    embedded: list[dict[str, str]] = []
+    for label, fname in train_df[[lcol, fcol]].dropna().values.tolist():
+        p = audio_dir / str(fname)
+        if not p.exists():
+            continue
+        try:
+            _load_and_pad(p, sr, clip_sec)
+            embedded.append({"label": str(label), "filename": str(fname)})
+        except Exception:
+            continue
+
+    n_cache = int(np.load(str(train_cache), allow_pickle=True)["X"].shape[0])
+    if len(embedded) != n_cache:
+        raise RuntimeError(
+            f"Clip manifest replay ({len(embedded)} rows) != cache rows ({n_cache}). "
+            f"Rebuild source cache with a current perch_agent to record clip paths."
+        )
+    _save_clip_rows_jsonl(clips_path, embedded)
+    print(f"  [Clips] Backfilled {len(embedded)} row→clip mappings → {clips_path.name}")
+    return clips_path
+
+
+def save_head_train_clip_subset(
+    source_train_cache: Path,
+    indices_path: Path,
+    out_clips_path: Path,
+    train_df,
+    species_to_idx: dict,
+    audio_dir: Path,
+) -> Path:
+    """Write the 2000 (or fewer) clips used for head training (for fast 1c re-embed)."""
+    import numpy as np
+
+    if out_clips_path.exists():
+        rows = _load_clip_rows_jsonl(out_clips_path)
+        print(f"  [Clips] Reusing head-train clip list ({len(rows)} clips) → {out_clips_path}")
+        return out_clips_path
+
+    clips_path = backfill_cache_clips_manifest(
+        source_train_cache, train_df, species_to_idx, audio_dir
+    )
+    all_rows = _load_clip_rows_jsonl(clips_path)
+    idx = np.load(str(indices_path))
+    subset = [all_rows[int(i)] for i in idx]
+    _save_clip_rows_jsonl(out_clips_path, subset)
+    print(
+        f"  [Clips] Head-train subset: {len(subset)} clips → {out_clips_path.name} "
+        f"(for fast stage-1c embedding)"
+    )
+    return out_clips_path
+
+
+def _subsample_cached_train(
+    X,
+    S,
+    y,
+    max_samples: int | None,
+    random_state: int = 42,
+):
+    """Stratified subsample of cached rows (for fast head training); full cache unchanged on disk."""
+    idx = _subsample_train_indices(y, max_samples, random_state)
+    if len(idx) == int(y.shape[0]):
+        return X, S, y
     return X[idx], S[idx], y[idx]
 
 
@@ -337,6 +478,7 @@ def _build_train_cache(
     aug_config: dict | None = None,
     soundscapes_dir: Path | None = None,
     aug_preset: str | None = None,
+    clip_rows: list[dict[str, str]] | None = None,
 ) -> None:
     """Embed training clips with AudioAugmenter (+ optional SNR mix) → save (X, S, y).npz."""
     import numpy as np
@@ -357,18 +499,25 @@ def _build_train_cache(
             print("  [Cache] Warning: no soundscapes for SNR mixing — SNR disabled.")
             use_snr = False
 
-    train_df, lcol, fcol = _select_train_df_stratified(
-        train_df, species_to_idx, audio_dir,
-        sample_frac=sample_frac, max_samples=max_samples, random_state=42,
-    )
-    rows = [(lb, fn) for lb, fn in train_df[[lcol, fcol]].dropna().values.tolist()]
-
-    frac_pct = int(sample_frac * 100) if sample_frac < 1.0 else 100
-    cap_note = f", cap={max_samples}" if max_samples else ""
-    print(
-        f"  [Cache] Building train cache: {len(rows)} clips "
-        f"({frac_pct}% stratified per species{cap_note}) → {cache_path.name}"
-    )
+    embedded_clips: list[dict[str, str]] = []
+    if clip_rows is not None:
+        rows = [(r["label"], r["filename"]) for r in clip_rows]
+        print(
+            f"  [Cache] Building train cache: {len(rows)} clips "
+            f"(fixed subset, new augmentation) → {cache_path.name}"
+        )
+    else:
+        train_df, lcol, fcol = _select_train_df_stratified(
+            train_df, species_to_idx, audio_dir,
+            sample_frac=sample_frac, max_samples=max_samples, random_state=42,
+        )
+        rows = [(lb, fn) for lb, fn in train_df[[lcol, fcol]].dropna().values.tolist()]
+        frac_pct = int(sample_frac * 100) if sample_frac < 1.0 else 100
+        cap_note = f", cap={max_samples}" if max_samples else ""
+        print(
+            f"  [Cache] Building train cache: {len(rows)} clips "
+            f"({frac_pct}% stratified per species{cap_note}) → {cache_path.name}"
+        )
     target = int(sr * clip_sec)
     X_parts, S_parts, y_parts = [], [], []
     batch_wavs, batch_labels = [], []
@@ -403,6 +552,7 @@ def _build_train_cache(
         vec[species_to_idx[label]] = 1.0
         batch_wavs.append(wav)
         batch_labels.append(vec)
+        embedded_clips.append({"label": str(label), "filename": str(fname)})
 
         if len(batch_wavs) >= batch_size:
             _flush()
@@ -429,7 +579,10 @@ def _build_train_cache(
         "n_samples": int(X.shape[0]),
         "embedding_dim": int(X.shape[1]),
         "n_species": int(y.shape[1]),
+        "clip_subset": clip_rows is not None,
     })
+    if embedded_clips:
+        _save_clip_rows_jsonl(_embedding_cache_clips_path(cache_path), embedded_clips)
     print(f"  [Cache] Saved: X={X.shape}  S={S.shape}  y={y.shape}")
 
 
@@ -557,6 +710,7 @@ PERCH_SEARCH_SPACE = {
         "highway_network",    # highway gates: out = H*transform + (1-H)*input carry
         "bottleneck_mlp",     # wide → narrow → wide projection bottleneck
         "multi_scale_mlp",    # parallel branches at different widths, merged by concat or add
+        "multi_tower_ensemble",  # 3–5 parallel specialist towers, fuse logits (Average or Concat→Dense)
         "transformer_block",  # one or two transformer encoder blocks (MHA + FFN + LayerNorm)
         "mixture_of_experts", # K parallel expert MLPs with soft gating router
         "dense_connections",  # DenseNet-style: each layer receives concat of all prior outputs
@@ -576,12 +730,42 @@ PERCH_SEARCH_SPACE = {
     "perch_weight":  [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
 }
 
-PERCH_RESEARCHER_SYSTEM_PROMPT = """You are an expert ML researcher optimizing a BirdCLEF classification head on top of frozen Google Perch 1536-d embeddings.
-The Perch ONNX backbone is completely FIXED — you control ONLY the classification head architecture and training config.
-Final predictions blend head output with Perch's own logit scores:
-  y_pred = perch_weight * perch_scores + (1 - perch_weight) * head_output
+# Shared domain context — included in researcher + coder system prompts every LLM call.
+PERCH_TASK_CONTEXT = """
+TASK — BirdCLEF 2026 (jungle / rainforest soundscapes):
+- You classify bird species from audio using frozen Google Perch v2 embeddings (1536-d vectors).
+- Training audio comes from tropical soundscape recordings; labels are multi-label over 234 species.
+- Class imbalance is severe: many species are rare; most clip×species pairs are negative.
+- The Perch ONNX encoder is FIXED. You design only the TF/Keras classification HEAD and training hyperparameters.
 
-YOUR PRIMARY OBJECTIVE: Explore STRUCTURALLY DIVERSE head architectures. Simply varying n_blocks or dropout of the same residual MLP topology is NOT sufficient exploration. Each run should test a meaningfully different inductive bias or architectural design pattern.
+COMPETITION CONTEXT (read before proposing architectures — background only, not a coding constraint):
+- Recordings are jungle / rainforest soundscapes; the task is multi-label species detection in noisy, imbalanced data.
+- On Kaggle, long test soundscapes are evaluated as a sequence of ~60-second windows (not one score per full file).
+- Temporal intuition: if the same species is active across several consecutive 60s segments, it is more likely a true
+  presence than a single isolated spike—design heads that output well-calibrated per-segment probabilities (not
+  over-confident on weak evidence), so later temporal aggregation can filter false alarms.
+- You do NOT implement windowing or sequence models in build_head; the harness trains on cached Perch embeddings
+  (one 1536-d vector per training row). Use this context for hypotheses and architecture choices only.
+
+FINAL BLEND (harness, not part of build_head graph):
+  y_pred = perch_weight * perch_scores + (1 - perch_weight) * head_output
+  where perch_scores are Perch's own mapped species logits on the same window.
+""".strip()
+
+PERCH_RESEARCHER_SYSTEM_PROMPT = (
+    """You are an expert ML researcher optimizing a BirdCLEF classification head on top of frozen Google Perch 1536-d embeddings.
+
+"""
+    + PERCH_TASK_CONTEXT
+    + """
+
+YOUR PRIMARY OBJECTIVE: Explore STRUCTURALLY DIVERSE head architectures — including advanced designs.
+Simply varying n_blocks or dropout of the same residual MLP is NOT sufficient. Each run should test a
+meaningfully different inductive bias. Strongly consider sophisticated patterns when not yet tried:
+- multi_tower_ensemble: 3–5 parallel sub-heads (e.g. residual, gated, attention, bottleneck, linear) on the same
+  embedding, each ending in Dense(num_classes); fuse via Average or Concatenate→Dense(num_classes, sigmoid).
+  Diversity across towers reduces window-level false positives before temporal smoothing on long recordings.
+- mixture_of_experts, multi_scale_mlp, transformer_block, dense_connections (see below).
 
 Architecture types you can propose (pick from arch_types in the search space):
 - residual_mlp:       Dense residual blocks with skip connections (BN→Dense→LN→blocks→proj→sigmoid). This is the baseline — avoid repeating it unless refining a genuinely strong result.
@@ -590,34 +774,69 @@ Architecture types you can propose (pick from arch_types in the search space):
 - highway_network:    Transform gate H (sigmoid) and carry gate (1-H): out = H*Dense(x) + (1-H)*x. Learnable depth blending.
 - bottleneck_mlp:     Project wide→narrow→wide to force information compression: Dense(2048)→Dense(128)→Dense(2048). Forces the head to learn a compact representation.
 - multi_scale_mlp:    Parallel branches at different widths (e.g. 256, 512, 1024) processing the same input, outputs merged by concatenation then projected.
+- multi_tower_ensemble: 3–5 parallel specialist towers on the same stem (each tower a different topology), per-tower
+  logits fused by Average or Concatenate→Dense(sigmoid). Best when you want explicit ensemble diversity in one trainable model.
 - transformer_block:  Reshape to (batch,1,emb_dim), apply MultiHeadAttention + FFN + LayerNorm (1-2 blocks). Classic transformer encoder.
-- mixture_of_experts: K parallel expert Dense layers with a soft gating router (Dense(K, softmax)), weighted sum of expert outputs.
-- dense_connections:  DenseNet-style: each layer receives concat of all prior layer outputs. Helps gradient flow and feature reuse.
+- mixture_of_experts: K parallel expert Dense(hidden_dim) layers; router Dense(K, softmax) on x; weighted sum of experts (all tensors hidden_dim — never concat experts then multiply by router).
+- dense_connections:  DenseNet-style: concat prior features, then Dense(hidden_dim) to compress — never Add() concat-sized tensors with hidden_dim tensors.
 - linear_probe:       Single Dense(n_classes, sigmoid). Strong sanity-check baseline for raw embedding quality.
 
 Reasoning guidelines:
 - Look at the history above and identify which arch_types have already been tried.
 - Strongly prefer an arch_type NOT yet explored (strategy: "explore").
 - Only revisit a past arch_type if it was the clear best and you are refining it (strategy: "exploit").
-- Consider what inductive biases suit 1536-d Perch embeddings, 234 species, severe class imbalance, and soundscape audio.
+- Consider jungle soundscape noise, rare species, and per-window calibration (see TASK context above).
+- Prefer advanced structures (multi_tower_ensemble, MoE, attention) once basic families have been tried.
 - Tune learning_rate, batch_size, optimizer, epochs, patience, and perch_weight to match the architecture's typical training dynamics.
+- In arch_description, be explicit: stem projection, each tower/block, fusion rule, dropout, final sigmoid head.
 
 You MUST respond with ONLY a single JSON object — no prose, no explanation, no markdown, no code fences.
-Start your response with { and end with }.
+Start your response with a single JSON object (opening brace) and end with a closing brace.
 
 The arch_description field must be a precise, implementable description of the head: layer types, sizes, activations, normalization, and how layers connect. The coder will implement it verbatim in TF/Keras.
+
+SHAPE-SAFE arch_description rules (embeddings are 1536-d; hidden_dim is your working width, typically 512–1024):
+- Always state: "Project input Dense(hidden_dim) from emb_dim first" before any residual, MoE, or concat blocks.
+- For residual/highway/gated blocks: every Add() input must already be hidden_dim (project skip connections if needed).
+- For mixture_of_experts: "K experts each Dense(hidden_dim); router Dense(K, softmax); weighted sum stays hidden_dim" — do NOT describe concat of expert outputs.
+- For dense_connections: "Concatenate then Dense(hidden_dim) to compress" after each growth step — do NOT Add() a wide concat tensor to a narrow tensor.
+- For multi_tower_ensemble: list each tower (e.g. 5 towers: residual, gated, attention, bottleneck, linear_probe_on_stem);
+  each tower outputs num_classes logits before fusion; state Average vs Concatenate→Dense fusion.
 
 Example response:
 {"arch_type": "gated_mlp", "arch_description": "LayerNorm on input. Dense(1024) projection. Then 2 GLU blocks: each block has two parallel Dense(1024) — one with linear activation (value) and one with sigmoid activation (gate) — multiplied element-wise, then added to a residual Dense(1024) projection of the block input, followed by LayerNorm. Final Dense(512, gelu), Dropout(0.3), Dense(n_classes, sigmoid).", "hidden_dim": 1024, "n_layers": 2, "dropout": 0.3, "activation": "gelu", "normalization": "layer_norm", "learning_rate": 0.001, "batch_size": 256, "optimizer": "adam", "epochs": 30, "patience": 5, "perch_weight": 0.2, "reasoning": "GLU gating not yet tried; may help the head learn to selectively weight Perch embedding dimensions.", "hypothesis": "Gated selection of Perch embedding features should outperform uniform residual blending for multi-label species classification.", "strategy": "explore"}
 
 Required keys: arch_type, arch_description, hidden_dim, n_layers, dropout, activation, normalization, learning_rate, batch_size, optimizer, epochs, patience, perch_weight, reasoning, hypothesis, strategy."""
+)
+
+PERCH_REFINE_RESEARCHER_ADDENDUM = """
+REFINE MODE — you are optimizing ONE fixed architecture family to beat a stage-1a champion score.
+- arch_type is LOCKED to the value given in the user message — do NOT propose a different arch_type.
+- strategy MUST be "exploit" (hyperparameters, layer depth, dropout, lr, perch_weight, fusion details).
+- Keep the same structural family; improve training config and head details in arch_description.
+- Hypothesis should explain why this specific tweak may beat the seed score on soundscape macro AP.
+"""
 
 
 class PerchResearcher:
-    def __init__(self, llm: LLMClient, memory: ExperimentMemory, temperature: float = 0.6) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        memory: ExperimentMemory,
+        temperature: float = 0.6,
+        *,
+        refine_mode: bool = False,
+        locked_arch_type: str | None = None,
+        seed_spec: dict | None = None,
+        seed_score: float | None = None,
+    ) -> None:
         self.llm = llm
         self.memory = memory
         self.temperature = temperature
+        self.refine_mode = refine_mode
+        self.locked_arch_type = locked_arch_type
+        self.seed_spec = seed_spec or {}
+        self.seed_score = seed_score
 
     def next_experiment(self) -> dict:
         history  = self.memory.researcher_context()
@@ -625,29 +844,61 @@ class PerchResearcher:
         total    = self.memory.total()
         best_str = self.memory._format_run_score(best[0]) if best else "none"
 
-        user_prompt = (
-            f"{history}\n\n"
-            f"Available search space:\n{json.dumps(PERCH_SEARCH_SPACE, indent=2)}\n\n"
-            f"Total experiments so far: {total}\n"
-            f"Best so far ({self.memory.ranking_metric}): {best_str}\n\n"
-            "IMPORTANT: Look at the 'arch_type' field in each past experiment above. "
-            "Identify which arch_types have already been tried and choose one that has NOT been explored yet. "
-            "Architectural diversity is the top priority.\n\n"
-            "Pick the next experiment. Respond with ONLY a JSON object — no prose, no markdown.\n"
-            "Start with { and end with }. Include all required keys: "
-            "arch_type, arch_description, hidden_dim, n_layers, dropout, activation, normalization, "
-            "learning_rate, batch_size, optimizer, epochs, patience, perch_weight, reasoning, hypothesis, strategy."
-        )
+        if self.refine_mode:
+            locked = self.locked_arch_type or self.seed_spec.get("arch_type", "residual_mlp")
+            seed_line = ""
+            if self.seed_score is not None:
+                seed_line = (
+                    f"\nSTAGE-1A CHAMPION TO BEAT ({self.memory.ranking_metric}): "
+                    f"{float(self.seed_score):.5f}\n"
+                )
+            if self.seed_spec:
+                seed_line += f"Seed spec (refine from this):\n{json.dumps(self.seed_spec, indent=2)}\n"
+
+            user_prompt = (
+                f"{history}\n\n"
+                f"REFINE CAMPAIGN — locked arch_type: {locked}\n"
+                f"{seed_line}\n"
+                f"Total refine experiments so far: {total}\n"
+                f"Best in this refine run ({self.memory.ranking_metric}): {best_str}\n\n"
+                "Your goal: beat the champion score by tuning hyperparameters and head details "
+                "within the SAME arch_type. Do NOT switch architecture family.\n\n"
+                f"Allowed hyperparameter search space:\n"
+                f"{json.dumps(PERCH_SEARCH_SPACE, indent=2)}\n\n"
+                "Respond with ONLY a JSON object. arch_type MUST equal the locked value. strategy MUST be exploit.\n"
+                "Include all required keys: arch_type, arch_description, hidden_dim, n_layers, dropout, "
+                "activation, normalization, learning_rate, batch_size, optimizer, epochs, patience, "
+                "perch_weight, reasoning, hypothesis, strategy."
+            )
+            system_prompt = PERCH_RESEARCHER_SYSTEM_PROMPT + "\n\n" + PERCH_REFINE_RESEARCHER_ADDENDUM
+        else:
+            user_prompt = (
+                f"{history}\n\n"
+                f"Available search space:\n{json.dumps(PERCH_SEARCH_SPACE, indent=2)}\n\n"
+                f"Total experiments so far: {total}\n"
+                f"Best so far ({self.memory.ranking_metric}): {best_str}\n\n"
+                "IMPORTANT: Look at the 'arch_type' field in each past experiment above. "
+                "Identify which arch_types have already been tried and choose one that has NOT been explored yet. "
+                "Architectural diversity is the top priority.\n\n"
+                "Pick the next experiment. Respond with ONLY a JSON object — no prose, no markdown.\n"
+                "Start with { and end with }. Include all required keys: "
+                "arch_type, arch_description, hidden_dim, n_layers, dropout, activation, normalization, "
+                "learning_rate, batch_size, optimizer, epochs, patience, perch_weight, reasoning, hypothesis, strategy."
+            )
+            system_prompt = PERCH_RESEARCHER_SYSTEM_PROMPT
 
         print(f"\n  [Researcher] Analyzing {total} experiments, best {best_str}...")
         response = self.llm.generate_from_messages(
             messages=[
-                {"role": "system", "content": PERCH_RESEARCHER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_prompt},
             ],
             temperature=self.temperature,
         )
         spec = self._parse_spec(response)
+        if self.refine_mode and self.locked_arch_type:
+            spec["arch_type"] = self.locked_arch_type
+            spec["strategy"] = "exploit"
         print(
             f"  [Researcher] Strategy: {spec.get('strategy', '?')} | "
             f"arch={spec.get('arch_type')} hidden={spec.get('hidden_dim')} "
@@ -688,6 +939,7 @@ def _perch_safe_defaults() -> dict:
             "followed by LayerNorm. Final Dense(512, gelu), Dropout(0.4), Dense(n_classes, sigmoid)."
         ),
         "hidden_dim":       1024,
+        "proj_dim":         512,
         "n_layers":         2,
         "dropout":          0.3,
         "activation":       "gelu",
@@ -715,98 +967,149 @@ def _perch_fill_defaults(spec: dict) -> dict:
 # Coder — inner loop, writes TF/Keras head given spec
 # ─────────────────────────────────────────────────────────────────────────────
 
-PERCH_CODER_SYSTEM_PROMPT = """You are a Python ML engineer writing TF/Keras classification head code.
-You receive an architecture specification and must return ONLY a Python code block containing exactly two functions:
+PERCH_CODER_SYSTEM_PROMPT = (
+    """You are a Python ML engineer building TF/Keras classification heads on frozen 1536-d Perch embeddings.
 
-1. build_head(emb_dim, num_classes) -> tf.keras.Model
-   - Input shape: (emb_dim,) — Perch 1536-d embeddings, already available as tf
-   - Output shape: (num_classes,) with sigmoid activation
-   - Implement EXACTLY the architecture described in arch_description
-   - Use tf.keras layers: Dense, LayerNormalization, BatchNormalization, Dropout, Add,
-     Multiply, Activation, MultiHeadAttention, Reshape, Concatenate, etc.
-   - Use the Keras functional API: define inp = tf.keras.layers.Input(shape=(emb_dim,)),
-     build the graph, then return tf.keras.Model(inp, out)
-   - For attention: reshape to (batch, 1, emb_dim) with tf.keras.layers.Reshape((1, emb_dim))
-     before MultiHeadAttention, then flatten back with tf.keras.layers.Reshape((emb_dim,)) or Flatten
-   - For gating: use two separate Dense layers (value and gate), not tensor slicing
-   - The last layer must be Dense(num_classes, activation="sigmoid")
+"""
+    + PERCH_TASK_CONTEXT
+    + """
 
-2. get_training_config() -> dict
-   - Returns all training hyperparameters as a plain Python dict
-   - Must include: learning_rate, batch_size, optimizer, epochs, patience, perch_weight
-   - Do NOT import anything inside get_training_config()
+The researcher proposes an experimental STRATEGY (architecture family, key hyperparameters, hypothesis).
+YOU implement the exact Keras head in build_head — not a fixed template. Follow arch_description closely.
+Advanced designs are encouraged when specified, especially multi_tower_ensemble (3–5 diverse parallel towers
+on the same embedding, fuse per-tower sigmoid logits with Average or Concatenate→Dense(num_classes, sigmoid)).
+Goal: accurate, well-calibrated per-window species probabilities for long jungle soundscape recordings.
 
-Rules:
-- tf is already imported — do NOT write import tensorflow or import tf
-- No top-level executable statements
-- No main() or other functions, no class definitions
-- Both functions must be present in the same code block
+You must output TWO functions in a single ```python``` code block:
+  1. build_head(emb_dim, num_classes) → tf.keras.Model
+  2. get_training_config() → dict with learning_rate, batch_size, optimizer, epochs, patience, perch_weight
 
-Project-specific implementation tips:
-- This is MULTI-LABEL classification (234 bird species): output MUST use sigmoid, never softmax — each species is predicted independently
-- Class imbalance (~200:1 neg/pos) is handled externally by weighted BCE — do NOT add any extra loss terms or temperature scaling inside build_head
-- Perch embeddings are already strong 1536-d features — prefer LayerNormalization over BatchNormalization on internal layers (BN behaves differently between train/eval mode on imbalanced class distributions)
-- For ATTENTION architectures: MultiHeadAttention needs 3D input (batch, seq, dim) — use tf.keras.layers.Reshape((1, emb_dim)) before attention, then tf.keras.layers.Flatten() or tf.keras.layers.Reshape((hidden_dim,)) after
-- For GATING: always use two separate Dense layers (one for value, one for gate) — never slice tensors with Python indexing like x[:, :512] as it breaks the Keras functional API
-- For MIXTURE OF EXPERTS: use soft routing with Dense(n_experts, activation='softmax') — hard argmax is not differentiable and will break training
-- For DENSE CONNECTIONS: use tf.keras.layers.Concatenate()([a, b]) — not tf.concat
-- Avoid Lambda layers — they cause issues with model saving/loading. Use built-in Keras layers instead
-- build_head MUST return a tf.keras.Model(inp, out), not a layer or tensor
+HARD RULES (the harness depends on these):
+- tf is already imported — do NOT add ANY imports
+- No top-level code, no main(), no class definitions — only the two functions
+- build_head MUST return tf.keras.Model(inp, out)
+- The FINAL layer MUST be Dense(num_classes, activation="sigmoid")  (multi-label)
+- Do NOT use tf.keras.layers.Lambda (breaks model save/load)
+- Do NOT slice tensors with [:, a:b] (breaks the functional API) — use separate Dense layers instead
 
-*** CRITICAL — Add() SHAPE RULE (most common failure) ***
-Add() requires BOTH inputs to have the EXACT SAME shape.
-For any residual or skip connection, you MUST project the skip tensor to match the block output:
-    skip = tf.keras.layers.Dense(block_output_dim)(skip_input)   # ensure shapes match
-    x = tf.keras.layers.Add()([x, skip])
-NEVER do: Add()([tensor_of_1024, tensor_of_512]) — this WILL crash.
-In gated blocks: the gated output and the residual path must both be projected to hidden_dim BEFORE Add().
-In the example below, note how BOTH the gated output AND the residual input go through Dense(1024) so their shapes match.
+*** MANDATORY STEM (fixes 1536 vs 512 crashes) ***
+emb_dim is 1536. Pick hidden_dim (e.g. 512) from the spec. IMMEDIATELY after Input:
+  inp = tf.keras.layers.Input(shape=(emb_dim,))
+  x = tf.keras.layers.Dense(hidden_dim, activation="gelu")(inp)   # REQUIRED — never Add() against raw inp
+From this point on, the main trunk tensor x must stay shape (batch, hidden_dim) unless you explicitly project back.
 
-Example for a gated MLP:
-```python
-def build_head(emb_dim, num_classes):
-    hidden_dim = 1024  # single constant so shapes always match
-    inp = tf.keras.layers.Input(shape=(emb_dim,))
-    x = tf.keras.layers.LayerNormalization()(inp)
-    x = tf.keras.layers.Dense(hidden_dim)(x)          # project to hidden_dim
-    x = tf.keras.layers.LayerNormalization()(x)
-    for _ in range(2):
-        v = tf.keras.layers.Dense(hidden_dim, activation="linear")(x)   # value: hidden_dim
-        g = tf.keras.layers.Dense(hidden_dim, activation="sigmoid")(x)  # gate:  hidden_dim
-        gated = tf.keras.layers.Multiply()([v, g])                       # hidden_dim
-        gated = tf.keras.layers.Dense(hidden_dim)(gated)                 # MUST match x (hidden_dim)
-        x = tf.keras.layers.Add()([x, gated])         # OK: both hidden_dim
-        x = tf.keras.layers.LayerNormalization()(x)
-    x = tf.keras.layers.Dense(512, activation="gelu")(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
-    out = tf.keras.layers.Dense(num_classes, activation="sigmoid")(x)
-    return tf.keras.Model(inp, out)
+*** CRITICAL — Add() / Multiply() SHAPE RULE ***
+tf.keras.layers.Add()([a, b]) and Multiply()([a, b]) CRASH if shapes differ (e.g. (1536,) vs (512,), or (2048,) vs (512,)).
+- Use ONE hidden_dim everywhere inside blocks; both Add() inputs must be (batch, hidden_dim).
+- Project the skip path: skip = tf.keras.layers.Dense(hidden_dim)(skip) before Add().
+- Add() takes exactly TWO same-shaped tensors — never Add()([x, a, b]) with three different branches unless all three are Dense(hidden_dim) first.
+- After Concatenate, width grows — you CANNOT Add() the concat to x. Use Dense(hidden_dim) on the concat output first.
 
-def get_training_config():
-    return {
-        "learning_rate": 0.001,
-        "batch_size": 256,
-        "optimizer": "adam",
-        "epochs": 30,
-        "patience": 5,
-        "perch_weight": 0.2,
-    }
-```"""
+OTHER SHAPE GOTCHAS:
+- MultiHeadAttention needs 3D: Reshape((1, hidden_dim)) → MHA → Reshape((hidden_dim,)).
+- Concatenate(axis=-1) stacks widths (512+512=1024). Follow with Dense(hidden_dim) before any Add() with x.
+- Do NOT Concatenate expert outputs then Multiply with a router — use the MoE pattern below.
+
+REFERENCE PATTERNS (copy the shape logic; adapt layer counts):
+
+# Stem (always)
+inp = tf.keras.layers.Input(shape=(emb_dim,))
+x = tf.keras.layers.Dense(hidden_dim, activation="gelu")(inp)
+
+# Residual block — x and h both hidden_dim
+h = tf.keras.layers.Dense(hidden_dim)(x)
+h = tf.keras.layers.LayerNormalization()(h)
+h = tf.keras.layers.Activation("gelu")(h)
+h = tf.keras.layers.Dropout(dropout)(h)
+h = tf.keras.layers.Dense(hidden_dim)(h)
+x = tf.keras.layers.Add()([x, h])
+
+# Mixture of experts (K=4) — concat experts, compress (shape-safe; no router multiply bugs)
+num_experts = 4
+expert_outs = [tf.keras.layers.Dense(hidden_dim, activation="gelu")(x) for _ in range(num_experts)]
+moe = tf.keras.layers.Concatenate()(expert_outs)              # (batch, K*hidden_dim)
+moe = tf.keras.layers.Dense(hidden_dim, activation="gelu")(moe)  # learn mixture weights
+x = tf.keras.layers.Add()([x, moe])
+
+# DenseNet-style dense connection — concat then compress
+dense_in = tf.keras.layers.Concatenate()([x, h])
+x = tf.keras.layers.Dense(hidden_dim, activation="gelu")(dense_in)
+
+# Multi-scale — concat branches then project
+b1 = tf.keras.layers.Dense(256, activation="gelu")(x)
+b2 = tf.keras.layers.Dense(512, activation="gelu")(x)
+merged = tf.keras.layers.Concatenate()([b1, b2])
+x = tf.keras.layers.Dense(hidden_dim, activation="gelu")(merged)
+
+# Gated (GLU) block
+v = tf.keras.layers.Dense(hidden_dim, activation="linear")(x)
+g = tf.keras.layers.Dense(hidden_dim, activation="sigmoid")(x)
+gated = tf.keras.layers.Multiply()([v, g])
+x = tf.keras.layers.Add()([x, gated])
+
+# Attention block
+x_3d = tf.keras.layers.Reshape((1, hidden_dim))(x)
+attn = tf.keras.layers.MultiHeadAttention(num_heads=4, key_dim=hidden_dim // 4)(x_3d, x_3d)
+attn = tf.keras.layers.Reshape((hidden_dim,))(attn)
+x = tf.keras.layers.Add()([x, attn])
+
+# Classifier head (after trunk is stable)
+out = tf.keras.layers.Dense(num_classes, activation="sigmoid")(x)
+
+# Multi-tower ensemble (e.g. 5 towers) — shape-safe; each tower: stem branch → Dense(num_classes, sigmoid)
+inp = tf.keras.layers.Input(shape=(emb_dim,))
+stem = tf.keras.layers.Dense(hidden_dim, activation="gelu")(inp)
+def _tower_residual(x):
+    h = tf.keras.layers.Dense(hidden_dim, activation="gelu")(x)
+    h = tf.keras.layers.Dense(hidden_dim)(h)
+    return tf.keras.layers.Add()([x, h])
+def _tower_gated(x):
+    v = tf.keras.layers.Dense(hidden_dim, activation="linear")(x)
+    g = tf.keras.layers.Dense(hidden_dim, activation="sigmoid")(x)
+    return tf.keras.layers.Multiply()([v, g])
+t1 = tf.keras.layers.Dense(num_classes, activation="sigmoid")(_tower_residual(stem))
+t2 = tf.keras.layers.Dense(num_classes, activation="sigmoid")(_tower_gated(stem))
+t3 = tf.keras.layers.Dense(num_classes, activation="sigmoid")(stem)  # linear-ish tower
+# ... add t4, t5 with attention / bottleneck as needed ...
+out = tf.keras.layers.Average()([t1, t2, t3])  # all (batch, num_classes) — OK
+
+For mixture_of_experts: K experts → Concatenate → Dense(hidden_dim) → Add with x (do NOT Multiply softmax router against concat experts).
+For dense_connections: Concatenate([x, h]) → Dense(hidden_dim) replaces x (do NOT Add concat to x).
+For multi_tower_ensemble: each tower must output (batch, num_classes) before Average/Concat fusion; never Add() towers at hidden_dim then one shared classifier unless you design it that way explicitly.
+
+Keep build_head shape-safe. Prefer a working simpler model over a broken exotic one."""
+)
 
 
 def _spec_to_coder_prompt(spec: dict) -> str:
-    arch_type = spec.get("arch_type", "residual_mlp")
-    arch_desc = spec.get("arch_description", "Standard residual MLP with skip connections.")
+    arch_type        = spec.get("arch_type", "residual_mlp")
+    arch_description = spec.get("arch_description", "(no description provided)")
+    hypothesis       = spec.get("hypothesis", "")
+    reasoning        = spec.get("reasoning", "")
+    strategy         = spec.get("strategy", "explore")
+
+    arch_keys = ("hidden_dim", "proj_dim", "n_layers", "dropout", "activation", "normalization")
+    arch_cfg  = {k: spec[k] for k in arch_keys if k in spec}
+
     training_keys = ("learning_rate", "batch_size", "optimizer", "epochs", "patience", "perch_weight")
-    training_cfg = {k: spec[k] for k in training_keys if k in spec}
+    training_cfg  = {k: spec[k] for k in training_keys if k in spec}
+
     return (
-        f"Architecture type: {arch_type}\n"
-        f"Architecture description: {arch_desc}\n\n"
-        f"Training config to use in get_training_config():\n{json.dumps(training_cfg, indent=2)}\n\n"
-        f"Write both functions:\n"
-        f"1. build_head(emb_dim, num_classes) — implement the architecture described above using TF/Keras functional API\n"
-        f"2. get_training_config() — return the training config dict above\n\n"
-        f"Return ONLY both functions in a single ```python``` code block. Nothing else."
+        f"Researcher's experimental proposal:\n"
+        f"  arch_type:  {arch_type}\n"
+        f"  strategy:   {strategy}\n"
+        f"  hypothesis: {hypothesis}\n"
+        f"  reasoning:  {reasoning}\n\n"
+        f"Architecture description (use as design guidance — implement faithfully but make your own concrete choices):\n"
+        f"  {arch_description}\n\n"
+        f"Suggested architecture hyperparameters (these are HINTS — adapt as needed for shape safety):\n"
+        f"{json.dumps(arch_cfg, indent=2)}\n\n"
+        f"Training config to return from get_training_config() (use these values verbatim unless they would break training):\n"
+        f"{json.dumps(training_cfg, indent=2)}\n\n"
+        f"{_arch_type_hint(arch_type)}"
+        f"Implement build_head(emb_dim, num_classes) freely in idiomatic Keras functional API, "
+        f"obeying all HARD RULES, the MANDATORY STEM, and Add() SHAPE RULE. "
+        f"Return BOTH functions in a single ```python``` code block."
     )
 
 
@@ -836,6 +1139,65 @@ def _validate_perch_code(code: str) -> list[str]:
     if "get_training_config" not in names:
         issues.append("Missing: get_training_config()")
     return issues
+
+
+def _dry_run_build_head(
+    code: str, emb_dim: int = 1536, num_classes: int = 234
+) -> list[str]:
+    """Instantiate build_head with dummy shapes — catches Add/Concat bugs in seconds."""
+    import tensorflow as tf
+
+    namespace: dict = {"tf": tf}
+    try:
+        exec(code, namespace)  # noqa: S102 — trusted coder slot in isolated process
+    except Exception as e:
+        return [f"exec failed: {type(e).__name__}: {e}"]
+    build_head = namespace.get("build_head")
+    if build_head is None:
+        return ["build_head not defined after exec"]
+    try:
+        model = build_head(emb_dim, num_classes)
+        if not isinstance(model, tf.keras.Model):
+            return ["build_head must return tf.keras.Model(inp, out)"]
+        model(tf.zeros((2, emb_dim), dtype=tf.float32), training=False)
+    except Exception as e:
+        return [f"build_head shape error: {type(e).__name__}: {e}"]
+    return []
+
+
+_ARCH_TYPE_SHAPE_HINTS: dict[str, str] = {
+    "mixture_of_experts": (
+        "MoE: K parallel Dense(hidden_dim)(x), Concatenate expert outputs, "
+        "Dense(hidden_dim) to compress, Add with x. Do NOT softmax-multiply router against concat."
+    ),
+    "dense_connections": (
+        "DenseNet: h = Dense(hidden_dim)(x); dense_in = Concatenate([x, h]); "
+        "x = Dense(hidden_dim)(dense_in). Never Add() concat tensor to x directly."
+    ),
+    "multi_scale_mlp": (
+        "Parallel Dense branches → Concatenate → Dense(hidden_dim) before Add with trunk."
+    ),
+    "bottleneck_mlp": (
+        "Dense(wide)→Dense(narrow)→Dense(hidden_dim) before any Add() with x; x must stay hidden_dim."
+    ),
+    "residual_mlp": (
+        "Stem Dense(hidden_dim)(inp) first; each block ends with Dense(hidden_dim) before Add([x, h])."
+    ),
+    "attention_mlp": "Project to hidden_dim, Reshape (1, H) for MHA, Reshape (H,) back, Add with x.",
+    "transformer_block": "Stem to hidden_dim; MHA on (batch, 1, hidden_dim).",
+    "multi_tower_ensemble": (
+        "Shared stem Dense(hidden_dim)(inp). Build 3–5 parallel towers (different topologies). "
+        "Each tower ends with Dense(num_classes, sigmoid). Fuse with Average([t1,t2,...]) or "
+        "Concatenate(towers)→Dense(num_classes, sigmoid). All tower outputs must be (batch, num_classes)."
+    ),
+}
+
+
+def _arch_type_hint(arch_type: str) -> str:
+    hint = _ARCH_TYPE_SHAPE_HINTS.get(arch_type)
+    if not hint:
+        return ""
+    return f"\nShape hint for {arch_type}: {hint}\n"
 
 
 # Known-good fallback: used when the coder exhausts all retries.
@@ -910,7 +1272,11 @@ def generate_perch_code(
 
         issues = _validate_perch_code(code) if code else ["No code found in response."]
         if not issues:
-            print("  [Coder] Code valid.")
+            shape_issues = _dry_run_build_head(code)
+            if shape_issues:
+                issues = shape_issues
+        if not issues:
+            print("  [Coder] Code valid (shape check passed).")
             return code
 
         print(f"  [Coder] Issues: {issues}")
@@ -926,8 +1292,17 @@ def generate_perch_code(
             "    return tf.keras.Model(inp, out)\n"
             "Now implement the full architecture from the spec AND include get_training_config()."
         ) if missing_build_head else ""
+        shape_fix = ""
+        if any("shape" in i.lower() or "incompatible" in i.lower() for i in issues):
+            shape_fix = (
+                "\n\nSHAPE FIX CHECKLIST:\n"
+                "1. First layer after Input: Dense(hidden_dim)(inp) — emb_dim is 1536.\n"
+                "2. Every Add()/Multiply(): both inputs are (batch, hidden_dim).\n"
+                "3. After Concatenate: Dense(hidden_dim) before Add with x.\n"
+            )
         current_prompt = (
             "Your code had issues:\n" + "\n".join(f"- {i}" for i in issues) +
+            shape_fix +
             build_head_hint +
             f"\n\nOriginal spec:\n{_spec_to_coder_prompt(spec)}\n\n"
             "Fix all issues and return BOTH functions in a single ```python``` code block."
@@ -945,15 +1320,21 @@ def _repair_perch_code(
     # Detect the specific shape-mismatch pattern and inject a targeted hint
     shape_hint = ""
     if "incompatible shapes" in error.lower() or "elemwise_op_output_shape" in error:
+        arch_type = spec.get("arch_type", "")
+        arch_extra = _arch_type_hint(arch_type)
         shape_hint = (
             "\n*** SHAPE MISMATCH DETECTED — THIS IS THE SPECIFIC BUG IN YOUR CODE ***\n"
-            "Add() crashed because two tensors have different sizes (e.g. (1024,) vs (512,)).\n"
-            "THE FIX: Before every Add(), project BOTH tensors to the same dimension with Dense():\n"
-            "    skip = tf.keras.layers.Dense(hidden_dim)(skip_input)  # match block output dim\n"
-            "    block_out = tf.keras.layers.Dense(hidden_dim)(block_out)\n"
-            "    x = tf.keras.layers.Add()([skip, block_out])  # now both hidden_dim — OK\n"
-            "Use ONE consistent hidden_dim variable throughout the entire build_head function.\n"
-            "The final Dense(512, gelu) projection comes AFTER all residual blocks — never inside them.\n"
+            "Add() or Multiply() crashed because two tensors have different feature sizes.\n"
+            "Common fixes:\n"
+            "  - Missing stem: x = Dense(hidden_dim)(inp) right after Input — inp is 1536-d.\n"
+            "  - Residual without projection: Add([x, h]) where x is 1536 and h is 512.\n"
+            "  - MoE bug: Concatenate experts (2048) then Multiply with router (512) — use Concat→Dense(hidden_dim) instead.\n"
+            "  - DenseNet bug: Add([x, concat]) where concat is wider than x — use Dense(hidden_dim) on concat.\n"
+            "THE FIX: Before every Add(), both tensors must be Dense(hidden_dim):\n"
+            "    x = tf.keras.layers.Dense(hidden_dim)(inp)   # stem first\n"
+            "    h = ... ; h = tf.keras.layers.Dense(hidden_dim)(h)\n"
+            "    x = tf.keras.layers.Add()([x, h])\n"
+            f"{arch_extra}"
         )
 
     prompt = (
@@ -991,10 +1372,14 @@ def _repair_perch_code(
             lines = lines[:-1]
         code = "\n".join(lines).strip()
     issues = _validate_perch_code(code) if code else ["No code found in repair response."]
+    if not issues:
+        shape_issues = _dry_run_build_head(code)
+        if shape_issues:
+            issues = shape_issues
     if issues:
         print(f"  [Coder] Repair still has issues: {issues}")
         return None
-    print("  [Coder] Repair code validated.")
+    print("  [Coder] Repair code validated (shape check passed).")
     return code
 
 
@@ -1002,7 +1387,17 @@ def _repair_perch_code(
 # Script harness — wraps Coder's slot code into a runnable training script
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _harness_subsample_block(head_train_max_samples: int | None) -> str:
+def _harness_subsample_block(
+    head_train_max_samples: int | None,
+    head_train_indices_path: Path | None = None,
+) -> str:
+    if head_train_indices_path is not None:
+        return f"""
+_HEAD_TRAIN_IDX = np.load(r"{head_train_indices_path}")
+_CACHE_N_FULL = len(X_train)
+X_train, S_train, y_train = X_train[_HEAD_TRAIN_IDX], S_train[_HEAD_TRAIN_IDX], y_train[_HEAD_TRAIN_IDX]
+print(f"  Head training subset: {{len(X_train)}} / {{_CACHE_N_FULL}} cached embeddings (fixed indices)")
+"""
     if not head_train_max_samples or head_train_max_samples <= 0:
         return ""
     cap = int(head_train_max_samples)
@@ -1045,8 +1440,9 @@ def _build_harness_prefix(
     train_cache: Path,
     val_cache: Path,
     head_train_max_samples: int | None = None,
+    head_train_indices_path: Path | None = None,
 ) -> str:
-    sub = _harness_subsample_block(head_train_max_samples)
+    sub = _harness_subsample_block(head_train_max_samples, head_train_indices_path)
     return f'''
 from __future__ import annotations
 import os, sys, tempfile
@@ -1183,8 +1579,11 @@ def _build_script(
     train_cache: Path,
     val_cache: Path,
     head_train_max_samples: int | None = None,
+    head_train_indices_path: Path | None = None,
 ) -> str:
-    prefix = _build_harness_prefix(train_cache, val_cache, head_train_max_samples)
+    prefix = _build_harness_prefix(
+        train_cache, val_cache, head_train_max_samples, head_train_indices_path
+    )
     return prefix + "\n\n" + slot_code + "\n\n" + HARNESS_SUFFIX
 
 
@@ -1192,22 +1591,26 @@ def _build_script(
 # Final retrain on full data (train + val combined)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_final_retrain_script(best_code: str, mem_dir: Path, cache_dir: Path) -> str:
+def _build_final_retrain_script(
+    best_code: str,
+    mem_dir: Path,
+    train_cache: Path,
+    val_cache: Path,
+) -> str:
     """Build final retrain script using the best iteration's coder-generated build_head + get_training_config."""
     return f"""
 import numpy as np
 import tensorflow as tf
 from pathlib import Path
 
-_CACHE_DIR = Path(r"{cache_dir}")
 _MEM_DIR   = Path(r"{mem_dir}")
 
 def _load(p):
     d = np.load(str(p), allow_pickle=True)
     return d["X"].astype(np.float32), d["y"].astype(np.float32)
 
-X_tr, y_tr = _load(_CACHE_DIR / "train_emb.npz")
-X_vl, y_vl = _load(_CACHE_DIR / "val_emb.npz")
+X_tr, y_tr = _load(Path(r"{train_cache}"))
+X_vl, y_vl = _load(Path(r"{val_cache}"))
 
 X_full = np.concatenate([X_tr, X_vl], axis=0)
 y_full = np.concatenate([y_tr, y_vl], axis=0)
@@ -1264,6 +1667,89 @@ print("FINAL_RETRAIN_DONE")
 # Main agent loop
 # ─────────────────────────────────────────────────────────────────────────────
 
+def run_fixed_head_train(
+    config: dict,
+    fixed_cfg: dict,
+    *,
+    train_cache: Path,
+    val_cache: Path,
+    mem_dir: Path,
+    code_dir: Path,
+) -> dict | None:
+    """Train a locked head on cached embeddings (stage 1c aug search). No LLM loop."""
+    head_path = Path(fixed_cfg["head_code_path"])
+    if not head_path.exists():
+        raise FileNotFoundError(f"Fixed head code not found: {head_path}")
+
+    head_code = head_path.read_text(encoding="utf-8")
+    indices_path = fixed_cfg.get("head_train_indices_path")
+    if indices_path:
+        indices_path = Path(indices_path)
+        if not indices_path.exists():
+            raise FileNotFoundError(f"Head train indices not found: {indices_path}")
+    else:
+        indices_path = None
+
+    py_exe = config.get("execution", {}).get("python_executable", "python3")
+    timeout = config.get("execution", {}).get("timeout_seconds", 1800)
+    ranking_metric = _ranking_metric_from_config(config)
+    executor = CodeExecutor(python_executable=py_exe, timeout_seconds=timeout)
+    evaluator = Evaluator(row_id_column_name="row_id")
+
+    label = fixed_cfg.get("label", "fixed_head_train")
+    print(f"\n  [Fixed train] {label}")
+    print(f"  train cache → {train_cache.name}")
+    if indices_path:
+        print(f"  head indices → {indices_path.name}")
+
+    script = _build_script(
+        head_code,
+        train_cache,
+        val_cache,
+        head_train_indices_path=indices_path,
+    )
+    code_dir.mkdir(parents=True, exist_ok=True)
+    script_path = code_dir / f"{label.replace('/', '_')[:60]}.py"
+    script_path.write_text(script, encoding="utf-8")
+
+    y_true_path = Path(tempfile.gettempdir()) / "_y_true.npy"
+    y_pred_path = Path(tempfile.gettempdir()) / "_y_pred.npy"
+    trained_head_path = Path(tempfile.gettempdir()) / "_trained_head.keras"
+    best_head_path = mem_dir / "best_head.keras"
+
+    result = executor.run_file(script_path)
+    metrics = None
+    if result.success and "EVAL_ARTIFACTS_SAVED" in (result.stdout or ""):
+        if y_true_path.exists() and y_pred_path.exists():
+            summary = evaluator.evaluate_from_files(y_true_path, y_pred_path)
+            metrics = summary.metrics
+
+    rank_val = _ranking_value_from_metrics(metrics)
+    print(f"  [Fixed train] {_format_iteration_metrics(metrics)}")
+
+    spec = dict(fixed_cfg.get("spec") or {})
+    spec.setdefault("mode", "fixed_head_train")
+    spec["aug_preset"] = fixed_cfg.get("aug_preset")
+
+    if rank_val is not None:
+        _promote_best_head(
+            rank_val=rank_val,
+            metrics=metrics,
+            best_score_ever=-1.0,
+            iteration=0,
+            spec=spec,
+            slot_code=head_code,
+            trained_head_path=trained_head_path,
+            best_head_path=best_head_path,
+            mem_dir=mem_dir,
+            ranking_metric=ranking_metric,
+        )
+    elif not result.success:
+        print(f"  [Fixed train] failed: {(result.stderr or '')[-600:]}")
+
+    return metrics
+
+
 def _ranking_metric_from_config(config: dict) -> str:
     return str(config.get("meta_agent", {}).get("primary_metric", PRIMARY_META_METRIC))
 
@@ -1279,6 +1765,253 @@ def _ranking_value_from_metrics(metrics: dict | None) -> float | None:
 
 def _format_iteration_metrics(metrics: dict | None) -> str:
     return format_metrics_dict(metrics, ranking_metric=PRIMARY_META_METRIC)
+
+
+def _promote_best_head(
+    *,
+    rank_val: float | None,
+    metrics: dict | None,
+    best_score_ever: float,
+    iteration: int,
+    spec: dict,
+    slot_code: str,
+    trained_head_path: Path,
+    best_head_path: Path,
+    mem_dir: Path,
+    ranking_metric: str,
+) -> float:
+    """Save head artifacts when a new best ranking score is achieved."""
+    if rank_val is None or rank_val <= best_score_ever:
+        return best_score_ever
+    import shutil
+
+    auc = metrics.get("macro_roc_auc") if metrics else None
+    ap = metrics.get("macro_average_precision") if metrics else None
+    med = metrics.get("median_per_class_auc") if metrics else None
+    if trained_head_path.exists():
+        shutil.copy2(str(trained_head_path), str(best_head_path))
+        _weights_src = Path(tempfile.gettempdir()) / "_trained_head.weights.h5"
+        if _weights_src.exists():
+            shutil.copy2(str(_weights_src), str(mem_dir / "best_head.weights.h5"))
+        with open(mem_dir / "best_model_info.json", "w") as _f:
+            json.dump({
+                "ranking_metric": ranking_metric,
+                "ranking_value": rank_val,
+                "macro_average_precision": ap,
+                "macro_roc_auc": auc,
+                "median_per_class_auc": med,
+                "auc": auc,
+                "iteration": iteration,
+                "spec": spec,
+            }, _f, indent=2)
+        _y_pred_tmp = Path(tempfile.gettempdir()) / "_y_pred.npy"
+        _y_true_tmp = Path(tempfile.gettempdir()) / "_y_true.npy"
+        if _y_pred_tmp.exists():
+            shutil.copy2(str(_y_pred_tmp), str(mem_dir / "best_val_preds.npy"))
+        if _y_true_tmp.exists():
+            shutil.copy2(str(_y_true_tmp), str(mem_dir / "y_val.npy"))
+        (mem_dir / "best_head_code.py").write_text(slot_code, encoding="utf-8")
+        print(
+            f"  [Best] NEW BEST {_format_iteration_metrics(metrics)} "
+            f"— head saved to {best_head_path.name}"
+        )
+    return rank_val
+
+
+def _execute_perch_iteration(
+    iteration: int,
+    *,
+    researcher: PerchResearcher,
+    coder_llm: LLMClient,
+    coder_temp: float,
+    executor: CodeExecutor,
+    evaluator: Evaluator,
+    memory: PerchExperimentMemory,
+    train_cache: Path,
+    val_cache: Path,
+    head_train_max: int | None,
+    code_dir: Path,
+) -> tuple[dict | None, str, dict | None]:
+    """One researcher→coder→train iteration. Returns (metrics, slot_code, spec)."""
+    spec = researcher.next_experiment()
+    slot_code = generate_perch_code(coder_llm, spec, coder_temp)
+    if slot_code is None:
+        print("  [Coder] All AST retries exhausted — falling back to safe default residual MLP.")
+        slot_code = _SAFE_DEFAULT_SLOT_CODE
+
+    _MAX_EXEC_ATTEMPTS = 5
+    metrics = None
+    final_slot_code = slot_code
+    y_true_path = Path(tempfile.gettempdir()) / "_y_true.npy"
+    y_pred_path = Path(tempfile.gettempdir()) / "_y_pred.npy"
+
+    for exec_attempt in range(1, _MAX_EXEC_ATTEMPTS + 1):
+        script = _build_script(
+            final_slot_code, train_cache, val_cache, head_train_max_samples=head_train_max
+        )
+        script_path = code_dir / f"iter_{iteration:03d}_a{exec_attempt}.py"
+        script_path.write_text(script, encoding="utf-8")
+
+        print(f"  [Executor] Attempt {exec_attempt}/{_MAX_EXEC_ATTEMPTS} — {script_path.name} ...")
+        result = executor.run_file(script_path)
+
+        if result.success and "EVAL_ARTIFACTS_SAVED" in (result.stdout or ""):
+            if y_true_path.exists() and y_pred_path.exists():
+                summary = evaluator.evaluate_from_files(y_true_path, y_pred_path)
+                metrics = summary.metrics
+            break
+
+        error_msg = (result.stderr or "")[-1500:]
+        print(f"  [Executor] Attempt {exec_attempt} failed.")
+        if error_msg:
+            print(f"  [Error]  {error_msg[-600:]}")
+
+        if exec_attempt == _MAX_EXEC_ATTEMPTS:
+            print(f"  [Coder] All {_MAX_EXEC_ATTEMPTS} execution attempts exhausted — skipping iteration.")
+            break
+
+        repaired = _repair_perch_code(coder_llm, spec, final_slot_code, error_msg, coder_temp)
+        if repaired is None:
+            print("  [Coder] Repair failed — skipping remaining attempts.")
+            break
+        final_slot_code = repaired
+
+    return metrics, final_slot_code, spec
+
+
+def _run_refine_loop(
+    config: dict,
+    refine_cfg: dict,
+    *,
+    researcher: PerchResearcher,
+    coder_llm: LLMClient,
+    coder_temp: float,
+    executor: CodeExecutor,
+    evaluator: Evaluator,
+    memory: PerchExperimentMemory,
+    train_cache: Path,
+    val_cache: Path,
+    head_train_max: int | None,
+    code_dir: Path,
+    mem_dir: Path,
+    ranking_metric: str,
+) -> None:
+    """Adaptive exploit loop: initial tries, +bonus on each improvement, hard cap."""
+    initial = max(1, int(refine_cfg.get("initial_iterations", 5)))
+    bonus = max(1, int(refine_cfg.get("bonus_iterations_on_improve", 5)))
+    max_total = max(initial, int(refine_cfg.get("max_iterations_per_model", 25)))
+    seed_score = float(refine_cfg.get("seed_score", -1.0))
+    locked = refine_cfg.get("locked_arch_type") or (refine_cfg.get("seed_spec") or {}).get(
+        "arch_type", "residual_mlp"
+    )
+
+    parent_dir = refine_cfg.get("parent_memory_dir")
+    if parent_dir and memory.total() == 0:
+        memory.seed_from_stage_1a(
+            Path(parent_dir),
+            arch_type=str(locked),
+            aug_baseline=str(refine_cfg.get("aug_baseline", "?")),
+            seed_score=seed_score,
+            seed_spec=dict(refine_cfg.get("seed_spec") or {}),
+        )
+
+    seed_spec = refine_cfg.get("seed_spec") or {}
+    seed_ap = refine_cfg.get("seed_macro_ap")
+    if seed_ap is None:
+        seed_ap = seed_spec.get("macro_average_precision") or refine_cfg.get(
+            "macro_average_precision"
+        )
+    seed_auc = refine_cfg.get("seed_macro_auc")
+    if seed_auc is None:
+        seed_auc = refine_cfg.get("macro_roc_auc")
+    seed_med = refine_cfg.get("seed_median_auc")
+    if seed_med is None:
+        seed_med = refine_cfg.get("median_per_class_auc")
+
+    print(f"\n  REFINE CAMPAIGN — locked arch_type: {locked}")
+    print(f"  Aug baseline: {refine_cfg.get('aug_baseline', '?')}")
+    seed_metrics = {
+        "status": "success",
+        "macro_average_precision": seed_ap,
+        "macro_roc_auc": seed_auc,
+        "median_per_class_auc": seed_med,
+        "ranking_metric": ranking_metric,
+    }
+    print(f"  1a champion to beat: {format_metrics_dict(seed_metrics, ranking_metric=ranking_metric)}")
+    print(
+        f"  Budget: {initial} initial tries, +{bonus} on each improvement, "
+        f"max {max_total} total iterations"
+    )
+
+    best_score_ever = max(seed_score, -1.0)
+    _prior = memory.best_runs(1)
+    if _prior:
+        best_score_ever = max(best_score_ever, memory._ranking_value(_prior[0]))
+
+    tries_left = initial
+    total_done = 0
+    iteration = 0
+    trained_head_path = Path(tempfile.gettempdir()) / "_trained_head.keras"
+    best_head_path = mem_dir / "best_head.keras"
+
+    while total_done < max_total and tries_left > 0:
+        iteration += 1
+        total_done += 1
+        tries_left -= 1
+
+        print(f"\n{'─'*60}")
+        print(
+            f"  REFINE {iteration}  (done {total_done}/{max_total}, "
+            f"queue {tries_left} remaining)"
+        )
+        print(f"{'─'*60}")
+
+        metrics, slot_code, spec = _execute_perch_iteration(
+            iteration,
+            researcher=researcher,
+            coder_llm=coder_llm,
+            coder_temp=coder_temp,
+            executor=executor,
+            evaluator=evaluator,
+            memory=memory,
+            train_cache=train_cache,
+            val_cache=val_cache,
+            head_train_max=head_train_max,
+            code_dir=code_dir,
+        )
+
+        rank_val = _ranking_value_from_metrics(metrics)
+        print(f"  [Result] {_format_iteration_metrics(metrics)}")
+        memory.log(spec=spec, metrics=metrics, code=slot_code)
+
+        if rank_val is not None and rank_val > best_score_ever:
+            prev = best_score_ever
+            best_score_ever = _promote_best_head(
+                rank_val=rank_val,
+                metrics=metrics,
+                best_score_ever=best_score_ever,
+                iteration=iteration,
+                spec=spec,
+                slot_code=slot_code,
+                trained_head_path=trained_head_path,
+                best_head_path=best_head_path,
+                mem_dir=mem_dir,
+                ranking_metric=ranking_metric,
+            )
+            gain = bonus_add = min(bonus, max_total - total_done)
+            tries_left += bonus_add
+            print(
+                f"  [Refine] Improved {ranking_metric} {prev:.5f} → {best_score_ever:.5f} "
+                f"| +{bonus_add} bonus tries (queue={tries_left})"
+            )
+        elif rank_val is not None:
+            print(f"  [Refine] No improvement (best {ranking_metric}={best_score_ever:.5f})")
+
+        best = memory.best_runs(1)
+        if best:
+            print(f"  [Best so far] {memory._format_run_score(best[0])}")
+
+    print(f"\n  [Refine] Finished: {total_done} iterations, best {ranking_metric}={best_score_ever:.5f}")
 
 
 def run(config: dict) -> None:
@@ -1308,7 +2041,7 @@ def run(config: dict) -> None:
         head_train_max = int(head_train_max)
     max_iterations = config.get("max_iterations", 10)
 
-    researcher_model = config.get("researcher", {}).get("model",       "deepseek-r1:8b")
+    researcher_model = config.get("researcher", {}).get("model",       "gemma3:4b")
     coder_model      = config.get("llm",        {}).get("model",       "deepseek-r1:8b")
     provider         = config.get("llm",        {}).get("provider",    "ollama")
     researcher_temp  = config.get("researcher", {}).get("temperature", 0.6)
@@ -1373,31 +2106,57 @@ def run(config: dict) -> None:
     train_cache = cache_dir / (
         f"train_emb_{preset}.npz" if preset else "train_emb.npz"
     )
-    # Meta staged 1a: one val cache shared across aug baselines (val has no train aug).
-    val_cache = (
-        cache_dir.parent / "val_emb.npz" if preset else cache_dir / "val_emb.npz"
-    )
+    # Shared soundscape val cache (meta-agent: logs/meta_agent/perch_cache/val_emb.npz).
+    val_cache = Path(perch_paths.get("val_cache_path") or (cache_dir.parent / "val_emb.npz"))
     aug_config = config.get("augmentation")
     train_meta_path = _embedding_cache_meta_path(train_cache)
-    if force_rebuild:
-        for p in (train_cache, train_meta_path):
+    clip_subset_path = config.get("perch_embed_clip_subset")
+    clip_rows = None
+    if clip_subset_path:
+        clip_rows = _load_clip_rows_jsonl(Path(clip_subset_path))
+        print(f"  [Cache] Clip subset mode: {len(clip_rows)} clips (fast aug search)")
+
+    clips_sidecar = _embedding_cache_clips_path(train_cache)
+    if force_rebuild and not config.get("perch_build_val_only"):
+        for p in (train_cache, train_meta_path, clips_sidecar):
             if p.exists():
                 p.unlink()
                 print(f"  [Cache] Removed {p.name} (force_rebuild_cache)")
 
+    if config.get("perch_build_val_only"):
+        if not val_cache.exists():
+            print("\n  [Setup] Building shared validation embedding cache...")
+            ok = _build_val_cache(
+                sess, inp_name, emb_idx, logit_idx,
+                MAPPED_POS, MAPPED_BC_IDX, proxy_map, NO_LABEL,
+                paths.train_soundscapes_dir, paths.train_soundscapes_labels_csv,
+                species_to_idx, n_species, val_cache, embed_bs,
+            )
+            if not ok:
+                raise RuntimeError("Could not build soundscape val cache for stage 1c.")
+        else:
+            import numpy as np
+            d = np.load(str(val_cache))
+            print(f"  [Cache] Reusing existing val embeddings → {val_cache}")
+            print(f"  [Cache] Val cache loaded: X={d['X'].shape}  y={d['y'].shape}")
+        print("\n  [Cache-only] Val embedding cache ready — exiting.")
+        return
+
     if not train_cache.exists():
-        print("\n  [Setup] Building training embedding cache (runs once, ~30-60 min)...")
+        est = "a few minutes" if clip_rows else "~30-60 min"
+        print(f"\n  [Setup] Building training embedding cache (runs once, {est})...")
         _build_train_cache(
             sess, inp_name, emb_idx, logit_idx,
             MAPPED_POS, MAPPED_BC_IDX, proxy_map, NO_LABEL,
             train_df, species_to_idx, paths.train_audio_dir, n_species,
             train_cache,
-            sample_frac=sample_frac,
-            max_samples=max_samples,
+            sample_frac=1.0 if clip_rows else sample_frac,
+            max_samples=None if clip_rows else max_samples,
             batch_size=embed_bs,
             aug_config=aug_config,
             soundscapes_dir=paths.train_soundscapes_dir,
             aug_preset=preset,
+            clip_rows=clip_rows,
         )
     else:
         import numpy as np
@@ -1411,10 +2170,6 @@ def run(config: dict) -> None:
                 f"n={cached.get('n_samples', d['X'].shape[0])}"
             )
         print(f"  [Cache] Train cache loaded: X={d['X'].shape}  y={d['y'].shape}")
-
-    if force_rebuild and val_cache.exists():
-        val_cache.unlink()
-        print(f"  [Cache] Removed {val_cache.name} (force_rebuild_cache)")
 
     if not val_cache.exists():
         print("\n  [Setup] Building validation embedding cache...")
@@ -1433,18 +2188,68 @@ def run(config: dict) -> None:
         print(f"  [Cache] Reusing existing val embeddings → {val_cache}")
         print(f"  [Cache] Val cache loaded: X={d['X'].shape}  y={d['y'].shape}")
 
+    if config.get("perch_build_cache_only"):
+        print("\n  [Cache-only] Train embedding cache ready — exiting (no head training).")
+        return
+
+    if config.get("perch_build_val_only"):
+        print("\n  [Cache-only] Val embedding cache ready — exiting.")
+        return
+
+    fixed_cfg = config.get("perch_fixed_train") or {}
+    if fixed_cfg.get("enabled"):
+        run_fixed_head_train(
+            config,
+            fixed_cfg,
+            train_cache=train_cache,
+            val_cache=val_cache,
+            mem_dir=mem_dir,
+            code_dir=code_dir,
+        )
+        return
+
     # ── Step 7: Set up agent components ──────────────────────────────────
     researcher_llm = LLMClient(provider=provider, model=researcher_model)
     coder_llm      = LLMClient(provider=provider, model=coder_model)
     ranking_metric = _ranking_metric_from_config(config)
-    memory         = ExperimentMemory(mem_dir, ranking_metric=ranking_metric)
-    researcher     = PerchResearcher(researcher_llm, memory, temperature=researcher_temp)
+    memory = PerchExperimentMemory(mem_dir, ranking_metric=ranking_metric)
+    memory.attach_summarizer(researcher_llm)
+    if memory.total() > memory._digest.get("summarized_run_count", 0):
+        print("  [Memory] Catching up compact summaries for prior runs...")
+        memory._catch_up_summaries()
+
+    refine_cfg = config.get("perch_refine") or {}
+    refine_enabled = bool(refine_cfg.get("enabled"))
+    if refine_enabled:
+        locked_arch = refine_cfg.get("locked_arch_type") or (refine_cfg.get("seed_spec") or {}).get(
+            "arch_type", "residual_mlp"
+        )
+        researcher = PerchResearcher(
+            researcher_llm,
+            memory,
+            temperature=researcher_temp,
+            refine_mode=True,
+            locked_arch_type=str(locked_arch),
+            seed_spec=refine_cfg.get("seed_spec"),
+            seed_score=refine_cfg.get("seed_score"),
+        )
+    else:
+        researcher = PerchResearcher(researcher_llm, memory, temperature=researcher_temp)
+
     executor       = CodeExecutor(python_executable=py_exe, timeout_seconds=timeout)
     evaluator      = Evaluator(row_id_column_name="row_id")
 
     print(f"\n  Researcher model : {researcher_model}")
     print(f"  Coder model      : {coder_model}")
-    print(f"  Max iterations   : {max_iterations}")
+    if refine_enabled:
+        print("  Mode             : REFINE (stage 1b — locked arch, adaptive budget)")
+        print(
+            f"  Refine budget    : {refine_cfg.get('initial_iterations', 5)} initial, "
+            f"+{refine_cfg.get('bonus_iterations_on_improve', 5)} on improve, "
+            f"max {refine_cfg.get('max_iterations_per_model', 25)}"
+        )
+    else:
+        print(f"  Max iterations   : {max_iterations}")
     if head_train_max and head_train_max > 0:
         print(
             f"  Head train cap   : {head_train_max} embeddings per iteration "
@@ -1458,7 +2263,13 @@ def run(config: dict) -> None:
     if prior:
         best = memory.best_runs(1)
         best_str = memory._format_run_score(best[0]) if best else "none"
-        print(f"  Memory           : {prior} prior runs | best {best_str}")
+        snap = memory._digest.get("best_snapshot") or {}
+        conf = snap.get("confidence_tier", "?")
+        print(
+            f"  Memory           : {prior} prior runs | best {best_str} | "
+            f"compact digest ({int(memory._digest.get('summarized_run_count', 0))} summarized, "
+            f"confidence {conf})"
+        )
     else:
         print("  Memory           : fresh start")
     print("=" * 60)
@@ -1470,6 +2281,48 @@ def run(config: dict) -> None:
     best_head_path     = mem_dir / "best_head.keras"
     _prior_best = memory.best_runs(1)
     best_score_ever = memory._ranking_value(_prior_best[0]) if _prior_best else -1.0
+
+    if refine_enabled:
+        _run_refine_loop(
+            config,
+            refine_cfg,
+            researcher=researcher,
+            coder_llm=coder_llm,
+            coder_temp=coder_temp,
+            executor=executor,
+            evaluator=evaluator,
+            memory=memory,
+            train_cache=train_cache,
+            val_cache=val_cache,
+            head_train_max=head_train_max,
+            code_dir=code_dir,
+            mem_dir=mem_dir,
+            ranking_metric=ranking_metric,
+        )
+        print(f"\n{'='*60}")
+        print("  DONE (refine campaign)")
+        best = memory.best_runs(3)
+        for i, r in enumerate(best, 1):
+            print(f"  #{i} {memory._format_run_score(r)} | {r['reasoning'][:80]}")
+        print(f"{'='*60}")
+        if config.get("perch", {}).get("skip_final_retrain", False):
+            print("\n  Final retrain skipped (perch.skip_final_retrain=true).")
+            return
+        best_runs = memory.best_runs(1)
+        if best_runs and (mem_dir / "best_head_code.py").exists():
+            best_code = (mem_dir / "best_head_code.py").read_text(encoding="utf-8")
+            print(f"\n{'='*60}")
+            print("  FINAL RETRAIN — full data (refine winner)")
+            print(f"{'='*60}")
+            final_script = _build_final_retrain_script(
+                best_code, mem_dir, train_cache, val_cache
+            )
+            final_script_path = code_dir / "final_retrain.py"
+            final_script_path.write_text(final_script, encoding="utf-8")
+            result = executor.run_file(final_script_path)
+            if result.success and "FINAL_RETRAIN_DONE" in (result.stdout or ""):
+                print(f"  Final head saved → {mem_dir / 'final_head.weights.h5'}")
+        return
 
     # ── Iteration 0: mandatory linear-probe baseline (fresh starts only) ─────
     if memory.total() == 0:
@@ -1624,7 +2477,9 @@ def run(config: dict) -> None:
         print(f"\n{'='*60}")
         print(f"  FINAL RETRAIN — full data (val AUC={best_auc:.5f})")
         print(f"{'='*60}")
-        final_script      = _build_final_retrain_script(best_code, mem_dir, cache_dir)
+        final_script      = _build_final_retrain_script(
+            best_code, mem_dir, train_cache, val_cache
+        )
         final_script_path = code_dir / "final_retrain.py"
         final_script_path.write_text(final_script, encoding="utf-8")
         result = executor.run_file(final_script_path)

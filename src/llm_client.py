@@ -1,8 +1,14 @@
 import requests
 
 class LLMClient:
-    def __init__(self, provider: str = "ollama", model: str = "llama3.2:3b"):
+    def __init__(
+        self,
+        provider: str = "ollama",
+        model: str = "llama3.2:3b",
+        timeout_seconds: float = 600,
+    ):
         self.model_name = model
+        self.timeout_seconds = float(timeout_seconds)
         if provider.lower() == "ollama":
             self.base_url = "http://localhost:11434/api/chat"
         else:
@@ -14,7 +20,7 @@ class LLMClient:
                 self.base_url,
                 json={"model": self.model_name, "messages": messages, "stream": False,
                       "options": {"temperature": temperature}},
-                timeout=600,
+                timeout=self.timeout_seconds,
             )
             resp.raise_for_status()
             return resp.json()["message"]["content"]

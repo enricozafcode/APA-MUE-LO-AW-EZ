@@ -259,6 +259,20 @@ class SoundscapeEvalSuite:
         )
         return self.score_from_pred_df(pred_df)
 
+    def score_perch_mem_dir(self, archive_dir: Path) -> SoundscapeScore | None:
+        """
+        Score from ``best_val_preds.npy`` saved during cached-val head training
+        (avoids re-running ONNX on every soundscape window).
+        """
+        archive_dir = Path(archive_dir)
+        preds_path = archive_dir / "best_val_preds.npy"
+        if not preds_path.exists():
+            return None
+        preds = np.load(preds_path).astype(np.float32)
+        if preds.shape != self.y_true.shape:
+            return None
+        return self.score_arrays(preds)
+
     def score_birdnet_val_preds(
         self,
         preds: np.ndarray,
