@@ -319,10 +319,17 @@ def resolve_perch_onnx_path(onnx_path: Path | None = None) -> Path:
 def load_perch_archive(archive_dir: Path) -> dict[str, Any]:
     """Load Perch head + species mapping artifacts from a submission archive."""
     archive_dir = Path(archive_dir)
-    head_path = archive_dir / "best_head.keras"
-    if not head_path.exists():
-        head_path = archive_dir / "final_head.keras"
-    if not head_path.exists():
+    head_path = None
+    for candidate in (
+        "final_head_pseudo.keras",
+        "best_head.keras",
+        "final_head.keras",
+    ):
+        p = archive_dir / candidate
+        if p.exists():
+            head_path = p
+            break
+    if head_path is None:
         raise FileNotFoundError(f"No Perch head in {archive_dir}")
 
     species_cols = json.loads((archive_dir / "species_cols.json").read_text(encoding="utf-8"))

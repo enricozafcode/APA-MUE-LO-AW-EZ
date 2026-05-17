@@ -1495,6 +1495,17 @@ def _save_history(history: list[dict], path: Path) -> None:
 
 def agent_loop(config: dict) -> None:
     global LOGS_DIR
+    if (
+        config.get("birdnet_staged")
+        or config.get("birdnet_build_cache_only")
+        or (config.get("birdnet_refine") or {}).get("enabled")
+        or (config.get("birdnet_fixed_train") or {}).get("enabled")
+    ):
+        from birdnet_staged import dispatch_birdnet_staged
+
+        dispatch_birdnet_staged(config)
+        return
+
     bn_cfg = config.get("birdnet", {})
     if bn_cfg.get("logs_dir"):
         LOGS_DIR = Path(bn_cfg["logs_dir"])

@@ -6,15 +6,22 @@ Legacy pipeline (``meta_agent.pipeline``: ``legacy``):
   Phase 1–3: CNN / BirdNET / Perch single-pass agents
   Phase 4: Ensemble
 
-Staged pipeline (``meta_agent.pipeline``: ``staged_1a``) — architecture search only:
-  For each track (CNN, BirdNET, Perch) and each aug baseline (light / medium / high):
-    run the track agent with locked augmentation → pick track winner by soundscape AP.
+Staged pipeline — **sequential tracks** (``meta_agent.track_order``):
 
-Stage 1b (optional): refine top-K perch models from 1a with adaptive iteration budget.
-Stage 1c: LLM aug explore (wide search) + optional refine on winner; fixed 2000 head-train indices.
+  **Tournament** (``tournament.enabled`` or ``pipeline: staged_tournament``):
+    Phase A: each track through 1c on sample → ``tournament_results.json`` picks global winner.
+    Phase B: ``pipeline: staged_finalize`` (or ``tournament.auto_finalize: true``) runs 1d+1e
+    for the winner only (full data + pseudo).
+
+  **Non-tournament** (``staged_full`` with ``tournament.enabled: false``):
+    Each track runs through ``pipeline`` max stage (1a…1e) before the next track starts.
+
+Stage 1b (optional): refine top-K models from 1a with adaptive iteration budget.
+Stage 1c: try fixed embedding aug presets (default: medium + high) with locked 1b head; optional ``mode: llm``.
 Stage 1d: full-data final retrain (best aug + best head) → ``logs/meta_agent/perch/final/``.
+Stage 1e: pseudo-label unlabeled soundscapes (hardcoded thresholds) + fine-tune the 1d head.
 Use ``pipeline: staged_1c_only`` to run only 1c+1d after 1a/1b are done.
-Set ``stage_1c.mode`` to ``llm`` | ``presets`` | ``both``; tune ``explore`` / ``refine`` blocks in config.
+Set ``stage_1c.mode`` to ``presets`` (recommended) | ``llm`` | ``both``; ``aug_presets``: [``medium``, ``high``].
 
 Run:
     python src/meta_agent.py --config configs/agent_config.json
@@ -37,6 +44,7 @@ import pandas as pd
 from augmentation import (
     describe_baseline,
     get_aug_search_preset,
+    describe_embedding_aug_compact,
     get_audio_embedding_aug,
     get_cnn_baseline_aug,
     list_aug_search_preset_names,
@@ -75,6 +83,23 @@ HEAD_TRAIN_INDICES = META_LOGS / "perch" / "head_train_indices_2000.npy"
 HEAD_TRAIN_CLIPS = META_LOGS / "perch" / "head_train_clips_2000.jsonl"
 PERCH_SHARED_VAL_CACHE = META_LOGS / "perch_cache" / "val_emb.npz"
 PERCH_FINAL_DIR = META_LOGS / "perch" / "final"
+CNN_FINAL_DIR = META_LOGS / "cnn" / "final"
+CNN_ARCH_1B_RESULTS = META_LOGS / "cnn_arch_search_1b_results.json"
+CNN_ARCH_1C_RESULTS = META_LOGS / "cnn_arch_search_1c_results.json"
+CNN_ARCH_1D_RESULTS = META_LOGS / "cnn_arch_search_1d_results.json"
+CNN_ARCH_1E_RESULTS = META_LOGS / "cnn_arch_search_1e_results.json"
+CNN_PSEUDO_LABELS_NPZ = META_LOGS / "cnn_cache" / "pseudo_labels.npz"
+BIRDNET_SHARED_VAL_CACHE = META_LOGS / "birdnet_cache" / "val_emb.npz"
+BIRDNET_FINAL_DIR = META_LOGS / "birdnet" / "final"
+BIRDNET_ARCH_1B_RESULTS = META_LOGS / "birdnet_arch_search_1b_results.json"
+BIRDNET_ARCH_1C_RESULTS = META_LOGS / "birdnet_arch_search_1c_results.json"
+BIRDNET_ARCH_1D_RESULTS = META_LOGS / "birdnet_arch_search_1d_results.json"
+BIRDNET_ARCH_1E_RESULTS = META_LOGS / "birdnet_arch_search_1e_results.json"
+BIRDNET_PSEUDO_LABELS_NPZ = META_LOGS / "birdnet_cache" / "pseudo_labels.npz"
+TOURNAMENT_RESULTS = META_LOGS / "tournament_results.json"
+ARCH_SEARCH_1D_RESULTS = META_LOGS / "arch_search_1d_results.json"
+ARCH_SEARCH_1E_RESULTS = META_LOGS / "arch_search_1e_results.json"
+PSEUDO_LABELS_NPZ = META_LOGS / "perch_cache" / "pseudo_labels.npz"
 
 SR           = 32_000
 CLIP_SEC     = 5.0
@@ -107,6 +132,54 @@ def _print_soundscape_score(label: str, score: SoundscapeScore | None) -> None:
     )
 
 
+def _safe_copy2(src: Path, dst: Path) -> None:
+    """Copy file; no-op when source and destination are the same path."""
+    src_r, dst_r = Path(src).resolve(), Path(dst).resolve()
+    if src_r == dst_r:
+        return
+    shutil.copy2(src_r, dst_r)
+
+
+def _print_1c_phase_header(title: str, *, lines: list[str] | None = None) -> None:
+    print("\n" + "=" * 60)
+    print(f"  {title}")
+    print("=" * 60)
+    for line in lines or []:
+        print(f"  {line}")
+
+
+def _short_aug_display_name(preset: str, spec: dict | None = None) -> str:
+    if spec and spec.get("preset_name"):
+        return str(spec["preset_name"])[:32]
+    p = str(preset)
+    for prefix in ("aug_r", "aug_"):
+        if p.startswith(prefix):
+            parts = p.split("_", 3)
+            if len(parts) >= 4:
+                return parts[3][:32]
+    return p[:32]
+
+
+def _print_1c_iteration_result(
+    idx: int,
+    total: int,
+    label: str,
+    score: SoundscapeScore | None,
+    *,
+    subset_ap: float | None = None,
+    failed: bool = False,
+) -> None:
+    if failed:
+        print(f"  {idx:2d}/{total}  {label:<30}  FAILED")
+        return
+    ap = float(score.primary_value) if score else float("nan")
+    auc = float(score.competition_macro_auc) if score else float("nan")
+    line = f"  {idx:2d}/{total}  {label:<30}  soundscape_AP={ap:.5f}  macro_AUC={auc:.5f}"
+    if subset_ap is not None:
+        line += f"  subset_AP={subset_ap:.5f}"
+    print(line)
+
+
 def _meta_cfg(config: dict) -> dict:
     return config.get("meta_agent", {})
 
@@ -130,6 +203,42 @@ def _stage_1d_cfg(config: dict) -> dict:
     return dict(_meta_cfg(config).get("stage_1d") or {})
 
 
+def _stage_1e_cfg(config: dict) -> dict:
+    return dict(_meta_cfg(config).get("stage_1e") or {})
+
+
+def _tournament_cfg(config: dict) -> dict:
+    return dict(_meta_cfg(config).get("tournament") or {})
+
+
+def _use_tournament_mode(config: dict, pipeline: str) -> bool:
+    """Phase A: all tracks through best aug on sample (1c), then pick one global winner."""
+    pipeline = str(pipeline).lower()
+    if pipeline == "staged_finalize":
+        return False
+    if pipeline in ("staged_tournament",):
+        return True
+    return bool(_tournament_cfg(config).get("enabled", False))
+
+
+def _should_auto_finalize(config: dict, pipeline: str) -> bool:
+    if str(pipeline).lower() == "staged_finalize":
+        return True
+    return bool(_tournament_cfg(config).get("auto_finalize", False))
+
+
+def _primary_value_from_score(score: dict | None, metric: str) -> float | None:
+    if not score:
+        return None
+    if score.get("primary_value") is not None:
+        return float(score["primary_value"])
+    if metric == PRIMARY_META_METRIC:
+        v = score.get("macro_average_precision")
+    else:
+        v = score.get("competition_macro_auc") or score.get("macro_roc_auc")
+    return float(v) if v is not None else None
+
+
 def _arch_iters_per_baseline(config: dict, track_iters: int) -> int:
     """Iterations per aug baseline when running staged 1a."""
     per = _meta_cfg(config).get("arch_search_iterations_per_aug")
@@ -140,37 +249,776 @@ def _arch_iters_per_baseline(config: dict, track_iters: int) -> int:
     return max(1, int(track_iters) // n_aug)
 
 
-def _score_cnn_arch_search(logs_dir: Path, suite: SoundscapeEvalSuite) -> SoundscapeScore | None:
-    """Score best CNN search run from saved soundscape eval artifacts (no final keras needed)."""
-    rr_path = logs_dir / "random_results.json"
-    if not rr_path.exists():
+def _embed_max_samples(config: dict) -> int | None:
+    """Cap audio→embedding cache builds (Perch/BirdNET) during meta-agent search."""
+    v = _meta_cfg(config).get("arch_search_embed_max_samples")
+    if v is None:
+        v = config.get("perch", {}).get("max_train_samples")
+    return int(v) if v is not None else None
+
+
+_PIPELINE_MAX_STAGE = {
+    "staged_1a": "1a",
+    "staged_1a_1b": "1b",
+    "staged_1a_1b_1c": "1c",
+    "staged_full": "1e",
+}
+
+_STAGE_RANK = {"1a": 1, "1b": 2, "1c": 3, "1d": 4, "1e": 5}
+
+
+def _track_order(config: dict) -> list[str]:
+    """Order in which full track pipelines run (one track finished before the next starts)."""
+    meta = _meta_cfg(config)
+    raw = meta.get("track_order", ["cnn", "birdnet", "perch"])
+    valid = {"cnn", "birdnet", "perch"}
+    order = [str(t).lower() for t in raw if str(t).lower() in valid]
+    return order or ["cnn", "birdnet", "perch"]
+
+
+def _track_iterations(config: dict, track: str) -> int:
+    meta = _meta_cfg(config)
+    keys = {
+        "cnn": "cnn_iterations",
+        "birdnet": "birdnet_iterations",
+        "perch": "perch_iterations",
+    }
+    return int(meta.get(keys[track], 0))
+
+
+def _pipeline_max_stage(pipeline: str) -> str:
+    return _PIPELINE_MAX_STAGE.get(str(pipeline).lower(), "1e")
+
+
+def _pipeline_includes_stage(pipeline: str, stage: str) -> bool:
+    max_s = _pipeline_max_stage(pipeline)
+    return _STAGE_RANK[stage] <= _STAGE_RANK[max_s]
+
+
+def _load_1a_summary(config: dict) -> dict:
+    metric = _meta_primary_metric(config)
+    baselines = _baseline_names(config)
+    if ARCH_SEARCH_1A_RESULTS.exists():
+        try:
+            summary = json.loads(ARCH_SEARCH_1A_RESULTS.read_text(encoding="utf-8"))
+            summary.setdefault("tracks", {})
+            return summary
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {
+        "stage": "1a_arch_search",
+        "primary_metric": metric,
+        "aug_baselines": baselines,
+        "track_order": _track_order(config),
+        "tracks": {},
+    }
+
+
+def _save_1a_summary(summary: dict) -> None:
+    META_LOGS.mkdir(parents=True, exist_ok=True)
+    ARCH_SEARCH_1A_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+
+def _1a_track_done(summary: dict, track: str) -> bool:
+    entry = (summary.get("tracks") or {}).get(track)
+    return bool(entry and entry.get("winner"))
+
+
+def _track_active(config: dict, track: str, pipeline: str) -> bool:
+    """True if this track should run (1a and/or follow-on stages enabled)."""
+    if _track_iterations(config, track) > 0:
+        return True
+    if track == "cnn":
+        return any(
+            _pipeline_includes_stage(pipeline, stage)
+            and _cnn_stage_cfg(config, f"stage_{stage}").get("enabled", False)
+            for stage in ("1b", "1c", "1d", "1e")
+        )
+    if track == "perch":
+        return any(
+            _pipeline_includes_stage(pipeline, stage)
+            and {
+                "1b": _stage_1b_cfg,
+                "1c": _stage_1c_cfg,
+                "1d": _stage_1d_cfg,
+                "1e": _stage_1e_cfg,
+            }[stage](config).get("enabled", False)
+            for stage in ("1b", "1c", "1d", "1e")
+        )
+    if track == "birdnet":
+        if _track_iterations(config, track) > 0:
+            return True
+        return any(
+            _pipeline_includes_stage(pipeline, stage)
+            and _birdnet_stage_cfg(config, f"birdnet_stage_{stage}").get("enabled", False)
+            for stage in ("1b", "1c", "1d", "1e")
+        )
+    return False
+
+
+def run_stage_1a_for_track(
+    track: str,
+    config: dict,
+    suite: SoundscapeEvalSuite,
+) -> dict | None:
+    """Stage 1a architecture search for a single track (CNN / birdnet / perch)."""
+    track = track.lower()
+    iters = _track_iterations(config, track)
+    if iters <= 0:
+        print(f"\n  [1a / {track}] Skipped ({track}_iterations=0)")
         return None
-    results = json.loads(rr_path.read_text(encoding="utf-8"))
-    ok = [r for r in results if r.get("success")]
+
+    baselines = _baseline_names(config)
+    metric = _meta_primary_metric(config)
+    cnn_max = int(_meta_cfg(config).get("arch_search_cnn_max_samples", 2000))
+    embed_frac = float(_meta_cfg(config).get("arch_search_embed_sample_frac", 0.5))
+    embed_max = _embed_max_samples(config)
+
+    per = _arch_iters_per_baseline(config, iters)
+
+    print("\n" + "=" * 60)
+    print(f"  STAGE 1a — {track.upper()} architecture search")
+    print(f"  Baselines: {', '.join(baselines)}  |  planner rounds/baseline: {per}")
+    print(f"  Ranking metric: {metric}")
+    print("=" * 60)
+
+    if track == "cnn":
+        runs = [_run_cnn_baseline_1a(config, b, per, cnn_max, suite) for b in baselines]
+    elif track == "birdnet":
+        runs = [_run_birdnet_baseline_1a(config, b, per, embed_frac, suite) for b in baselines]
+    elif track == "perch":
+        runs = [
+            _run_perch_baseline_1a(config, b, per, embed_frac, embed_max, suite)
+            for b in baselines
+        ]
+    else:
+        return None
+
+    winner = _pick_track_winner(runs, metric)
+    entry = {"runs": runs, "winner": winner}
+    if winner:
+        sc = winner.get("score") or {}
+        if track == "cnn":
+            print(
+                f"\n  ★ CNN 1a winner: aug={winner.get('aug_baseline')}  "
+                f"{format_soundscape_metrics_line(macro_ap=sc.get('macro_average_precision'), macro_auc=sc.get('competition_macro_auc'), median_auc=sc.get('median_per_class_auc'), ranking_metric=metric)}"
+            )
+        elif track == "birdnet":
+            print(
+                f"\n  ★ BirdNET 1a winner: aug={winner.get('aug_baseline')}  "
+                f"{format_soundscape_metrics_line(macro_ap=sc.get('macro_average_precision'), macro_auc=sc.get('competition_macro_auc'), median_auc=sc.get('median_per_class_auc'), ranking_metric=metric)}"
+            )
+        else:
+            print(f"\n  ★ {track.upper()} 1a winner: aug={winner.get('aug_baseline')}")
+    return entry
+
+
+def _stage_included(max_stage: str, stage: str) -> bool:
+    return _STAGE_RANK[stage] <= _STAGE_RANK[max_stage]
+
+
+def _run_cnn_track_post_1a(
+    config: dict, suite: SoundscapeEvalSuite, max_stage: str
+) -> None:
+    if _stage_included(max_stage, "1b") and _cnn_stage_cfg(config, "stage_1b").get(
+        "enabled", False
+    ):
+        run_stage_1b_cnn_refine(config, suite)
+    if _stage_included(max_stage, "1c") and _cnn_stage_cfg(config, "stage_1c").get(
+        "enabled", False
+    ):
+        run_stage_1c_cnn_aug_search(config, suite)
+    if _stage_included(max_stage, "1d") and _cnn_stage_cfg(config, "stage_1d").get(
+        "enabled", False
+    ):
+        if not _skip_if_completed(config, CNN_ARCH_1D_RESULTS, "CNN 1d"):
+            run_stage_1d_cnn_final_train(config)
+    if _stage_included(max_stage, "1e") and _cnn_stage_cfg(config, "stage_1e").get(
+        "enabled", False
+    ):
+        if not _skip_if_completed(config, CNN_ARCH_1E_RESULTS, "CNN 1e"):
+            run_stage_1e_cnn_pseudo_refine(config, suite)
+
+
+def _run_perch_track_post_1a(
+    config: dict, suite: SoundscapeEvalSuite, max_stage: str
+) -> None:
+    if _stage_included(max_stage, "1b") and _stage_1b_cfg(config).get("enabled", False):
+        run_stage_1b_perch_refine(config, suite)
+    if _stage_included(max_stage, "1c") and _stage_1c_cfg(config).get("enabled", False):
+        run_stage_1c_aug_search(config, suite)
+    if _stage_included(max_stage, "1d") and _stage_1d_cfg(config).get("enabled", False):
+        if not _skip_if_completed(config, ARCH_SEARCH_1D_RESULTS, "Perch 1d"):
+            run_stage_1d_final_train(config)
+    if _stage_included(max_stage, "1e") and _stage_1e_cfg(config).get("enabled", False):
+        if not _skip_if_completed(config, ARCH_SEARCH_1E_RESULTS, "Perch 1e"):
+            run_stage_1e_pseudo_refine(config, suite)
+
+
+def _birdnet_stage_cfg(config: dict, key: str) -> dict:
+    return dict(_meta_cfg(config).get(key) or {})
+
+
+def _run_birdnet_track_post_1a(
+    config: dict, suite: SoundscapeEvalSuite, max_stage: str
+) -> None:
+    if _stage_included(max_stage, "1b") and _birdnet_stage_cfg(config, "birdnet_stage_1b").get(
+        "enabled", False
+    ):
+        from meta_birdnet_stages import run_stage_1b_birdnet_refine
+
+        run_stage_1b_birdnet_refine(config, suite)
+    if _stage_included(max_stage, "1c") and _birdnet_stage_cfg(config, "birdnet_stage_1c").get(
+        "enabled", False
+    ):
+        from meta_birdnet_stages import run_stage_1c_birdnet_aug_search
+
+        run_stage_1c_birdnet_aug_search(config, suite)
+    if _stage_included(max_stage, "1d") and _birdnet_stage_cfg(config, "birdnet_stage_1d").get(
+        "enabled", False
+    ):
+        if not _skip_if_completed(config, BIRDNET_ARCH_1D_RESULTS, "BirdNET 1d"):
+            from meta_birdnet_stages import run_stage_1d_birdnet_final_train
+
+            run_stage_1d_birdnet_final_train(config)
+    if _stage_included(max_stage, "1e") and _birdnet_stage_cfg(config, "birdnet_stage_1e").get(
+        "enabled", False
+    ):
+        if not _skip_if_completed(config, BIRDNET_ARCH_1E_RESULTS, "BirdNET 1e"):
+            from meta_birdnet_stages import run_stage_1e_birdnet_pseudo_refine
+
+            run_stage_1e_birdnet_pseudo_refine(config, suite)
+
+
+def _run_track_post_1a(
+    track: str,
+    config: dict,
+    suite: SoundscapeEvalSuite,
+    max_stage: str,
+) -> None:
+    if track == "cnn":
+        _run_cnn_track_post_1a(config, suite, max_stage)
+    elif track == "birdnet":
+        _run_birdnet_track_post_1a(config, suite, max_stage)
+    elif track == "perch":
+        _run_perch_track_post_1a(config, suite, max_stage)
+
+
+def _collect_tournament_candidate(track: str, config: dict, metric: str) -> dict | None:
+    """Best sample metric for a track after aug search (1c; BirdNET falls back to 1a)."""
+    track = track.lower()
+    checkpoint = "1c"
+    winner: dict | None = None
+    results_path: Path | None = None
+    locked_arch_path: str | None = None
+
+    if track == "cnn":
+        results_path = CNN_ARCH_1C_RESULTS
+        if not results_path.exists():
+            return None
+        try:
+            summary = json.loads(results_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        winner = summary.get("winner")
+        locked = summary.get("locked_slot_code")
+        if locked:
+            locked_arch_path = str(locked)
+        elif winner:
+            slot = Path(winner.get("memory_dir", "")) / "best_model_slot.py"
+            if slot.exists():
+                locked_arch_path = str(slot)
+    elif track == "perch":
+        results_path = ARCH_SEARCH_1C_RESULTS
+        if not results_path.exists():
+            return None
+        try:
+            summary = json.loads(results_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        winner = summary.get("winner")
+        locked = summary.get("locked_head_code")
+        if locked:
+            locked_arch_path = str(locked)
+        elif winner:
+            mem = Path(winner.get("memory_dir", ""))
+            for name in ("best_head_code.py", "best_model_slot.py"):
+                p = mem / name
+                if p.exists():
+                    locked_arch_path = str(p)
+                    break
+    elif track == "birdnet":
+        checkpoint = "1c"
+        results_path = BIRDNET_ARCH_1C_RESULTS
+        if not results_path.exists():
+            checkpoint = "1a"
+            if not ARCH_SEARCH_1A_RESULTS.exists():
+                return None
+            try:
+                summary = json.loads(ARCH_SEARCH_1A_RESULTS.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return None
+            winner = (summary.get("tracks") or {}).get("birdnet", {}).get("winner")
+        else:
+            try:
+                summary = json.loads(results_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return None
+            winner = summary.get("winner")
+            locked = summary.get("locked_head_code")
+            if locked:
+                locked_arch_path = str(locked)
+            elif winner:
+                p = Path(winner.get("memory_dir", "")) / "best_head_code.py"
+                if p.exists():
+                    locked_arch_path = str(p)
+    else:
+        return None
+
+    if not winner:
+        return None
+
+    score = dict(winner.get("score") or {})
+    primary = _primary_value_from_score(score, metric)
+    if primary is None:
+        mem_dir = winner.get("memory_dir") or winner.get("logs_dir")
+        if mem_dir and track == "cnn":
+            sc = _score_cnn_arch_search(Path(mem_dir), _soundscape_suite(config))
+            if sc:
+                primary = sc.primary_value
+                score = sc.to_dict()
+        elif mem_dir and track == "perch":
+            sc = _soundscape_suite(config).score_perch(Path(mem_dir))
+            if sc:
+                primary = sc.primary_value
+                score = sc.to_dict()
+        elif mem_dir and track == "birdnet":
+            sc = _soundscape_suite(config).score_birdnet_mem_dir(
+                Path(mem_dir), val_cache=BIRDNET_SHARED_VAL_CACHE
+            )
+            if sc:
+                primary = sc.primary_value
+                score = sc.to_dict()
+    if primary is None:
+        return None
+
+    mem_dir = winner.get("memory_dir") or winner.get("logs_dir")
+    arch_type = winner.get("arch_type")
+    trial_id = winner.get("trial_id")
+    if results_path and results_path.exists():
+        try:
+            summary = json.loads(results_path.read_text(encoding="utf-8"))
+            rw = summary.get("refine_winner_1b") or {}
+            arch_type = arch_type or rw.get("arch_type") or (rw.get("spec") or {}).get(
+                "arch_type"
+            )
+        except (json.JSONDecodeError, OSError):
+            pass
+    if mem_dir:
+        info_path = Path(mem_dir) / "best_model_info.json"
+        if info_path.exists():
+            try:
+                info = json.loads(info_path.read_text(encoding="utf-8"))
+                spec = info.get("spec") or {}
+                arch_type = arch_type or spec.get("arch_type") or info.get("arch_type")
+                if score.get("macro_average_precision") is None:
+                    score["macro_average_precision"] = info.get("macro_average_precision")
+                if score.get("competition_macro_auc") is None:
+                    score["competition_macro_auc"] = info.get("macro_roc_auc")
+                if score.get("median_per_class_auc") is None:
+                    score["median_per_class_auc"] = info.get("median_per_class_auc")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    macro_ap = score.get("macro_average_precision")
+    macro_auc = score.get("competition_macro_auc") or score.get("macro_roc_auc")
+    median_auc = score.get("median_per_class_auc")
+
+    return {
+        "track": track,
+        "checkpoint": checkpoint,
+        "primary_metric": metric,
+        "primary_value": primary,
+        "macro_average_precision": macro_ap,
+        "macro_roc_auc": macro_auc,
+        "competition_macro_auc": macro_auc,
+        "median_per_class_auc": median_auc,
+        "aug_preset": winner.get("aug_preset") or winner.get("aug_baseline"),
+        "aug_baseline": winner.get("aug_baseline"),
+        "trial_id": trial_id,
+        "memory_dir": mem_dir,
+        "locked_arch_path": locked_arch_path,
+        "results_path": str(results_path) if results_path else None,
+        "arch_type": arch_type or "unknown",
+    }
+
+
+def _pick_global_tournament_winner(
+    candidates: list[dict], metric: str
+) -> dict | None:
+    ok = [c for c in candidates if c.get("primary_value") is not None]
     if not ok:
         return None
-    rank_key = (
-        "macro_average_precision"
-        if suite.primary_metric == PRIMARY_META_METRIC
-        else "macro_roc_auc"
+    return max(ok, key=lambda c: float(c["primary_value"]))
+
+
+def _tournament_metrics_line(row: dict, metric: str) -> str:
+    """Same display as stage 1b/1c model selection: macro_AP | macro_AUC | median_AUC."""
+    ap = row.get("macro_average_precision")
+    auc = row.get("competition_macro_auc") or row.get("macro_roc_auc")
+    med = row.get("median_per_class_auc")
+    return format_soundscape_metrics_line(
+        macro_ap=float(ap) if ap is not None else None,
+        macro_auc=float(auc) if auc is not None else None,
+        median_auc=float(med) if med is not None else None,
+        ranking_metric=metric,
+        mark_ranking=True,
     )
 
-    def _rank_val(r: dict) -> float:
-        v = r.get("ranking_value") or r.get(rank_key) or r.get("macro_roc_auc")
-        return float(v) if v is not None else -1.0
 
-    best = max(ok, key=_rank_val)
-    run_id = str(best.get("run_id", ""))
+def _print_tournament_final_comparison(
+    config: dict,
+    candidates: list[dict],
+    metric: str,
+    global_winner: dict | None = None,
+) -> None:
+    """Print each track's best model (CNN / BirdNET / Perch) with full soundscape metrics."""
+    order = _track_order(config)
+    by_track = {str(c.get("track", "")).lower(): c for c in candidates}
+    ranked = sorted(
+        candidates,
+        key=lambda c: float(c.get("primary_value") or -1.0),
+        reverse=True,
+    )
+    rank_by_track = {
+        str(r.get("track", "")).lower(): i + 1 for i, r in enumerate(ranked)
+    }
+
+    print("\n" + "=" * 72)
+    print("  TOURNAMENT — FINAL COMPARISON (best model per architecture, sample eval)")
+    print(f"  Ranking metric: {metric} on labeled train_soundscapes")
+    print("  " + "─" * 72)
+
+    for track in order:
+        row = by_track.get(track)
+        if row is None:
+            print(f"\n  {track.upper():8s}  —  (not entered / no valid score)")
+            continue
+
+        rank = rank_by_track.get(track, "?")
+        is_winner = (
+            global_winner is not None
+            and str(global_winner.get("track", "")).lower() == track
+        )
+        winner_tag = "  ← GLOBAL WINNER" if is_winner else ""
+        mem_name = Path(row.get("memory_dir") or "?").name
+        arch = row.get("arch_type", "?")
+        aug = row.get("aug_preset") or row.get("aug_baseline", "?")
+        checkpoint = row.get("checkpoint", "?")
+        trial = row.get("trial_id")
+
+        print(f"\n  Rank #{rank}  {track.upper()}{winner_tag}")
+        print(f"    arch_type      : {arch}")
+        print(f"    aug (best)     : {aug}")
+        print(f"    stage reached  : {checkpoint} (sample train / embed)")
+        if trial:
+            print(f"    trial_id       : {trial}")
+        print(f"    artifacts      : {mem_name}")
+        print(f"    {_tournament_metrics_line(row, metric)}")
+        rv = row.get("primary_value")
+        if rv is not None:
+            print(f"    primary_value  : {float(rv):.5f}  ({metric})")
+
+    print("\n  " + "─" * 72)
+    if global_winner:
+        gw = global_winner
+        print(
+            f"  Selected for finalize (1d+1e): {str(gw.get('track', '?')).upper()}  "
+            f"|  {_tournament_metrics_line(gw, metric)}"
+        )
+    else:
+        print("  No global winner — cannot run finalize.")
+    print("=" * 72)
+
+
+def _save_tournament_results(
+    config: dict,
+    candidates: list[dict],
+    global_winner: dict | None,
+) -> dict:
+    payload = {
+        "stage": "tournament",
+        "primary_metric": _meta_primary_metric(config),
+        "track_order": _track_order(config),
+        "candidates": candidates,
+        "global_winner": global_winner,
+        "finalize_ready": global_winner is not None,
+    }
+    META_LOGS.mkdir(parents=True, exist_ok=True)
+    TOURNAMENT_RESULTS.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return payload
+
+
+def run_staged_tournament_phase(
+    config: dict,
+    suite: SoundscapeEvalSuite,
+    pipeline: str,
+) -> dict:
+    """Phase A: all tracks through 1c on sample; pick global winner (no 1d/1e)."""
+    order = _track_order(config)
+    metric = _meta_primary_metric(config)
+    meta = _meta_cfg(config)
+
+    print("\n" + "=" * 60)
+    print("  TOURNAMENT PHASE A — stop after best aug on sample (stage 1c)")
+    print(f"  Track order: {' → '.join(order)}")
+    print("=" * 60)
+
+    summary = _load_1a_summary(config)
+    candidates: list[dict] = []
+
+    for track in order:
+        print(f"\n{'#' * 60}\n  TRACK: {track.upper()}\n{'#' * 60}")
+        if not _track_active(config, track, pipeline):
+            print("  Skipped — not active for this pipeline.")
+            continue
+
+        if _track_iterations(config, track) > 0:
+            if meta.get("skip_completed_stages") and _1a_track_done(summary, track):
+                print(f"  [1a / {track}] Skipped — already in {ARCH_SEARCH_1A_RESULTS.name}")
+            else:
+                entry = run_stage_1a_for_track(track, config, suite)
+                if entry is not None:
+                    summary.setdefault("tracks", {})[track] = entry
+                    _save_1a_summary(summary)
+        else:
+            print(f"  [1a / {track}] Skipped — using existing 1a artifacts")
+
+        _run_track_post_1a(track, config, suite, max_stage="1c")
+
+        cand = _collect_tournament_candidate(track, config, metric)
+        if cand:
+            candidates.append(cand)
+            print(
+                f"\n  [Tournament] {track} qualified: "
+                f"{metric}={float(cand['primary_value']):.5f}"
+            )
+        else:
+            print(f"\n  [Tournament] {track} — no score (complete 1c or 1a first)")
+
+    global_winner = _pick_global_tournament_winner(candidates, metric)
+    _print_tournament_final_comparison(config, candidates, metric, global_winner)
+    payload = _save_tournament_results(config, candidates, global_winner)
+
+    if global_winner:
+        print(f"\n  Tournament results saved → {TOURNAMENT_RESULTS}")
+        print("  Next: pipeline staged_finalize (or tournament.auto_finalize: true)")
+    else:
+        print("\n  [Tournament] No global winner — no track has a valid sample score.")
+
+    return payload
+
+
+def run_staged_finalize_winner(
+    config: dict,
+    suite: SoundscapeEvalSuite,
+    *,
+    winner: dict | None = None,
+) -> dict:
+    """Phase B: full train + pseudo for the tournament global winner only."""
+    if winner is None:
+        if not TOURNAMENT_RESULTS.exists():
+            print("\n  [Finalize] Missing tournament_results.json — run tournament first.")
+            return {"success": False}
+        try:
+            payload = json.loads(TOURNAMENT_RESULTS.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            print("\n  [Finalize] Could not read tournament results.")
+            return {"success": False}
+        winner = payload.get("global_winner")
+        if not winner:
+            print("\n  [Finalize] No global_winner in tournament results.")
+            return {"success": False}
+
+    track = str(winner.get("track", "")).lower()
+    metric = _meta_primary_metric(config)
+
+    print("\n" + "=" * 60)
+    print("  TOURNAMENT PHASE B — finalize global winner only")
+    print(f"  Track: {track.upper()}  |  aug={winner.get('aug_preset')}")
+    print(f"  {_tournament_metrics_line(winner, metric)}")
+    print("=" * 60)
+
+    ok = True
+    if track == "cnn":
+        if _cnn_stage_cfg(config, "stage_1d").get("enabled", True):
+            if not _skip_if_completed(config, CNN_ARCH_1D_RESULTS, "CNN 1d finalize"):
+                r = run_stage_1d_cnn_final_train(config)
+                ok = ok and bool(r.get("success"))
+        if _cnn_stage_cfg(config, "stage_1e").get("enabled", True):
+            if not _skip_if_completed(config, CNN_ARCH_1E_RESULTS, "CNN 1e finalize"):
+                r = run_stage_1e_cnn_pseudo_refine(config, suite)
+                ok = ok and bool(r.get("success"))
+    elif track == "perch":
+        if _stage_1d_cfg(config).get("enabled", True):
+            if not _skip_if_completed(config, ARCH_SEARCH_1D_RESULTS, "Perch 1d finalize"):
+                run_stage_1d_final_train(config)
+        if _stage_1e_cfg(config).get("enabled", True):
+            if not _skip_if_completed(config, ARCH_SEARCH_1E_RESULTS, "Perch 1e finalize"):
+                run_stage_1e_pseudo_refine(config, suite)
+    elif track == "birdnet":
+        if _birdnet_stage_cfg(config, "birdnet_stage_1d").get("enabled", True):
+            if not _skip_if_completed(config, BIRDNET_ARCH_1D_RESULTS, "BirdNET 1d"):
+                from meta_birdnet_stages import run_stage_1d_birdnet_final_train
+
+                r = run_stage_1d_birdnet_final_train(config)
+                ok = ok and bool(r.get("success"))
+        if _birdnet_stage_cfg(config, "birdnet_stage_1e").get("enabled", True):
+            if not _skip_if_completed(config, BIRDNET_ARCH_1E_RESULTS, "BirdNET 1e"):
+                from meta_birdnet_stages import run_stage_1e_birdnet_pseudo_refine
+
+                r = run_stage_1e_birdnet_pseudo_refine(config, suite)
+                ok = ok and bool(r.get("success"))
+    else:
+        print(f"\n  [Finalize] Unknown track: {track}")
+        ok = False
+
+    summary = {"stage": "tournament_finalize", "global_winner": winner, "success": ok}
+    out = META_LOGS / "tournament_finalize_results.json"
+    out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\n  Finalize summary → {out}")
+    return summary
+
+
+def run_staged_pipeline_sequential(
+    config: dict,
+    suite: SoundscapeEvalSuite,
+    pipeline: str,
+) -> None:
+    """
+    Sequential tracks (``track_order``). With ``tournament.enabled``, Phase A stops
+    at 1c and picks a global winner; Phase B (finalize) runs 1d+1e for the winner only.
+    """
+    pipeline = str(pipeline).lower()
+    if _use_tournament_mode(config, pipeline):
+        run_staged_tournament_phase(config, suite, pipeline)
+        if _should_auto_finalize(config, pipeline):
+            run_staged_finalize_winner(config, suite)
+        return
+
+    order = _track_order(config)
+    max_stage = _pipeline_max_stage(pipeline)
+    meta = _meta_cfg(config)
+
+    print("\n" + "=" * 60)
+    print("  STAGED PIPELINE — sequential tracks (full per track)")
+    print(f"  Order: {' → '.join(order)}  |  Through stage: {max_stage}")
+    print("=" * 60)
+
+    summary = _load_1a_summary(config)
+    if max_stage == "1a" and _skip_if_completed(
+        config, ARCH_SEARCH_1A_RESULTS, "Stage 1a (all tracks)"
+    ):
+        pass
+    else:
+        for track in order:
+            print(f"\n{'#' * 60}\n  TRACK: {track.upper()}\n{'#' * 60}")
+            if not _track_active(config, track, pipeline):
+                print(
+                    f"  Skipped (set {track}_iterations > 0 and/or enable "
+                    f"{track} stage_1b–1e / cnn_stage_* in config)."
+                )
+                continue
+
+            if _track_iterations(config, track) > 0:
+                if meta.get("skip_completed_stages") and _1a_track_done(summary, track):
+                    print(
+                        f"  [1a / {track}] Skipped — already in "
+                        f"{ARCH_SEARCH_1A_RESULTS.name}"
+                    )
+                else:
+                    entry = run_stage_1a_for_track(track, config, suite)
+                    if entry is not None:
+                        summary.setdefault("tracks", {})[track] = entry
+                        _save_1a_summary(summary)
+                        print(f"  [1a / {track}] Saved → {ARCH_SEARCH_1A_RESULTS.name}")
+            else:
+                print(f"  [1a / {track}] Skipped — using existing 1a artifacts")
+
+            _run_track_post_1a(track, config, suite, max_stage)
+
+    print(f"\n  Step 1a summary (all tracks) → {ARCH_SEARCH_1A_RESULTS}")
+
+
+def _score_cnn_arch_search(logs_dir: Path, suite: SoundscapeEvalSuite) -> SoundscapeScore | None:
+    """Score the CNN staged champion on labeled soundscapes (no final keras needed)."""
+    logs_dir = Path(logs_dir)
+    promoted = logs_dir / "best_val_preds.npy"
+    if promoted.exists():
+        return suite.score_arrays(np.load(str(promoted)).astype(np.float32))
+
     eval_dir = logs_dir / "eval_artifacts"
-    for suffix in ("_a5", "_a4", "_a3", "_a2", "_a1", ""):
-        yp_path = eval_dir / f"y_pred_{run_id}{suffix}.npy"
+    info_path = logs_dir / "best_model_info.json"
+    run_ids: list[str] = []
+    if info_path.exists():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            rid = str(info.get("run_id") or "").strip()
+            if rid:
+                run_ids.append(rid)
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    staged_path = logs_dir / "staged_results.json"
+    results: list[dict] = []
+    if staged_path.exists():
+        try:
+            results = json.loads(staged_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            results = []
+    rr_path = logs_dir / "random_results.json"
+    if rr_path.exists():
+        try:
+            results = results + json.loads(rr_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    ok = [r for r in results if r.get("success")]
+    if ok:
+        rank_key = (
+            "macro_average_precision"
+            if suite.primary_metric == PRIMARY_META_METRIC
+            else "macro_roc_auc"
+        )
+
+        def _rank_val(r: dict) -> float:
+            v = r.get("ranking_value") or r.get(rank_key) or r.get("macro_roc_auc")
+            return float(v) if v is not None else -1.0
+
+        best = max(ok, key=_rank_val)
+        base_rid = str(best.get("run_id", "")).strip()
+        if base_rid and base_rid not in run_ids:
+            run_ids.append(base_rid)
+
+    # Prefer _a1 (latest successful attempt) before _a2, … when resolving y_pred artifacts.
+    attempt_suffixes = ("_a1", "_a2", "_a3", "_a4", "_a5", "")
+    for run_id in run_ids:
+        for suffix in attempt_suffixes:
+            yp_path = eval_dir / f"y_pred_{run_id}{suffix}.npy"
+            if yp_path.exists():
+                return suite.score_arrays(np.load(str(yp_path)).astype(np.float32))
+        yp_path = eval_dir / f"y_pred_{run_id}.npy"
         if yp_path.exists():
-            y_pred = np.load(yp_path).astype(np.float32)
-            return suite.score_arrays(y_pred)
+            return suite.score_arrays(np.load(str(yp_path)).astype(np.float32))
     return None
 
 
-def _run_subprocess(script: str, config_override: dict, base_config: dict) -> int:
+def _run_subprocess(
+    script: str,
+    config_override: dict,
+    base_config: dict,
+    *,
+    quiet: bool = False,
+) -> int:
     """Write a temp config with overrides and run a script as subprocess."""
     cfg = json.loads(json.dumps(base_config))
     cfg.update(config_override)
@@ -181,10 +1029,16 @@ def _run_subprocess(script: str, config_override: dict, base_config: dict) -> in
             cfg["eda"]["enabled"] = False
     tmp = Path(tempfile.gettempdir()) / f"meta_{Path(script).stem}_config.json"
     tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    result = subprocess.run(
-        [PYTHON, str(PROJECT_ROOT / "src" / script), "--config", str(tmp)],
-        cwd=str(PROJECT_ROOT),
-    )
+    cmd = [PYTHON, str(PROJECT_ROOT / "src" / script), "--config", str(tmp)]
+    if quiet:
+        result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+        if result.returncode != 0:
+            err = (result.stderr or result.stdout or "").strip()
+            print(f"  [subprocess {script}] failed (exit {result.returncode})")
+            if err:
+                print(err[-1200:])
+        return result.returncode
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
     return result.returncode
 
 
@@ -533,6 +1387,15 @@ def run_phase3_ensemble(
 # Staged pipeline — Step 1a: architecture search × aug baselines
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _cnn_stage_cfg(config: dict, key: str) -> dict:
+    """CNN staged settings: ``meta_agent.cnn_stage_1b`` etc., else shared ``stage_1b``."""
+    meta = _meta_cfg(config)
+    cnn_key = f"cnn_{key}"
+    if cnn_key in meta:
+        return dict(meta[cnn_key])
+    return dict(meta.get(key, {}))
+
+
 def _run_cnn_baseline_1a(
     config: dict,
     baseline: str,
@@ -541,15 +1404,25 @@ def _run_cnn_baseline_1a(
     suite: SoundscapeEvalSuite,
 ) -> dict:
     logs_dir = META_LOGS / "cnn" / baseline
+    code_dir = logs_dir / "codes"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    code_dir.mkdir(parents=True, exist_ok=True)
     cnn_aug = get_cnn_baseline_aug(baseline)
     base_search = config.get("search", {})
+    batch = config.get("researcher", {}).get("batch_size", 3)
     override = {
         "meta_aug_preset": baseline,
-        "arch_search_only": True,
+        "cnn_staged": True,
+        "cnn_explore": True,
+        "max_iterations": n_iters,
         "lock_augmentation": True,
         "cnn_augmentation": cnn_aug,
-        "cnn": {"logs_dir": str(logs_dir)},
+        "researcher": {**config.get("researcher", {}), "batch_size": batch},
+        "cnn": {
+            "logs_dir": str(logs_dir),
+            "memory_dir": str(logs_dir),
+            "code_dir": str(code_dir),
+        },
         "search": {
             **base_search,
             "skip_final_training": True,
@@ -557,33 +1430,469 @@ def _run_cnn_baseline_1a(
                 **base_search.get("cheap", {}),
                 "max_samples": max_samples,
             },
-            "linear_budget": 0,
-            "phase2": {
-                **base_search.get("phase2", {}),
-                "random_experiments": n_iters,
-                "focused_experiments": 0,
-                "tweak_experiments": 0,
-                "augmentation_tweak_experiments": 0,
-                "ai_free_experiments": 0,
-                "final_tweak_experiments": 0,
-            },
-            "transfer_exploration": {"enabled": False},
-            "medium_stage": {"enabled": False},
-            "reality_gate": {"enabled": False},
         },
     }
-    print(f"\n  [CNN / {baseline}] {describe_baseline(baseline)}")
-    print(f"  logs → {logs_dir}  |  iters={n_iters}  |  max_samples={max_samples}")
+    print(f"\n  [CNN staged 1a / {baseline}] {describe_baseline(baseline)}")
+    print(
+        f"  logs → {logs_dir}  |  planner_rounds={n_iters}  |  "
+        f"3 coder runs/round  |  max_samples={max_samples}"
+    )
     rc = _run_subprocess("cnn_agent.py", override, config)
     score = _score_cnn_arch_search(logs_dir, suite)
     _print_soundscape_score(f"CNN/{baseline}", score)
+    arch_type = "unknown"
+    info_path = logs_dir / "best_model_info.json"
+    if info_path.exists():
+        try:
+            arch_type = json.loads(info_path.read_text(encoding="utf-8")).get("spec", {}).get(
+                "arch_type", arch_type
+            )
+        except (json.JSONDecodeError, OSError):
+            pass
     return {
         "track": "cnn",
         "aug_baseline": baseline,
         "logs_dir": str(logs_dir),
+        "memory_dir": str(logs_dir),
+        "arch_type": arch_type,
         "subprocess_rc": rc,
         "score": score.to_dict() if score else None,
     }
+
+
+def _load_cnn_champion(mem_dir: Path, metric: str) -> dict | None:
+    info_path = mem_dir / "best_model_info.json"
+    if not (mem_dir / "best_model_slot.py").exists():
+        return None
+    val = -1.0
+    spec: dict = {}
+    if info_path.exists():
+        try:
+            info = json.loads(info_path.read_text(encoding="utf-8"))
+            val = float(info.get("ranking_value", -1))
+            spec = dict(info.get("spec") or {})
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    parts = mem_dir.name.split("_")
+    aug = parts[0] if parts else "medium"
+    return {
+        "memory_dir": str(mem_dir),
+        "logs_dir": str(mem_dir),
+        "aug_baseline": aug,
+        "arch_type": spec.get("arch_type", "unknown"),
+        "spec": spec,
+        "ranking_metric": metric,
+        "ranking_value": val,
+        "macro_average_precision": spec.get("macro_average_precision"),
+    }
+
+
+def collect_cnn_1a_top_candidates(config: dict, top_k: int = 2) -> list[dict]:
+    metric = _meta_primary_metric(config)
+    candidates: list[dict] = []
+    if ARCH_SEARCH_1A_RESULTS.exists():
+        try:
+            summary = json.loads(ARCH_SEARCH_1A_RESULTS.read_text(encoding="utf-8"))
+            runs = (summary.get("tracks") or {}).get("cnn", {}).get("runs") or []
+            for run in runs:
+                mem = Path(run.get("memory_dir") or run.get("logs_dir", ""))
+                cand = _load_cnn_champion(mem, metric)
+                if cand:
+                    sc = run.get("score") or {}
+                    if sc.get("macro_average_precision") is not None:
+                        cand["macro_average_precision"] = sc.get("macro_average_precision")
+                    # Keep champion ranking from best_model_info when meta soundscape rescore is lower.
+                    rescored = sc.get("primary_value")
+                    if rescored is not None:
+                        cand["ranking_value"] = max(
+                            float(cand.get("ranking_value") or -1),
+                            float(rescored),
+                        )
+                    candidates.append(cand)
+        except (json.JSONDecodeError, OSError):
+            pass
+    if not candidates:
+        for baseline in _baseline_names(config):
+            mem = META_LOGS / "cnn" / baseline
+            cand = _load_cnn_champion(mem, metric)
+            if cand:
+                candidates.append(cand)
+    candidates.sort(key=lambda c: float(c.get("ranking_value") or -1), reverse=True)
+    return candidates[:top_k]
+
+
+def _run_cnn_refine_1b(config: dict, candidate: dict, rank: int, refine_cfg: dict) -> dict:
+    aug = candidate["aug_baseline"]
+    arch = str(candidate.get("arch_type", "shallow_cnn"))
+    slug = f"rank{rank}_{aug}_{arch}".replace("/", "_")[:80]
+    mem_dir = META_LOGS / "cnn" / "refine" / slug
+    code_dir = mem_dir / "codes"
+    for d in (mem_dir, code_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    batch = refine_cfg.get("experiments_per_researcher_call")
+    if batch is None:
+        batch = config.get("researcher", {}).get("batch_size", 3)
+    override = {
+        "meta_aug_preset": aug,
+        "cnn_staged": True,
+        "lock_augmentation": True,
+        "cnn_augmentation": get_cnn_baseline_aug(aug),
+        "cnn_refine": {
+            "enabled": True,
+            "aug_baseline": aug,
+            "locked_arch_type": arch,
+            "seed_spec": candidate.get("spec") or {},
+            "seed_score": float(candidate.get("ranking_value", -1)),
+            "parent_memory_dir": candidate["memory_dir"],
+            "experiments_per_researcher_call": int(batch),
+            "initial_iterations": int(refine_cfg.get("initial_iterations", 6)),
+            "bonus_iterations_on_improve": int(refine_cfg.get("bonus_iterations_on_improve", 6)),
+            "max_iterations_per_model": int(refine_cfg.get("max_iterations_per_model", 30)),
+        },
+        "cnn": {
+            "logs_dir": str(mem_dir.parent),
+            "memory_dir": str(mem_dir),
+            "code_dir": str(code_dir),
+        },
+    }
+    print(f"\n  [CNN refine 1b / rank {rank}] aug={aug} arch={arch}")
+    rc = _run_subprocess("cnn_agent.py", override, config)
+    return {
+        "rank": rank,
+        "aug_baseline": aug,
+        "arch_type": arch,
+        "memory_dir": str(mem_dir),
+        "subprocess_rc": rc,
+    }
+
+
+def run_stage_1b_cnn_refine(config: dict, suite: SoundscapeEvalSuite) -> dict:
+    refine_cfg = _cnn_stage_cfg(config, "stage_1b")
+    if not refine_cfg.get("enabled", False):
+        print("\n  [CNN Stage 1b] Skipped (cnn_stage_1b.enabled=false)")
+        return {}
+    if _skip_if_completed(config, CNN_ARCH_1B_RESULTS, "CNN Stage 1b"):
+        try:
+            return json.loads(CNN_ARCH_1B_RESULTS.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    top_k = max(1, int(refine_cfg.get("top_k_models", 2)))
+    metric = _meta_primary_metric(config)
+    print("\n" + "=" * 60)
+    print(f"  CNN STAGED — Step 1b: Refine top-{top_k} from 1a")
+    print("=" * 60)
+    candidates = collect_cnn_1a_top_candidates(config, top_k=top_k)
+    if not candidates:
+        print("  [CNN 1b] No 1a candidates — run stage 1a with cnn_iterations > 0.")
+        return {"stage": "1b_cnn_refine", "candidates": [], "refine_runs": []}
+    refine_runs = [
+        _run_cnn_refine_1b(config, c, rank=i, refine_cfg=refine_cfg)
+        for i, c in enumerate(candidates, 1)
+    ]
+    scored = []
+    for run in refine_runs:
+        mem = Path(run["memory_dir"])
+        sc = _score_cnn_arch_search(mem, suite)
+        entry = {**run, "score": sc.to_dict() if sc else None}
+        if sc:
+            entry["refined_ranking_value"] = sc.primary_value
+        scored.append(entry)
+    winner = _pick_track_winner(scored, metric)
+    summary = {
+        "stage": "1b_cnn_refine",
+        "primary_metric": metric,
+        "refine_runs": scored,
+        "winner": winner,
+    }
+    CNN_ARCH_1B_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
+
+
+def _pick_cnn_1b_winner(config: dict) -> dict | None:
+    metric = _meta_primary_metric(config)
+    if CNN_ARCH_1B_RESULTS.exists():
+        try:
+            w = json.loads(CNN_ARCH_1B_RESULTS.read_text(encoding="utf-8")).get("winner")
+            if w and Path(w.get("memory_dir", "")).exists():
+                return w
+        except (json.JSONDecodeError, OSError):
+            pass
+    refine_root = META_LOGS / "cnn" / "refine"
+    best_run, best_val = None, -1.0
+    if refine_root.exists():
+        for mem_dir in refine_root.iterdir():
+            if not mem_dir.is_dir():
+                continue
+            cand = _load_cnn_champion(mem_dir, metric)
+            if cand and float(cand.get("ranking_value", -1)) > best_val:
+                best_val = float(cand["ranking_value"])
+                best_run = cand
+    if best_run:
+        return best_run
+    cands = collect_cnn_1a_top_candidates(config, top_k=1)
+    return cands[0] if cands else None
+
+
+def _run_cnn_1c_trial_meta(
+    config: dict,
+    *,
+    winner_mem: Path,
+    locked_slot: Path,
+    aug_preset: str,
+    aug_dict: dict,
+    trial_id: str,
+    max_samples: int,
+) -> dict:
+    trial_dir = META_LOGS / "cnn" / "aug_search" / trial_id
+    trial_dir.mkdir(parents=True, exist_ok=True)
+    override = {
+        "cnn_staged": True,
+        "cnn_1c_trial": {
+            "locked_slot_path": str(locked_slot),
+            "aug_dict": aug_dict,
+            "aug_preset": aug_preset,
+            "trial_id": trial_id,
+            "max_samples": max_samples,
+        },
+        "cnn": {
+            "logs_dir": str(trial_dir),
+            "memory_dir": str(trial_dir),
+            "code_dir": str(trial_dir / "codes"),
+        },
+    }
+    rc = _run_subprocess("cnn_agent.py", override, config)
+    sc = _score_cnn_arch_search(trial_dir, _soundscape_suite(config))
+    return {
+        "trial_id": trial_id,
+        "aug_preset": aug_preset,
+        "memory_dir": str(trial_dir),
+        "aug_config_path": str(trial_dir / f"{trial_id}_aug.json"),
+        "subprocess_rc": rc,
+        "score": sc.to_dict() if sc else None,
+    }
+
+
+def run_stage_1c_cnn_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
+    cfg = _cnn_stage_cfg(config, "stage_1c")
+    if not cfg.get("enabled", False):
+        print("\n  [CNN Stage 1c] Skipped (cnn_stage_1c.enabled=false)")
+        return {}
+    if _skip_if_completed(config, CNN_ARCH_1C_RESULTS, "CNN Stage 1c"):
+        try:
+            return json.loads(CNN_ARCH_1C_RESULTS.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    winner = _pick_cnn_1b_winner(config)
+    if not winner:
+        print("\n  [CNN 1c] No 1b/1a winner.")
+        return {"stage": "1c_cnn_aug_search", "runs": [], "winner": None}
+    winner_mem = Path(winner["memory_dir"])
+    locked_slot = winner_mem / "best_model_slot.py"
+    if not locked_slot.exists():
+        print(f"\n  [CNN 1c] Missing {locked_slot}")
+        return {"stage": "1c_cnn_aug_search", "runs": [], "winner": None}
+    metric = _meta_primary_metric(config)
+    max_samples = int(cfg.get("head_train_samples", 2000))
+    baselines = _baseline_names(config)
+    preset_list = list(cfg.get("aug_presets") or ["medium", "high", "light"])
+    if cfg.get("include_winner_aug_baseline", True):
+        w_aug = winner.get("aug_baseline")
+        if w_aug and w_aug not in preset_list:
+            preset_list.insert(0, w_aug)
+    print("\n" + "=" * 60)
+    print("  CNN STAGED — Step 1c: Augmentation search (locked architecture)")
+    print("=" * 60)
+    runs: list[dict] = []
+    for preset in preset_list:
+        try:
+            aug_dict = get_aug_search_preset(preset)
+        except KeyError:
+            aug_dict = get_cnn_baseline_aug(preset) if preset in baselines else get_cnn_baseline_aug("medium")
+        trial_id = f"preset_{preset}"
+        aug_path = META_LOGS / "cnn" / "aug_search" / trial_id / f"{trial_id}_aug.json"
+        aug_path.parent.mkdir(parents=True, exist_ok=True)
+        aug_path.write_text(json.dumps(aug_dict, indent=2), encoding="utf-8")
+        run = _run_cnn_1c_trial_meta(
+            config,
+            winner_mem=winner_mem,
+            locked_slot=locked_slot,
+            aug_preset=preset,
+            aug_dict=aug_dict,
+            trial_id=trial_id,
+            max_samples=max_samples,
+        )
+        run["aug_config_path"] = str(aug_path)
+        runs.append(run)
+        sc = _score_cnn_arch_search(Path(run["memory_dir"]), suite)
+        _print_soundscape_score(f"CNN/1c/{preset}", sc)
+
+    mode = str(cfg.get("mode", "presets")).lower()
+    if mode in ("llm", "both"):
+        try:
+            from aug_researcher import AugResearcher
+            from llm_client import LLMClient
+            from memory import ExperimentMemory
+
+            aug_mem = META_LOGS / "cnn" / "aug_search" / "_llm_memory"
+            aug_mem.mkdir(parents=True, exist_ok=True)
+            aug_researcher = AugResearcher(
+                LLMClient(
+                    provider=config.get("llm_researcher", {}).get("provider", config["llm"]["provider"]),
+                    model=config.get("llm_researcher", {}).get("model", config["researcher"]["model"]),
+                ),
+                ExperimentMemory(aug_mem, ranking_metric=metric),
+                temperature=float(config.get("researcher", {}).get("temperature", 0.2)),
+                batch_size=int(cfg.get("experiments_per_round", 3)),
+            )
+            n_rounds = int(cfg.get("planner_rounds", 3))
+            for r in range(1, n_rounds + 1):
+                specs = aug_researcher.next_experiments()
+                for i, spec in enumerate(specs, 1):
+                    tid = f"aug_r{r}_a{i}"
+                    base_aug = get_cnn_baseline_aug("high")
+                    base_aug["aug_preset"] = str(spec.get("preset_name", tid))
+                    for k in ("aug_prob", "aug_noise_std", "aug_time_mask", "aug_freq_mask"):
+                        if k in spec:
+                            base_aug[k] = spec[k]
+                    run = _run_cnn_1c_trial_meta(
+                        config,
+                        winner_mem=winner_mem,
+                        locked_slot=locked_slot,
+                        aug_preset=tid,
+                        aug_dict=base_aug,
+                        trial_id=tid,
+                        max_samples=max_samples,
+                    )
+                    run["aug_spec"] = spec
+                    runs.append(run)
+        except Exception as exc:
+            print(f"  [CNN 1c LLM] Skipped: {exc}")
+
+    aug_winner = _pick_track_winner(runs, metric)
+    summary = {
+        "stage": "1c_cnn_aug_search",
+        "primary_metric": metric,
+        "locked_slot_code": str(locked_slot),
+        "refine_winner_1b": winner,
+        "runs": runs,
+        "winner": aug_winner,
+    }
+    CNN_ARCH_1C_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if aug_winner:
+        print(f"\n  ★ CNN aug winner: {aug_winner.get('aug_preset')}")
+    return summary
+
+
+def run_stage_1d_cnn_final_train(config: dict) -> dict:
+    cfg = _cnn_stage_cfg(config, "stage_1d")
+    if not cfg.get("enabled", False):
+        print("\n  [CNN Stage 1d] Skipped (cnn_stage_1d.enabled=false)")
+        return {}
+    if not CNN_ARCH_1C_RESULTS.exists():
+        print("\n  [CNN 1d] Run CNN stage 1c first.")
+        return {}
+    s1c = json.loads(CNN_ARCH_1C_RESULTS.read_text(encoding="utf-8"))
+    aug_winner = s1c.get("winner")
+    refine_winner = s1c.get("refine_winner_1b") or _pick_cnn_1b_winner(config)
+    if not aug_winner or not refine_winner:
+        return {"stage": "1d_cnn_final_train", "success": False}
+    locked_slot = Path(s1c.get("locked_slot_code", ""))
+    if not locked_slot.exists():
+        locked_slot = Path(refine_winner["memory_dir"]) / "best_model_slot.py"
+    aug_preset = aug_winner.get("aug_preset", "medium")
+    aug_path = aug_winner.get("aug_config_path")
+    if aug_path and Path(aug_path).exists():
+        aug_dict = json.loads(Path(aug_path).read_text(encoding="utf-8"))
+    else:
+        aug_dict = get_cnn_baseline_aug(str(aug_preset))
+    CNN_FINAL_DIR.mkdir(parents=True, exist_ok=True)
+    model_path = CNN_FINAL_DIR / "model.keras"
+    override = {
+        "cnn_staged": True,
+        "cnn_final_train": {
+            "locked_slot_path": str(locked_slot),
+            "aug_dict": aug_dict,
+            "model_save_path": str(model_path),
+            "epochs": cfg.get("epochs"),
+            "val_split": cfg.get("val_split"),
+            "final_timeout_seconds": cfg.get("final_timeout_seconds"),
+        },
+        "cnn": {
+            "logs_dir": str(CNN_FINAL_DIR),
+            "memory_dir": str(CNN_FINAL_DIR),
+            "code_dir": str(CNN_FINAL_DIR / "codes"),
+        },
+    }
+    print("\n" + "=" * 60)
+    print(f"  CNN STAGED — Step 1d: Final train → {model_path}")
+    print("=" * 60)
+    rc = _run_subprocess("cnn_agent.py", override, config)
+    ok = rc == 0 and model_path.exists()
+    if ok:
+        shutil.copy2(locked_slot, CNN_FINAL_DIR / "best_model_slot.py")
+    if ok and cfg.get("copy_to_submission", True):
+        sub = PROJECT_ROOT / "submission"
+        sub.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(model_path, sub / "model.keras")
+        shutil.copy2(locked_slot, sub / "cnn_best_slot.py")
+    summary = {"stage": "1d_cnn_final_train", "success": ok, "model_path": str(model_path), "aug_preset": aug_preset}
+    CNN_ARCH_1D_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
+
+
+def run_stage_1e_cnn_pseudo_refine(config: dict, suite: SoundscapeEvalSuite) -> dict:
+    cfg = _cnn_stage_cfg(config, "stage_1e")
+    if not cfg.get("enabled", False):
+        print("\n  [CNN Stage 1e] Skipped (cnn_stage_1e.enabled=false)")
+        return {}
+    if _skip_if_completed(config, CNN_ARCH_1E_RESULTS, "CNN Stage 1e"):
+        try:
+            return json.loads(CNN_ARCH_1E_RESULTS.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    teacher = CNN_FINAL_DIR / "model.keras"
+    if not teacher.exists():
+        print("\n  [CNN 1e] Run CNN stage 1d first.")
+        return {"stage": "1e_cnn_pseudo_refine", "success": False}
+    locked_slot = CNN_FINAL_DIR / "best_model_slot.py"
+    if not locked_slot.exists() and CNN_ARCH_1C_RESULTS.exists():
+        s1c = json.loads(CNN_ARCH_1C_RESULTS.read_text(encoding="utf-8"))
+        locked_slot = Path(s1c.get("locked_slot_code", locked_slot))
+    pseudo_model = CNN_FINAL_DIR / "model_pseudo.keras"
+    override = {
+        "cnn_staged": True,
+        "cnn_pseudo_refine": {
+            "teacher_model": str(teacher),
+            "locked_slot_path": str(locked_slot),
+            "pseudo_npz": str(CNN_PSEUDO_LABELS_NPZ),
+            "model_save_path": str(pseudo_model),
+            "rebuild_pseudo_cache": cfg.get("rebuild_pseudo_cache", False),
+            "top1_threshold": cfg.get("top1_threshold", 0.55),
+            "runnerup_max": cfg.get("runnerup_max", 0.35),
+            "pseudo_label_weight": cfg.get("pseudo_label_weight", 0.8),
+            "sample_weight_supervised": cfg.get("sample_weight_supervised", 1.0),
+            "sample_weight_pseudo": cfg.get("sample_weight_pseudo", 0.5),
+            "fine_tune_epochs": cfg.get("fine_tune_epochs", 15),
+            "fine_tune_lr": cfg.get("fine_tune_lr", 2e-4),
+            "refine_timeout_seconds": cfg.get("refine_timeout_seconds", 7200),
+            "max_soundscape_files": cfg.get("max_soundscape_files"),
+        },
+        "cnn": {
+            "logs_dir": str(CNN_FINAL_DIR),
+            "memory_dir": str(CNN_FINAL_DIR),
+            "code_dir": str(CNN_FINAL_DIR / "codes"),
+        },
+    }
+    print("\n" + "=" * 60)
+    print("  CNN STAGED — Step 1e: Pseudo-label refine")
+    print("=" * 60)
+    rc = _run_subprocess("cnn_agent.py", override, config)
+    ok = rc == 0 and pseudo_model.exists()
+    if ok and cfg.get("copy_to_submission", True):
+        shutil.copy2(pseudo_model, PROJECT_ROOT / "submission" / "model.keras")
+    summary = {"stage": "1e_cnn_pseudo_refine", "success": ok, "model_path": str(pseudo_model)}
+    CNN_ARCH_1E_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
 
 
 def _run_birdnet_baseline_1a(
@@ -593,31 +1902,55 @@ def _run_birdnet_baseline_1a(
     embed_frac: float,
     suite: SoundscapeEvalSuite,
 ) -> dict:
-    logs_dir = META_LOGS / "birdnet" / baseline
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = CACHE_DIR / f"train_emb1024_{baseline}.npz"
+    mem_dir = META_LOGS / "birdnet" / baseline
+    cache_dir = META_LOGS / "birdnet_cache" / baseline
+    code_dir = mem_dir / "codes"
+    for d in (mem_dir, cache_dir, code_dir):
+        d.mkdir(parents=True, exist_ok=True)
+    head_train_cap = _meta_cfg(config).get("arch_search_head_train_max_samples")
+    embed_max = _embed_max_samples(config)
     override = {
         "meta_aug_preset": baseline,
         "augmentation": get_audio_embedding_aug(baseline),
-        "aug_preset_sweep": {"enabled": False},
+        "birdnet_staged": True,
         "train_sample_frac": embed_frac,
-        "force_rebuild_cache": _meta_cfg(config).get("force_rebuild_embed_cache", False),
         "max_iterations": n_iters,
-        "birdnet": {"logs_dir": str(logs_dir)},
-        "train_cache_path": str(cache_path),
+        "head_train_max_samples": head_train_cap,
+        "force_rebuild_cache": _meta_cfg(config).get("force_rebuild_embed_cache", False),
+        "birdnet": {
+            "memory_dir": str(mem_dir),
+            "cache_dir": str(cache_dir),
+            "code_dir": str(code_dir),
+            "val_cache_path": str(BIRDNET_SHARED_VAL_CACHE),
+        },
     }
-    print(f"\n  [BirdNET / {baseline}] {describe_baseline(baseline)}")
-    print(f"  logs → {logs_dir}  |  cache → {cache_path.name}  |  embed_frac={embed_frac}")
-    if cache_path.exists() and not override.get("force_rebuild_cache"):
-        print(f"  train embeddings on disk → {cache_path.name} (will skip rebuild)")
+    if embed_max is not None:
+        override["max_train_samples"] = embed_max
+    cap_note = f"  |  embed_cap={embed_max}" if embed_max is not None else ""
+    print(f"\n  [BirdNET staged 1a / {baseline}] {describe_baseline(baseline)}")
+    print(
+        f"  memory → {mem_dir}  |  planner rounds={n_iters}  |  embed_frac={embed_frac}{cap_note}"
+    )
     rc = _run_subprocess("birdnet_agent.py", override, config)
-    score = suite.score_birdnet_artifacts(logs_dir, BIRDNET_VAL_CACHE)
+    score = suite.score_birdnet_mem_dir(mem_dir, val_cache=BIRDNET_SHARED_VAL_CACHE)
+    if score is None:
+        score = suite.score_birdnet_artifacts(mem_dir, BIRDNET_VAL_CACHE)
     _print_soundscape_score(f"BirdNET/{baseline}", score)
+    arch_type = "unknown"
+    info_path = mem_dir / "best_model_info.json"
+    if info_path.exists():
+        try:
+            arch_type = json.loads(info_path.read_text(encoding="utf-8")).get("spec", {}).get(
+                "arch_type", arch_type
+            )
+        except (json.JSONDecodeError, OSError):
+            pass
     return {
         "track": "birdnet",
         "aug_baseline": baseline,
-        "logs_dir": str(logs_dir),
-        "train_cache_path": str(cache_path),
+        "memory_dir": str(mem_dir),
+        "cache_dir": str(cache_dir),
+        "arch_type": arch_type,
         "subprocess_rc": rc,
         "score": score.to_dict() if score else None,
     }
@@ -681,13 +2014,95 @@ def _run_perch_baseline_1a(
 
 
 def _pick_track_winner(runs: list[dict], metric: str) -> dict | None:
+    """Best completed run by soundscape score (primary_value), not fixed-train subset AP."""
     scored = [
         r for r in runs
-        if r.get("score") and r["score"].get("primary_value") is not None
+        if not r.get("failed")
+        and r.get("score")
+        and r["score"].get("primary_value") is not None
     ]
     if not scored:
         return None
     return max(scored, key=lambda r: float(r["score"]["primary_value"]))
+
+
+def _load_aug_dict_for_1c_winner(winner: dict, baselines: list[str] | None = None) -> dict:
+    """Load the exact augmentation JSON used for a 1c trial (custom presets included)."""
+    from aug_researcher import aug_dict_from_logged_spec
+
+    path = winner.get("aug_config_path")
+    if path:
+        p = Path(path)
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+
+    preset = str(winner.get("aug_preset") or "")
+    if preset:
+        for candidate in (
+            META_LOGS / "perch_cache" / "aug_search" / preset / f"{preset}_aug_config.json",
+            META_LOGS / "perch_cache" / preset / f"{preset}_aug_config.json",
+        ):
+            if candidate.exists():
+                return json.loads(candidate.read_text(encoding="utf-8"))
+
+    if winner.get("aug_spec"):
+        try:
+            return aug_dict_from_logged_spec(winner["aug_spec"])
+        except ValueError:
+            pass
+
+    if preset in (baselines or []):
+        return get_audio_embedding_aug(preset)
+    try:
+        return get_aug_search_preset(preset)
+    except KeyError:
+        return get_audio_embedding_aug("medium")
+
+
+def _enrich_1c_winner(winner: dict, baselines: list[str]) -> dict:
+    preset = str(winner.get("aug_preset", ""))
+    cache_dir = _perch_aug_search_cache_dir(preset, baselines)
+    cfg_path = cache_dir / f"{preset}_aug_config.json"
+    winner["cache_dir"] = str(cache_dir)
+    winner["aug_config_path"] = str(cfg_path)
+    winner["train_cache"] = str(cache_dir / f"train_emb_{preset}.npz")
+    if cfg_path.exists() and not winner.get("aug_spec"):
+        try:
+            from aug_researcher import aug_dict_from_logged_spec
+
+            winner["aug_spec"] = aug_dict_from_logged_spec(
+                json.loads(cfg_path.read_text(encoding="utf-8"))
+            )
+        except (ValueError, json.JSONDecodeError, OSError):
+            pass
+    return winner
+
+
+def _finalize_1c_winner(
+    runs: list[dict],
+    *,
+    metric: str,
+    baselines: list[str],
+    announce: bool = False,
+) -> dict | None:
+    """Pick best completed 1c run by soundscape AP; enrich paths for stage 1d."""
+    winner = _pick_track_winner(runs, metric)
+    if winner is None:
+        return None
+    winner = _enrich_1c_winner(winner, baselines)
+    if announce:
+        sc = winner.get("score") or {}
+        aug_for_embed = _load_aug_dict_for_1c_winner(winner, baselines)
+        label = _short_aug_display_name(
+            str(winner.get("aug_preset", "")), winner.get("aug_spec")
+        )
+        print(
+            f"\n  ★ 1c winner → {label} ({winner.get('aug_preset')})  "
+            f"soundscape_AP={float(sc.get('primary_value', 0)):.5f}  "
+            f"mix_prob={aug_for_embed.get('mix_prob')}  "
+            f"use_snr={aug_for_embed.get('use_snr_mixing')}"
+        )
+    return winner
 
 
 def _ranking_value_from_run(entry: dict, metric: str) -> float:
@@ -918,8 +2333,8 @@ def _print_stage_1c_locked_head(winner: dict, ranking_metric: str) -> None:
     rv = winner.get("ranking_value")
     if rv is not None:
         print(
-            f"  Seed {ranking_metric} for aug refine phase: {float(rv):.5f} "
-            f"(must beat this to earn bonus refine tries)"
+            f"  Locked head {ranking_metric}: {float(rv):.5f} "
+            f"(aug search tries to beat this on soundscape val)"
         )
     print("  " + "─" * 72)
     print("  Architecture is fixed in 1c — only augmentation configs change.\n")
@@ -968,6 +2383,10 @@ def _run_perch_refine_1b(config: dict, candidate: dict, rank: int, refine_cfg: d
     if head_train_cap is None:
         head_train_cap = perch_base.get("head_train_max_samples")
 
+    batch = refine_cfg.get("experiments_per_researcher_call")
+    if batch is None:
+        batch = config.get("researcher", {}).get("batch_size", 3)
+
     override = {
         "meta_aug_preset": aug,
         "augmentation": get_audio_embedding_aug(aug),
@@ -981,6 +2400,7 @@ def _run_perch_refine_1b(config: dict, candidate: dict, rank: int, refine_cfg: d
             "seed_macro_auc": candidate.get("macro_roc_auc"),
             "seed_median_auc": candidate.get("median_per_class_auc"),
             "parent_memory_dir": candidate["memory_dir"],
+            "experiments_per_researcher_call": int(batch),
             "initial_iterations": int(refine_cfg.get("initial_iterations", 5)),
             "bonus_iterations_on_improve": int(refine_cfg.get("bonus_iterations_on_improve", 5)),
             "max_iterations_per_model": int(refine_cfg.get("max_iterations_per_model", 25)),
@@ -1339,6 +2759,158 @@ def _ensure_shared_1c_val_cache(config: dict) -> Path:
     return PERCH_SHARED_VAL_CACHE
 
 
+class _Stage1cLeader:
+    """Track best soundscape AP across all completed 1c trials (presets + LLM)."""
+
+    def __init__(self) -> None:
+        self.ap: float = -1.0
+        self.label: str = ""
+        self.preset: str = ""
+
+    def update(self, ap: float, label: str, preset: str) -> bool:
+        if ap > self.ap:
+            prev_ap, prev_label = self.ap, self.label
+            self.ap = ap
+            self.label = label
+            self.preset = preset
+            if prev_ap < 0:
+                print(
+                    f"  ▸ 1c leader: {label} ({preset})  soundscape_AP={ap:.5f}",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"  ▸ 1c leader: {label} ({preset})  soundscape_AP={ap:.5f}  "
+                    f"(was {prev_label} {prev_ap:.5f})",
+                    flush=True,
+                )
+            return True
+        return False
+
+
+def _need_rebuild_1c_train_cache(
+    train_cache: Path,
+    *,
+    clip_subset_path: Path | None,
+    indices_path: Path | None,
+) -> bool:
+    """Rebuild if missing or not the fixed 2000-clip 1c subset (avoid reusing 1a partial caches)."""
+    if not train_cache.exists():
+        return True
+    if clip_subset_path is None:
+        return False
+    import numpy as np
+
+    try:
+        n = int(np.load(str(train_cache))["X"].shape[0])
+    except (OSError, KeyError, ValueError):
+        return True
+    want = 2000
+    if indices_path is not None and Path(indices_path).exists():
+        want = int(np.load(str(indices_path)).size)
+    return n != want
+
+
+def _build_1c_trial_payload(
+    *,
+    preset: str,
+    aug_dict: dict,
+    head_code_path: Path,
+    head_spec: dict,
+    indices_path: Path | None,
+    train_cache: Path,
+    force_rebuild_train: bool,
+) -> dict:
+    mem_dir = META_LOGS / "perch" / "aug_search" / preset
+    cache_dir = train_cache.parent
+    fixed_train: dict = {
+        "enabled": True,
+        "fixed_1c_trial": True,
+        "label": f"aug_{preset}",
+        "head_code_path": str(head_code_path),
+        "aug_preset": preset,
+        "spec": head_spec,
+    }
+    if indices_path is not None:
+        fixed_train["head_train_indices_path"] = str(indices_path)
+    return {
+        "preset": preset,
+        "augmentation": aug_dict,
+        "train_cache": str(train_cache),
+        "memory_dir": str(mem_dir),
+        "code_dir": str(mem_dir / "codes"),
+        "cache_dir": str(cache_dir),
+        "force_rebuild_train": force_rebuild_train,
+        "perch_fixed_train": fixed_train,
+    }
+
+
+def _run_perch_1c_sweep_subprocess(
+    config: dict,
+    trials: list[dict],
+    *,
+    mapping_src: Path,
+    clip_subset_path: Path | None = None,
+) -> int:
+    """One perch process: ONNX load once, then all trials in the sweep."""
+    perch_base = dict(config.get("perch", {}))
+    override: dict = {
+        "perch_quiet": True,
+        "perch_1c_sweep": {
+            "trials": trials,
+            "mapping_src": str(mapping_src),
+        },
+        "perch": {
+            **perch_base,
+            "quiet_trial": True,
+            "logs_dir": str(META_LOGS / "perch"),
+            "cache_dir": str(META_LOGS / "perch_cache"),
+            "val_cache_path": str(PERCH_SHARED_VAL_CACHE),
+            "skip_final_retrain": True,
+        },
+    }
+    if clip_subset_path is not None:
+        override["perch_embed_clip_subset"] = str(clip_subset_path)
+    return _run_subprocess("perch_agent.py", override, config, quiet=True)
+
+
+def _score_1c_run(
+    suite: SoundscapeEvalSuite,
+    run: dict,
+    *,
+    preset: str,
+    aug_spec: dict,
+    run_index: int,
+    total: int,
+    leader: _Stage1cLeader | None = None,
+) -> dict:
+    mem_dir = Path(run["memory_dir"])
+    sc = suite.score_perch_mem_dir(mem_dir, val_cache=PERCH_SHARED_VAL_CACHE)
+    if sc is None:
+        sc = suite.score_perch(mem_dir)
+    subset_ap = None
+    info_path = mem_dir / "best_model_info.json"
+    if info_path.exists():
+        try:
+            subset_ap = float(
+                json.loads(info_path.read_text(encoding="utf-8")).get(
+                    "macro_average_precision", 0
+                )
+            )
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    label = _short_aug_display_name(preset, aug_spec)
+    _print_1c_iteration_result(run_index, total, label, sc, subset_ap=subset_ap)
+    if leader is not None and sc is not None:
+        leader.update(float(sc.primary_value), label, preset)
+    run["score"] = sc.to_dict() if sc else None
+    run["aug_preset"] = preset
+    run["aug_spec"] = aug_spec
+    if sc:
+        run["ranking_value"] = float(sc.primary_value)
+    return run
+
+
 def _run_perch_1c_trial(
     config: dict,
     *,
@@ -1377,9 +2949,11 @@ def _run_perch_1c_trial(
     override: dict = {
         "meta_aug_preset": preset,
         "augmentation": aug_dict,
+        "perch_quiet": True,
         "perch_fixed_train": fixed_train,
         "perch": {
             **perch_base,
+            "quiet_trial": True,
             "logs_dir": str(META_LOGS / "perch"),
             "memory_dir": str(mem_dir),
             "cache_dir": str(cache_dir),
@@ -1392,16 +2966,46 @@ def _run_perch_1c_trial(
     if clip_subset_path is not None:
         override["perch_embed_clip_subset"] = str(clip_subset_path)
 
-    print(
-        f"\n  [1c trial] One pass: embed (if needed) + head train + cached-val metrics "
-        f"→ {preset}"
-    )
-    rc = _run_subprocess("perch_agent.py", override, config)
+    rc = _run_subprocess("perch_agent.py", override, config, quiet=True)
+    cache_dir = _perch_aug_search_cache_dir(preset, _baseline_names(config))
+    aug_cfg_path = cache_dir / f"{preset}_aug_config.json"
     return {
         "aug_preset": preset,
         "memory_dir": str(mem_dir),
         "train_cache": str(train_cache),
+        "cache_dir": str(cache_dir),
+        "aug_config_path": str(aug_cfg_path),
         "subprocess_rc": rc,
+    }
+
+
+def _resolve_stage_1c_presets(cfg: dict, winner: dict) -> list[str]:
+    """Which embedding aug baselines to try in preset mode (default medium + high)."""
+    raw = cfg.get("aug_presets") or cfg.get("baselines") or ["medium", "high"]
+    presets = [str(p).strip().lower() for p in raw if str(p).strip()]
+    if not presets:
+        presets = ["medium", "high"]
+    winner_aug = str(winner.get("aug_baseline", "")).strip().lower()
+    if cfg.get("include_winner_aug_baseline", True) and winner_aug and winner_aug not in presets:
+        presets = [winner_aug] + presets
+    # de-dupe, preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in presets:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
+def _preset_aug_logged_spec(preset: str, aug_dict: dict) -> dict:
+    """Minimal spec dict for 1c results / best_aug_config.json (no LLM)."""
+    return {
+        "preset_name": preset,
+        "strategy": "preset",
+        "reasoning": f"Fixed BirdCLEF embedding baseline: {preset}",
+        "hypothesis": describe_embedding_aug_compact(preset),
+        **aug_dict,
     }
 
 
@@ -1419,39 +3023,87 @@ def _run_stage_1c_preset_grid(
     embed_max: int | None,
     presets: list[str],
     clip_subset_path: Path | None = None,
+    run_index_start: int = 1,
+    run_index_total: int | None = None,
+    leader: _Stage1cLeader | None = None,
 ) -> list[dict]:
-    """Fixed preset grid (legacy 1c mode)."""
-    val_cache = PERCH_SHARED_VAL_CACHE
+    """Try fixed light/medium/high-style embedding aug presets — no LLM researcher."""
     runs: list[dict] = []
+    total = run_index_total if run_index_total is not None else len(presets)
+    trials: list[dict] = []
+    trial_meta: list[tuple[str, dict]] = []
+    if leader is None:
+        leader = _Stage1cLeader()
+
     for preset in presets:
         cache_dir = _perch_aug_search_cache_dir(preset, baselines)
+        cache_dir.mkdir(parents=True, exist_ok=True)
         train_cache = cache_dir / f"train_emb_{preset}.npz"
         try:
             aug_dict = get_aug_search_preset(preset)
         except KeyError:
             aug_dict = get_audio_embedding_aug(preset)
-        run = _run_perch_1c_trial(
+        aug_spec = _preset_aug_logged_spec(preset, aug_dict)
+        (cache_dir / f"{preset}_aug_config.json").write_text(
+            json.dumps(aug_dict, indent=2), encoding="utf-8"
+        )
+        force_rebuild = _need_rebuild_1c_train_cache(
+            train_cache,
+            clip_subset_path=clip_subset_path,
+            indices_path=indices_path if clip_subset_path is None else indices_path,
+        )
+        trials.append(
+            _build_1c_trial_payload(
+                preset=preset,
+                aug_dict=aug_dict,
+                head_code_path=head_code_path,
+                head_spec=head_spec,
+                indices_path=indices_path if clip_subset_path is None else None,
+                train_cache=train_cache,
+                force_rebuild_train=force_rebuild,
+            )
+        )
+        trial_meta.append((preset, aug_spec))
+
+    if trials:
+        print(
+            f"  [1c] Running {len(trials)} preset trial(s) in one Perch session "
+            f"(ONNX loaded once)…",
+            flush=True,
+        )
+        _run_perch_1c_sweep_subprocess(
             config,
-            preset=preset,
-            head_code_path=head_code_path,
-            train_cache=train_cache,
-            val_cache=val_cache,
-            indices_path=indices_path if clip_subset_path is None else None,
+            trials,
             mapping_src=winner_mem,
-            spec=head_spec,
-            aug_dict=aug_dict,
-            force_rebuild_train=not train_cache.exists(),
             clip_subset_path=clip_subset_path,
         )
+
+    for j, (preset, aug_spec) in enumerate(trial_meta):
+        idx = run_index_start + j
+        train_cache = Path(trials[j]["train_cache"])
         if not train_cache.exists():
-            print(f"  [1c] Skip {preset} — train cache not built.")
+            _print_1c_iteration_result(idx, total, preset, None, failed=True)
             continue
-        sc = suite.score_perch_mem_dir(Path(run["memory_dir"]))
-        if sc is None:
-            sc = suite.score_perch(Path(run["memory_dir"]))
-        _print_soundscape_score(f"Perch/aug/{preset}", sc)
-        run["score"] = sc.to_dict() if sc else None
-        runs.append(run)
+        run = {
+            "aug_preset": preset,
+            "memory_dir": trials[j]["memory_dir"],
+            "train_cache": str(train_cache),
+            "cache_dir": trials[j]["cache_dir"],
+            "aug_config_path": str(
+                Path(trials[j]["cache_dir"]) / f"{preset}_aug_config.json"
+            ),
+        }
+        runs.append(
+            _score_1c_run(
+                suite,
+                run,
+                preset=preset,
+                aug_spec=aug_spec,
+                run_index=idx,
+                total=total,
+                leader=leader,
+            )
+        )
     return runs
 
 
@@ -1472,30 +3124,27 @@ def _run_one_llm_aug_trial(
     embed_max: int | None,
     metric: str,
     clip_subset_path: Path | None = None,
+    spec: dict | None = None,
+    slot_label: str = "",
 ) -> dict | None:
-    """One LLM aug proposal → cache build → fixed head train → soundscape score."""
+    """One aug config → cache build → fixed head train → soundscape score."""
     from aug_researcher import aug_dict_from_logged_spec, slug_from_spec
-    from augmentation import validate_embedding_aug
 
-    spec = researcher.next_experiment()
+    if spec is None:
+        spec = researcher.next_experiment()
+    spec = dict(spec)
     spec["phase"] = phase
     spec["iteration"] = iteration
-    try:
-        aug_dict, _meta = validate_embedding_aug(spec)
-        spec = {**_meta, **aug_dict}
-    except ValueError as exc:
-        print(f"  [1c LLM] Invalid aug spec: {exc}")
-        memory.log(spec=spec, metrics={"status": "failed", "error": str(exc)}, code="")
-        return None
+    slot = slot_label or str(spec.get("slot") or "")
 
-    preset = slug_from_spec(spec, iteration, phase)
+    preset = slug_from_spec(spec, iteration, phase, slot=slot)
     val_cache = PERCH_SHARED_VAL_CACHE
     cache_dir = _perch_aug_search_cache_dir(preset, baselines)
     train_cache = cache_dir / f"train_emb_{preset}.npz"
     force_train = bool(_stage_1c_cfg(config).get("force_rebuild_embed_cache", False))
+    display = _short_aug_display_name(preset, spec)
 
-    print(f"\n  [1c LLM / {phase}] iter {iteration} → preset '{preset}'")
-
+    cache_dir.mkdir(parents=True, exist_ok=True)
     aug_cfg_path = cache_dir / f"{preset}_aug_config.json"
     aug_cfg_path.write_text(json.dumps(aug_dict_from_logged_spec(spec), indent=2), encoding="utf-8")
 
@@ -1513,9 +3162,8 @@ def _run_one_llm_aug_trial(
         clip_subset_path=clip_subset_path,
     )
     if not train_cache.exists():
-        print(f"  [1c LLM] Train cache missing after trial: {train_cache}")
         memory.log(spec=spec, metrics={"status": "failed", "error": "cache_build"}, code="")
-        return None
+        return {"aug_preset": preset, "aug_spec": spec, "failed": True, "display_name": display}
 
     mem_dir = Path(run["memory_dir"])
     metrics = None
@@ -1532,165 +3180,268 @@ def _run_one_llm_aug_trial(
         except (json.JSONDecodeError, OSError):
             pass
 
-    sc = suite.score_perch_mem_dir(mem_dir)
+    sc = suite.score_perch_mem_dir(mem_dir, val_cache=PERCH_SHARED_VAL_CACHE)
     if sc is None:
-        print("  [1c] No cached val preds — falling back to full soundscape ONNX eval")
         sc = suite.score_perch(mem_dir)
-    _print_soundscape_score(f"Perch/aug/{preset}", sc)
     run["score"] = sc.to_dict() if sc else None
     run["aug_spec"] = spec
     run["aug_config_path"] = str(aug_cfg_path)
+    run["display_name"] = display
+    subset_ap = (metrics or {}).get("macro_average_precision")
 
+    if metrics is None:
+        metrics = {}
+    if sc is not None:
+        metrics["soundscape_macro_ap"] = float(sc.primary_value)
     memory.log(spec=spec, metrics=metrics, code=json.dumps(aug_dict_from_logged_spec(spec)))
 
     if sc:
         run["ranking_value"] = float(sc.primary_value)
+    run["_subset_ap"] = subset_ap
+    run["_soundscape_score"] = sc
     return run
 
 
-def _run_stage_1c_llm_explore(
+def _stage_1c_search_cfg(cfg: dict) -> dict:
+    """LLM aug search settings (supports legacy explore/refine keys)."""
+    search = dict(cfg.get("search") or cfg.get("explore") or {})
+    for key in (
+        "iterations",
+        "planner_rounds",
+        "experiments_per_round",
+        "batch_size",
+        "temperature",
+        "researcher_timeout_seconds",
+        "researcher_model",
+        "researcher_provider",
+        "researcher_format_json",
+        "researcher_num_predict",
+        "researcher_compact_prompt",
+        "stream_debug",
+        "quiet_logs",
+    ):
+        if cfg.get(key) is not None and key not in search:
+            search[key] = cfg[key]
+    search.setdefault("iterations", 10)
+    search.setdefault("planner_rounds", search.get("iterations", 10))
+    epr = search.get("experiments_per_round", search.get("batch_size", 3))
+    search["experiments_per_round"] = max(1, int(epr))
+    search.setdefault("temperature", 0.6)
+    search.setdefault("researcher_timeout_seconds", 600)
+    search.setdefault("researcher_format_json", True)
+    search.setdefault("researcher_compact_prompt", True)
+    search.setdefault("researcher_num_predict", 4096)
+    if search.get("stream_debug") is None:
+        search["stream_debug"] = False
+    return search
+
+
+def _resolve_stage_1c_researcher_llm(config: dict, search_cfg: dict) -> tuple[str, str]:
+    """Provider + model for stage-1c aug researcher (overrides global researcher when set)."""
+    llm_cfg = config.get("llm_researcher", {}) or {}
+    researcher_cfg = config.get("researcher", {}) or {}
+    provider = (
+        search_cfg.get("researcher_provider")
+        or llm_cfg.get("provider")
+        or config.get("llm", {}).get("provider", "ollama")
+    )
+    model = (
+        search_cfg.get("researcher_model")
+        or researcher_cfg.get("model")
+        or llm_cfg.get("model", "deepseek-r1:8b")
+    )
+    return str(provider), str(model)
+
+
+def _run_stage_1c_llm_search(
     config: dict,
     suite: SoundscapeEvalSuite,
-    explore_cfg: dict,
+    search_cfg: dict,
+    *,
+    leader: _Stage1cLeader | None = None,
     **common,
 ) -> tuple[list[dict], dict | None]:
-    """Wide LLM exploration of augmentation configs."""
+    """Single-phase LLM aug search: propose → embed → train head → score."""
     from aug_researcher import AugResearcher
     from llm_client import LLMClient
     from memory import ExperimentMemory
 
-    n_iters = int(explore_cfg.get("iterations", 10))
-    mem_dir = META_LOGS / "perch" / "aug_search" / "memory_explore"
+    planner_rounds = int(search_cfg.get("planner_rounds", search_cfg.get("iterations", 3)))
+    experiments_per_round = int(search_cfg.get("experiments_per_round", 3))
+    mem_dir = META_LOGS / "perch" / "aug_search" / "memory"
     mem_dir.mkdir(parents=True, exist_ok=True)
 
     researcher_cfg = config.get("researcher", {})
-    llm_cfg = config.get("llm_researcher", {}) or {}
-    provider = llm_cfg.get("provider") or config.get("llm", {}).get("provider", "ollama")
-    model = researcher_cfg.get("model") or llm_cfg.get("model", "deepseek-r1:8b")
-    temp = float(
-        explore_cfg.get("temperature", researcher_cfg.get("temperature", 0.7))
+    stream_debug = bool(
+        search_cfg.get("stream_debug")
+        if search_cfg.get("stream_debug") is not None
+        else researcher_cfg.get("stream_debug", False)
     )
+    quiet_logs = bool(search_cfg.get("quiet_logs", True))
+    provider, model = _resolve_stage_1c_researcher_llm(config, search_cfg)
+    if provider.lower() == "ollama":
+        from llm_client import resolve_ollama_model
 
-    llm_timeout = float(explore_cfg.get("researcher_timeout_seconds", 300))
-    llm = LLMClient(provider=provider, model=model, timeout_seconds=llm_timeout)
-    memory = ExperimentMemory(mem_dir, ranking_metric=common["metric"])
-    researcher = AugResearcher(llm, memory, temperature=temp, refine_mode=False)
-    print(f"  [1c explore] Researcher LLM timeout: {llm_timeout:.0f}s")
+        resolved, err = resolve_ollama_model(model)
+        if resolved is None:
+            print(f"\n  [1c] FATAL: {err}\n")
+            raise RuntimeError(err)
+        if resolved != model:
+            print(f"  [1c] Resolved researcher_model {model!r} → {resolved!r}")
+            model = resolved
+    temp = float(search_cfg.get("temperature", researcher_cfg.get("temperature", 0.6)))
 
-    print("\n" + "─" * 60)
-    print(f"  STAGE 1c — EXPLORE: {n_iters} LLM augmentation experiments (wide search)")
-    print("─" * 60)
-
-    runs: list[dict] = []
-    for it in range(1, n_iters + 1):
-        run = _run_one_llm_aug_trial(
-            config,
-            suite,
-            iteration=it,
-            phase="explore",
-            researcher=researcher,
-            memory=memory,
-            **common,
-        )
-        if run:
-            runs.append(run)
-
-    winner = _pick_track_winner(runs, common["metric"])
-    return runs, winner
-
-
-def _run_stage_1c_llm_refine(
-    config: dict,
-    suite: SoundscapeEvalSuite,
-    refine_cfg: dict,
-    explore_winner: dict,
-    **common,
-) -> tuple[list[dict], dict | None]:
-    """Refine the explore-phase aug winner with adaptive iteration budget."""
-    from aug_researcher import AugResearcher, aug_dict_from_logged_spec
-    from llm_client import LLMClient
-    from memory import ExperimentMemory
-
-    seed_spec = explore_winner.get("aug_spec") or {}
-    seed_score = float(
-        (explore_winner.get("score") or {}).get("primary_value", -1.0)
+    llm_timeout = float(search_cfg.get("researcher_timeout_seconds", 300))
+    llm = LLMClient(
+        provider=provider,
+        model=model,
+        timeout_seconds=llm_timeout,
+        stream_debug=stream_debug,
     )
-    seed_aug = aug_dict_from_logged_spec(seed_spec) if seed_spec else {}
-
-    mem_dir = META_LOGS / "perch" / "aug_search" / "memory_refine"
-    mem_dir.mkdir(parents=True, exist_ok=True)
-
-    researcher_cfg = config.get("researcher", {})
-    llm_cfg = config.get("llm_researcher", {}) or {}
-    provider = llm_cfg.get("provider") or config.get("llm", {}).get("provider", "ollama")
-    model = researcher_cfg.get("model") or llm_cfg.get("model", "deepseek-r1:8b")
-    temp = float(refine_cfg.get("temperature", researcher_cfg.get("temperature", 0.5)))
-
-    llm_timeout = float(refine_cfg.get("researcher_timeout_seconds", 300))
-    llm = LLMClient(provider=provider, model=model, timeout_seconds=llm_timeout)
     memory = ExperimentMemory(mem_dir, ranking_metric=common["metric"])
     researcher = AugResearcher(
         llm,
         memory,
         temperature=temp,
-        refine_mode=True,
-        seed_aug=seed_aug,
-        seed_score=seed_score,
+        compact_prompt=bool(search_cfg.get("researcher_compact_prompt", True)),
+        format_json=bool(search_cfg.get("researcher_format_json", True)),
+        num_predict=int(search_cfg["researcher_num_predict"])
+        if search_cfg.get("researcher_num_predict") is not None
+        else 4096,
+        batch_size=experiments_per_round,
+        quiet=quiet_logs,
     )
-    print(f"  [1c refine] Researcher LLM timeout: {llm_timeout:.0f}s")
-
-    initial = int(refine_cfg.get("initial_iterations", 5))
-    bonus = int(refine_cfg.get("bonus_iterations_on_improve", 5))
-    max_iters = int(refine_cfg.get("max_iterations", 15))
-
-    print("\n" + "─" * 60)
-    print(
-        f"  STAGE 1c — REFINE: seed {common['metric']}={seed_score:.5f} "
-        f"({explore_winner.get('aug_preset', '?')})"
-    )
-    print(
-        f"  Budget: {initial} initial + {bonus} on improve, max {max_iters}"
-    )
-    print("─" * 60)
 
     runs: list[dict] = []
-    best_val = seed_score
-    it = 0
-    remaining = initial
+    run_idx = int(common.get("run_index_start", 1)) - 1
+    total_runs = int(common.get("run_index_total", planner_rounds * experiments_per_round))
+    trial_kw = {
+        k: v
+        for k, v in common.items()
+        if k not in ("run_index_start", "run_index_total")
+    }
 
-    while remaining > 0 and it < max_iters:
-        it += 1
-        remaining -= 1
-        run = _run_one_llm_aug_trial(
-            config,
-            suite,
-            iteration=it,
-            phase="refine",
-            researcher=researcher,
-            memory=memory,
-            **common,
-        )
-        if not run:
-            continue
-        runs.append(run)
-        val = run.get("ranking_value")
-        if val is not None and val > best_val:
-            print(
-                f"  [1c refine] Improved {common['metric']}: "
-                f"{best_val:.5f} → {val:.5f} (+{bonus} bonus tries)"
+    winner_mem = trial_kw["winner_mem"]
+    head_code_path = trial_kw["head_code_path"]
+    indices_path = trial_kw["indices_path"]
+    head_spec = trial_kw["head_spec"]
+    baselines = trial_kw["baselines"]
+    clip_subset_path = trial_kw.get("clip_subset_path")
+    if leader is None:
+        leader = _Stage1cLeader()
+    from aug_researcher import aug_dict_from_logged_spec, slug_from_spec
+
+    for round_i in range(1, planner_rounds + 1):
+        print(f"\n  Round {round_i}/{planner_rounds} — LLM planner ({experiments_per_round} configs)…")
+        specs = researcher.next_experiments()
+        trials: list[dict] = []
+        round_meta: list[tuple[int, dict, str]] = []
+
+        for slot_i, spec in enumerate(specs, 1):
+            run_idx += 1
+            slot = str(spec.get("slot") or f"a{slot_i}")
+            spec = dict(spec)
+            spec["phase"] = "aug"
+            spec["iteration"] = run_idx
+            preset = slug_from_spec(spec, run_idx, "aug", slot=slot)
+            trial_idx = run_idx
+            cache_dir = _perch_aug_search_cache_dir(preset, baselines)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            train_cache = cache_dir / f"train_emb_{preset}.npz"
+            aug_dict = aug_dict_from_logged_spec(spec)
+            (cache_dir / f"{preset}_aug_config.json").write_text(
+                json.dumps(aug_dict, indent=2), encoding="utf-8"
             )
-            best_val = val
-            remaining += bonus
+            force_rebuild = _need_rebuild_1c_train_cache(
+                train_cache,
+                clip_subset_path=clip_subset_path,
+                indices_path=indices_path if clip_subset_path is None else indices_path,
+            )
+            if bool(_stage_1c_cfg(config).get("force_rebuild_embed_cache", False)):
+                force_rebuild = True
+            trials.append(
+                _build_1c_trial_payload(
+                    preset=preset,
+                    aug_dict=aug_dict,
+                    head_code_path=head_code_path,
+                    head_spec={**head_spec, "aug_preset": preset, "aug_phase": "aug"},
+                    indices_path=indices_path if clip_subset_path is None else None,
+                    train_cache=train_cache,
+                    force_rebuild_train=force_rebuild,
+                )
+            )
+            round_meta.append((trial_idx, spec, preset))
 
-    winner = _pick_track_winner(runs, common["metric"])
-    if winner is None:
-        winner = explore_winner
-    return runs, winner
+        if trials:
+            print(
+                f"  [1c] Running {len(trials)} LLM trial(s) in one Perch session (ONNX loaded once)…",
+                flush=True,
+            )
+            _run_perch_1c_sweep_subprocess(
+                config,
+                trials,
+                mapping_src=winner_mem,
+                clip_subset_path=clip_subset_path,
+            )
+
+        for (trial_idx, spec, preset), trial in zip(round_meta, trials):
+            label = _short_aug_display_name(preset, spec)
+            train_cache = Path(trial["train_cache"])
+            if not train_cache.exists():
+                memory.log(
+                    spec=spec,
+                    metrics={"status": "failed", "error": "cache_build"},
+                    code="",
+                )
+                _print_1c_iteration_result(trial_idx, total_runs, label, None, failed=True)
+                continue
+            run = {
+                "aug_preset": preset,
+                "memory_dir": trial["memory_dir"],
+                "train_cache": str(train_cache),
+                "cache_dir": trial["cache_dir"],
+                "aug_config_path": str(Path(trial["cache_dir"]) / f"{preset}_aug_config.json"),
+                "aug_spec": spec,
+            }
+            run = _score_1c_run(
+                suite,
+                run,
+                preset=preset,
+                aug_spec=spec,
+                run_index=trial_idx,
+                total=total_runs,
+                leader=leader,
+            )
+            metrics = None
+            info_path = Path(run["memory_dir"]) / "best_model_info.json"
+            if info_path.exists():
+                try:
+                    info = json.loads(info_path.read_text(encoding="utf-8"))
+                    metrics = {
+                        "status": "success",
+                        "macro_average_precision": info.get("macro_average_precision"),
+                        "macro_roc_auc": info.get("macro_roc_auc"),
+                        "median_per_class_auc": info.get("median_per_class_auc"),
+                    }
+                except (json.JSONDecodeError, OSError):
+                    pass
+            if metrics is None:
+                metrics = {}
+            if run.get("score"):
+                metrics["soundscape_macro_ap"] = float(run["score"]["primary_value"])
+            memory.log(
+                spec=spec,
+                metrics=metrics,
+                code=json.dumps(aug_dict_from_logged_spec(spec)),
+            )
+            runs.append(run)
+
+    return runs, None
 
 
 def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
     """
-    Stage 1c: lock best 1b head; search augmentation (LLM explore + optional refine).
+    Stage 1c: lock best 1b head; single-phase LLM augmentation search (propose → test).
     """
     cfg = _stage_1c_cfg(config)
     if not cfg.get("enabled", False):
@@ -1720,9 +3471,7 @@ def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
 
     baselines = _baseline_names(config)
     embed_frac = float(_meta_cfg(config).get("arch_search_embed_sample_frac", 0.5))
-    embed_max = _meta_cfg(config).get("arch_search_embed_max_samples")
-    if embed_max is not None:
-        embed_max = int(embed_max)
+    embed_max = _embed_max_samples(config)
 
     aug_preset = winner.get("aug_baseline", "medium")
     source_cache = Path(winner.get("cache_dir", META_LOGS / "perch_cache" / aug_preset))
@@ -1730,16 +3479,19 @@ def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
     if not source_train.exists():
         source_train = source_cache / "train_emb.npz"
 
-    mode = str(cfg.get("mode", "llm")).lower()
-    explore_cfg = dict(cfg.get("explore") or {})
-    refine_cfg = dict(cfg.get("refine") or {})
-    explore_cfg.setdefault("iterations", cfg.get("iterations", 10))
+    mode = str(cfg.get("mode", "presets")).lower()
+    if mode in ("baseline", "baselines", "fixed"):
+        mode = "presets"
+    search_cfg = _stage_1c_search_cfg(cfg)
+    preset_list = _resolve_stage_1c_presets(cfg, winner)
 
     _ensure_shared_1c_val_cache(config)
 
-    print("=" * 60)
-    print(f"  STAGED PIPELINE — Step 1c: Augmentation search (mode={mode})")
-    print("=" * 60)
+    include_presets = bool(cfg.get("include_preset_baselines", mode in ("presets", "both")))
+    if mode in ("llm", "llm_batch") and include_presets:
+        mode_label = "presets + LLM"
+    else:
+        mode_label = mode
 
     indices_path = _ensure_head_train_indices(
         config, source_train, cap=cfg.get("head_train_samples")
@@ -1752,10 +3504,17 @@ def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
         clip_subset_path = _ensure_head_train_clips(
             config, source_train, indices_path, species_to_idx
         )
-        print(
-            f"  [1c] Fast mode: each aug trial embeds {cfg.get('head_train_samples', 2000)} "
-            f"clips only (not the full {int(np.load(source_train)['X'].shape[0])} cache)"
-        )
+    fast_line = (
+        f"Fast embed: {cfg.get('head_train_samples', 2000)} clips/trial "
+        f"(locked head from 1b)"
+    )
+    _print_1c_phase_header(
+        f"STAGE 1c — AUGMENTATION SEARCH ({mode_label})",
+        lines=[
+            f"Metric: {metric} on labeled train_soundscapes",
+            fast_line if cfg.get("embed_subset_only", True) else "Full train embed per trial",
+        ],
+    )
 
     head_spec: dict = {}
     info_path = winner_mem / "best_model_info.json"
@@ -1778,49 +3537,63 @@ def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
         "clip_subset_path": clip_subset_path,
     }
 
-    explore_runs: list[dict] = []
-    refine_runs: list[dict] = []
+    llm_runs: list[dict] = []
     preset_runs: list[dict] = []
-    explore_winner: dict | None = None
-    refine_winner: dict | None = None
+    llm_winner: dict | None = None
     final_winner: dict | None = None
 
-    if mode in ("llm", "both"):
-        explore_runs, explore_winner = _run_stage_1c_llm_explore(
-            config, suite, explore_cfg, **common
+    n_presets = len(preset_list) if include_presets else 0
+    n_llm = 0
+    if mode in ("llm", "llm_batch", "both"):
+        n_llm = int(search_cfg.get("planner_rounds", 3)) * int(
+            search_cfg.get("experiments_per_round", 3)
         )
-        if explore_winner and refine_cfg.get("enabled", True):
-            refine_runs, refine_winner = _run_stage_1c_llm_refine(
-                config, suite, refine_cfg, explore_winner, **common
-            )
-        final_winner = refine_winner or explore_winner
+    total_trials = n_presets + n_llm
+    run_idx = 1
+    leader = _Stage1cLeader()
 
-    if mode in ("presets", "both"):
-        n_iters = int(explore_cfg.get("iterations", cfg.get("iterations", 10)))
-        preset_names = cfg.get("aug_presets")
-        if preset_names:
-            presets = [str(p).lower() for p in preset_names][:n_iters]
-        else:
-            presets = list_aug_search_preset_names()[:n_iters]
+    if include_presets and n_presets:
+        print(f"\n  Preset baselines ({n_presets})")
         preset_runs = _run_stage_1c_preset_grid(
-            config, suite, winner=winner, presets=presets, **common
+            config,
+            suite,
+            winner=winner,
+            winner_mem=common["winner_mem"],
+            head_code_path=common["head_code_path"],
+            indices_path=common["indices_path"],
+            head_spec=common["head_spec"],
+            baselines=common["baselines"],
+            embed_frac=common["embed_frac"],
+            embed_max=common["embed_max"],
+            presets=preset_list,
+            clip_subset_path=common["clip_subset_path"],
+            run_index_start=run_idx,
+            run_index_total=total_trials,
+            leader=leader,
         )
-        preset_winner = _pick_track_winner(preset_runs, metric)
-        if final_winner is None or (
-            preset_winner
-            and float((preset_winner.get("score") or {}).get("primary_value", -1))
-            > float((final_winner.get("score") or {}).get("primary_value", -1))
-        ):
-            final_winner = preset_winner
+        run_idx += n_presets
+
+    if mode in ("llm", "llm_batch", "both"):
+        print(f"\n  LLM custom configs (~{n_llm} trials)")
+        common_llm = {
+            **common,
+            "run_index_start": run_idx,
+            "run_index_total": total_trials,
+        }
+        llm_runs, _ = _run_stage_1c_llm_search(
+            config, suite, search_cfg, leader=leader, **common_llm
+        )
+
+    all_runs = preset_runs + llm_runs
+    final_winner = _finalize_1c_winner(
+        all_runs, metric=metric, baselines=baselines, announce=True
+    )
+    llm_winner = _finalize_1c_winner(llm_runs, metric=metric, baselines=baselines)
+    preset_winner = _finalize_1c_winner(preset_runs, metric=metric, baselines=baselines)
 
     best_aug_config: dict | None = None
-    if final_winner and final_winner.get("aug_spec"):
-        from aug_researcher import aug_dict_from_logged_spec
-
-        try:
-            best_aug_config = aug_dict_from_logged_spec(final_winner["aug_spec"])
-        except ValueError:
-            best_aug_config = None
+    if final_winner:
+        best_aug_config = _load_aug_dict_for_1c_winner(final_winner, baselines)
     if best_aug_config:
         best_aug_path = META_LOGS / "perch" / "aug_search" / "best_aug_config.json"
         best_aug_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1833,23 +3606,21 @@ def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
         "head_train_indices": str(indices_path),
         "locked_head_code": str(head_code_path),
         "refine_winner_1b": winner,
-        "explore_runs": explore_runs,
-        "explore_winner": explore_winner,
-        "refine_runs": refine_runs,
-        "refine_winner": refine_winner,
+        "llm_runs": llm_runs,
+        "llm_winner": llm_winner,
+        "explore_runs": llm_runs,
+        "explore_winner": llm_winner,
+        "refine_runs": [],
+        "refine_winner": None,
         "preset_runs": preset_runs,
+        "preset_winner": preset_winner,
         "winner": final_winner,
         "best_aug_config": str(META_LOGS / "perch" / "aug_search" / "best_aug_config.json")
         if best_aug_config
         else None,
     }
     ARCH_SEARCH_1C_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(f"\n  Step 1c summary → {ARCH_SEARCH_1C_RESULTS}")
-    if final_winner:
-        print(
-            f"\n  ★ Aug-search winner: {final_winner.get('aug_preset')}  "
-            f"{metric}={float((final_winner.get('score') or {}).get('primary_value', 0)):.5f}"
-        )
+    print(f"\n  Results saved → {ARCH_SEARCH_1C_RESULTS}")
     return summary
 
 
@@ -1891,19 +3662,11 @@ def run_stage_1d_final_train(config: dict) -> dict:
     )
 
     best_aug_path = META_LOGS / "perch" / "aug_search" / "best_aug_config.json"
-    aug_dict: dict | None = None
-    if best_aug_path.exists():
-        try:
-            aug_dict = json.loads(best_aug_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    if aug_dict is None:
-        try:
-            aug_dict = get_aug_search_preset(preset)
-        except KeyError:
-            aug_dict = get_audio_embedding_aug(
-                preset if preset in baselines else "medium"
-            )
+    aug_dict = _load_aug_dict_for_1c_winner(aug_winner, baselines)
+    if not best_aug_path.exists() and aug_dict:
+        best_aug_path.parent.mkdir(parents=True, exist_ok=True)
+        best_aug_path.write_text(json.dumps(aug_dict, indent=2), encoding="utf-8")
+        print(f"  [Stage 1d] Wrote {best_aug_path.name} from 1c winner config")
 
     final_cache_dir = META_LOGS / "perch_cache" / "final"
     train_cache = final_cache_dir / f"train_emb_{preset}_full.npz"
@@ -1916,6 +3679,7 @@ def run_stage_1d_final_train(config: dict) -> dict:
         mem_dir = META_LOGS / "perch" / "final" / "_cache_build"
         code_dir = mem_dir / "codes"
         perch_base = dict(config.get("perch", {}))
+        embed_cap = _embed_max_samples(config)
         override = {
             "meta_aug_preset": f"{preset}_full",
             "augmentation": aug_dict,
@@ -1932,6 +3696,8 @@ def run_stage_1d_final_train(config: dict) -> dict:
                 "skip_final_retrain": True,
             },
         }
+        if embed_cap is not None:
+            override["perch"]["max_train_samples"] = embed_cap
         _run_subprocess("perch_agent.py", override, config)
         built = final_cache_dir / f"train_emb_{preset}_full.npz"
         if built.exists():
@@ -2024,9 +3790,217 @@ def run_stage_1d_final_train(config: dict) -> dict:
         "output_dir": str(PERCH_FINAL_DIR),
         "success": ok,
     }
-    (META_LOGS / "arch_search_1d_results.json").write_text(
-        json.dumps(summary, indent=2), encoding="utf-8"
+    ARCH_SEARCH_1D_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    return summary
+
+
+def run_stage_1e_pseudo_refine(config: dict, suite: SoundscapeEvalSuite) -> dict:
+    """
+    Stage 1e: embed unlabeled soundscapes, soft pseudo-labels, fine-tune the 1d head.
+
+    Supervised data = focal full train cache from 1d plus labeled soundscape val cache
+    (same as 1d final retrain). Pseudo windows are embedded without augmentation and
+    filtered with fixed top1/runner-up thresholds.
+    """
+    cfg = _stage_1e_cfg(config)
+    if not cfg.get("enabled", False):
+        print("\n  [Stage 1e] Skipped (stage_1e.enabled=false)")
+        return {}
+
+    if _skip_if_completed(config, ARCH_SEARCH_1E_RESULTS, "Stage 1e"):
+        try:
+            return json.loads(ARCH_SEARCH_1E_RESULTS.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    teacher_head = PERCH_FINAL_DIR / "final_head.keras"
+    teacher_weights = PERCH_FINAL_DIR / "final_head.weights.h5"
+    if not teacher_head.exists() and not teacher_weights.exists():
+        print("\n  [Stage 1e] No stage-1d final head — run stage 1d first.")
+        return {"stage": "1e_pseudo_refine", "success": False}
+
+    train_cache: Path | None = None
+    preset = "medium"
+    if ARCH_SEARCH_1D_RESULTS.exists():
+        try:
+            s1d = json.loads(ARCH_SEARCH_1D_RESULTS.read_text(encoding="utf-8"))
+            if s1d.get("train_cache"):
+                train_cache = Path(s1d["train_cache"])
+            preset = str(s1d.get("aug_preset", preset))
+        except (json.JSONDecodeError, OSError):
+            pass
+    if train_cache is None or not train_cache.exists():
+        train_cache = META_LOGS / "perch_cache" / "final" / f"train_emb_{preset}_full.npz"
+    if not train_cache.exists():
+        print(f"\n  [Stage 1e] Train cache missing: {train_cache}")
+        return {"stage": "1e_pseudo_refine", "success": False}
+
+    head_code_path: Path | None = None
+    if ARCH_SEARCH_1C_RESULTS.exists():
+        try:
+            s1c = json.loads(ARCH_SEARCH_1C_RESULTS.read_text(encoding="utf-8"))
+            locked = s1c.get("locked_head_code")
+            if locked:
+                head_code_path = Path(locked)
+        except (json.JSONDecodeError, OSError):
+            pass
+    for candidate in (PERCH_FINAL_DIR / "best_head_code.py",):
+        if candidate.exists():
+            head_code_path = candidate
+            break
+    if head_code_path is None:
+        sub_head = PROJECT_ROOT / "submission" / "perch_best_head_code.py"
+        if sub_head.exists():
+            head_code_path = sub_head
+    if head_code_path is None or not head_code_path.exists():
+        print("\n  [Stage 1e] Missing best_head_code.py — cannot refine architecture.")
+        return {"stage": "1e_pseudo_refine", "success": False}
+
+    top1 = float(cfg.get("top1_threshold", 0.55))
+    runnerup = float(cfg.get("runnerup_max", 0.35))
+    pl_weight = float(cfg.get("pseudo_label_weight", 0.8))
+    sw_sup = float(cfg.get("sample_weight_supervised", 1.0))
+    sw_val = float(cfg.get("sample_weight_labeled_val", sw_sup))
+    sw_ps = float(cfg.get("sample_weight_pseudo", 0.5))
+    rebuild = bool(cfg.get("rebuild_pseudo_cache", False))
+    include_labeled_val = bool(cfg.get("include_labeled_val_in_refine", True))
+    val_cache = PERCH_SHARED_VAL_CACHE if include_labeled_val and PERCH_SHARED_VAL_CACHE.exists() else None
+
+    print("\n" + "=" * 60)
+    print("  STAGED PIPELINE — Step 1e: Pseudo-label refine")
+    print(f"  Thresholds: top1≥{top1}  runner-up<{runnerup}  soft_label×{pl_weight}")
+    print(f"  Supervised cache: {train_cache.name}  (focal train, from 1d)")
+    if val_cache is not None:
+        print(f"  Labeled val cache: {val_cache.name}  (competition soundscape windows)")
+    else:
+        print("  Labeled val cache: skipped")
+    print("=" * 60)
+
+    pseudo_stats: dict = {}
+    if rebuild or not PSEUDO_LABELS_NPZ.exists():
+        sys.path.insert(0, str(PROJECT_ROOT / "src"))
+        from perch_pseudo import build_pseudo_label_cache
+
+        teacher_path = teacher_head if teacher_head.exists() else teacher_weights
+        pseudo_stats = build_pseudo_label_cache(
+            config=config,
+            teacher_head_path=teacher_path,
+            out_path=PSEUDO_LABELS_NPZ,
+            soundscapes_dir=TRAIN_SOUNDSCAPES,
+            labels_csv=SOUNDSCAPE_LABELS,
+            top1_threshold=top1,
+            runnerup_max=runnerup,
+            pseudo_label_weight=pl_weight,
+            file_batch_size=int(cfg.get("file_batch_size", 16)),
+            embed_batch_size=int(config.get("perch", {}).get("embed_batch_size", 16)),
+            max_files=cfg.get("max_soundscape_files"),
+        )
+        if pseudo_stats.get("empty_pseudo"):
+            print("\n  [1e] Continuing with supervised-only fine-tune (no pseudo windows).")
+    else:
+        d = np.load(str(PSEUDO_LABELS_NPZ), allow_pickle=True)
+        pseudo_stats = {
+            "n_accepted": int(d["n_accepted"]) if "n_accepted" in d.files else int(d["X_pseudo"].shape[0]),
+            "out_path": str(PSEUDO_LABELS_NPZ),
+            "reused_cache": True,
+        }
+        print(
+            f"\n  [1e] Reusing pseudo cache → {PSEUDO_LABELS_NPZ.name} "
+            f"({pseudo_stats['n_accepted']} windows)"
+        )
+
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    from code_executor import CodeExecutor
+    from perch_agent import _build_pseudo_refine_script
+
+    PERCH_FINAL_DIR.mkdir(parents=True, exist_ok=True)
+    code_dir = PERCH_FINAL_DIR / "codes"
+    code_dir.mkdir(parents=True, exist_ok=True)
+    head_code = head_code_path.read_text(encoding="utf-8")
+
+    py_exe = config.get("execution", {}).get("python_executable", "python3")
+    timeout = int(config.get("execution", {}).get("timeout_seconds", 1800))
+    if cfg.get("refine_timeout_seconds"):
+        timeout = int(cfg["refine_timeout_seconds"])
+    executor = CodeExecutor(python_executable=py_exe, timeout_seconds=timeout)
+
+    init_weights = teacher_head if teacher_head.exists() else teacher_weights
+    script = _build_pseudo_refine_script(
+        head_code,
+        PERCH_FINAL_DIR,
+        train_cache,
+        PSEUDO_LABELS_NPZ,
+        val_cache=val_cache,
+        init_weights=init_weights,
+        fine_tune_lr=float(cfg.get("fine_tune_lr", 2e-4)),
+        epochs=int(cfg.get("fine_tune_epochs", 15)),
+        val_split=float(cfg.get("val_split", 0.1)),
+        sample_weight_supervised=sw_sup,
+        sample_weight_labeled_val=sw_val,
+        sample_weight_pseudo=sw_ps,
     )
+    script_path = code_dir / "pseudo_refine.py"
+    script_path.write_text(script, encoding="utf-8")
+    score_1d: dict | None = None
+    if teacher_head.exists():
+        for stale in ("final_head_pseudo.keras", "final_head_pseudo.weights.h5"):
+            (PERCH_FINAL_DIR / stale).unlink(missing_ok=True)
+        try:
+            sc_before = suite.score_perch(PERCH_FINAL_DIR)
+            if sc_before:
+                score_1d = sc_before.to_dict()
+                _print_soundscape_score("Perch/1d (pre-pseudo head)", sc_before)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            print(f"  [1e] Pre-pseudo score skipped: {exc}")
+
+    print("\n  [1e] Fine-tuning head on supervised + pseudo embeddings…")
+    result = executor.run_file(script_path)
+    ok = result.success and "PSEUDO_REFINE_DONE" in (result.stdout or "")
+
+    score_1e: dict | None = None
+    if ok:
+        pseudo_keras = PERCH_FINAL_DIR / "final_head_pseudo.keras"
+        pseudo_weights = PERCH_FINAL_DIR / "final_head_pseudo.weights.h5"
+        print(f"  [1e] Saved → {pseudo_keras.name}")
+        # Prefer pseudo head for downstream scoring / submission
+        if pseudo_keras.exists():
+            shutil.copy2(pseudo_keras, PERCH_FINAL_DIR / "best_head.keras")
+        if pseudo_weights.exists():
+            shutil.copy2(pseudo_weights, PERCH_FINAL_DIR / "best_head.weights.h5")
+        try:
+            sc_after = suite.score_perch(PERCH_FINAL_DIR)
+            if sc_after:
+                score_1e = sc_after.to_dict()
+                _print_soundscape_score("Perch/1e (pseudo-refined)", sc_after)
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            print(f"  [1e] Post-pseudo score skipped: {exc}")
+        if cfg.get("copy_to_submission", True):
+            sub = PROJECT_ROOT / "submission"
+            sub.mkdir(parents=True, exist_ok=True)
+            if pseudo_keras.exists():
+                _safe_copy2(pseudo_keras, sub / "perch_final_head_pseudo.keras")
+                _safe_copy2(pseudo_keras, sub / "perch_final_head.keras")
+            if pseudo_weights.exists():
+                _safe_copy2(pseudo_weights, sub / "perch_final_head_pseudo.weights.h5")
+                _safe_copy2(pseudo_weights, sub / "perch_final_head.weights.h5")
+            _safe_copy2(head_code_path, sub / "perch_best_head_code.py")
+            print(f"  [1e] Submission bundle updated → {sub}")
+    else:
+        print(f"  [Stage 1e] Pseudo refine failed: {(result.stderr or '')[-500:]}")
+
+    summary = {
+        "stage": "1e_pseudo_refine",
+        "success": ok,
+        "train_cache": str(train_cache),
+        "pseudo_cache": str(PSEUDO_LABELS_NPZ),
+        "pseudo_stats": pseudo_stats,
+        "thresholds": {"top1": top1, "runnerup_max": runnerup, "pseudo_label_weight": pl_weight},
+        "output_dir": str(PERCH_FINAL_DIR),
+        "score_1d": score_1d,
+        "score_1e": score_1e,
+    }
+    ARCH_SEARCH_1E_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\n  Results saved → {ARCH_SEARCH_1E_RESULTS}")
     return summary
 
 
@@ -2034,6 +4008,12 @@ def _skip_if_completed(config: dict, results_path: Path, stage_label: str) -> bo
     if not _meta_cfg(config).get("skip_completed_stages", False):
         return False
     if results_path.exists():
+        try:
+            payload = json.loads(results_path.read_text(encoding="utf-8"))
+            if payload.get("success") is False:
+                return False
+        except (json.JSONDecodeError, OSError, TypeError):
+            pass
         print(f"\n  [{stage_label}] Skipped — results already at {results_path.name}")
         return True
     return False
@@ -2041,83 +4021,16 @@ def _skip_if_completed(config: dict, results_path: Path, stage_label: str) -> bo
 
 def run_stage_1a_arch_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
     """
-    Step 1a: for each track, run architecture search on each aug baseline separately.
-    Returns JSON-serialisable summary (also written to ARCH_SEARCH_1A_RESULTS).
+    Step 1a only — all tracks in ``track_order`` (architecture search per track).
+    For full per-track pipelines use ``run_staged_pipeline_sequential``.
     """
     if _skip_if_completed(config, ARCH_SEARCH_1A_RESULTS, "Stage 1a"):
         try:
             return json.loads(ARCH_SEARCH_1A_RESULTS.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             pass
-
-    meta = _meta_cfg(config)
-    baselines = _baseline_names(config)
-    metric = _meta_primary_metric(config)
-
-    cnn_iters = int(meta.get("cnn_iterations", 0))
-    bird_iters = int(meta.get("birdnet_iterations", 0))
-    perch_iters = int(meta.get("perch_iterations", 0))
-
-    cnn_max = int(meta.get("arch_search_cnn_max_samples", 2000))
-    embed_frac = float(meta.get("arch_search_embed_sample_frac", 0.5))
-    embed_max = meta.get("arch_search_embed_max_samples")
-    if embed_max is not None:
-        embed_max = int(embed_max)
-
-    print("\n" + "=" * 60)
-    print("  STAGED PIPELINE — Step 1a: Architecture search × aug baselines")
-    print(f"  Baselines: {', '.join(baselines)}")
-    print(f"  Ranking metric: {metric}")
-    print("=" * 60)
-
-    summary: dict = {
-        "stage": "1a_arch_search",
-        "primary_metric": metric,
-        "aug_baselines": baselines,
-        "tracks": {},
-    }
-
-    if cnn_iters > 0:
-        per = _arch_iters_per_baseline(config, cnn_iters)
-        cnn_runs = [
-            _run_cnn_baseline_1a(config, b, per, cnn_max, suite)
-            for b in baselines
-        ]
-        winner = _pick_track_winner(cnn_runs, metric)
-        summary["tracks"]["cnn"] = {"runs": cnn_runs, "winner": winner}
-        if winner:
-            sc = winner["score"]
-            print(
-                f"\n  ★ CNN track winner: aug={winner['aug_baseline']}  "
-                f"{format_soundscape_metrics_line(macro_ap=sc.get('macro_average_precision'), macro_auc=sc.get('competition_macro_auc'), median_auc=sc.get('median_per_class_auc'), ranking_metric=metric)}"
-            )
-
-    if bird_iters > 0:
-        per = _arch_iters_per_baseline(config, bird_iters)
-        bn_runs = [
-            _run_birdnet_baseline_1a(config, b, per, embed_frac, suite)
-            for b in baselines
-        ]
-        winner = _pick_track_winner(bn_runs, metric)
-        summary["tracks"]["birdnet"] = {"runs": bn_runs, "winner": winner}
-        if winner:
-            print(f"\n  ★ BirdNET track winner: aug={winner['aug_baseline']}")
-
-    if perch_iters > 0:
-        per = _arch_iters_per_baseline(config, perch_iters)
-        p_runs = [
-            _run_perch_baseline_1a(config, b, per, embed_frac, embed_max, suite)
-            for b in baselines
-        ]
-        winner = _pick_track_winner(p_runs, metric)
-        summary["tracks"]["perch"] = {"runs": p_runs, "winner": winner}
-        if winner:
-            print(f"\n  ★ Perch track winner: aug={winner['aug_baseline']}")
-
-    META_LOGS.mkdir(parents=True, exist_ok=True)
-    ARCH_SEARCH_1A_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(f"\n  Step 1a summary → {ARCH_SEARCH_1A_RESULTS}")
-    return summary
+    run_staged_pipeline_sequential(config, suite, "staged_1a")
+    return _load_1a_summary(config)
 
 
 def save_soundscape_leaderboard(
@@ -2168,11 +4081,16 @@ def main():
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=str(PROJECT_ROOT / "configs" / "agent_config.json"))
+    parser.add_argument(
+        "--pipeline",
+        default=None,
+        help="Override meta_agent.pipeline (e.g. staged_1e_only, staged_finalize, staged_tournament)",
+    )
     args   = parser.parse_args()
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
 
     meta_cfg        = _meta_cfg(config)
-    pipeline        = str(meta_cfg.get("pipeline", "legacy")).lower()
+    pipeline        = str(args.pipeline or meta_cfg.get("pipeline", "legacy")).lower()
     cnn_iters       = int(meta_cfg.get("cnn_iterations",        5))
     birdnet_iters   = int(meta_cfg.get("birdnet_iterations",   10))
     perch_iters     = int(meta_cfg.get("perch_iterations",     10))
@@ -2191,8 +4109,39 @@ def main():
         run_stage_1c_aug_search(config, suite)
         if _stage_1d_cfg(config).get("enabled", False):
             run_stage_1d_final_train(config)
+        if _stage_1e_cfg(config).get("enabled", False):
+            if _skip_if_completed(config, ARCH_SEARCH_1E_RESULTS, "Stage 1e"):
+                pass
+            else:
+                run_stage_1e_pseudo_refine(config, suite)
         print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
         print("=" * 60)
+        return
+
+    if pipeline == "staged_finalize":
+        if meta_cfg.get("run_eda", False):
+            run_phase0_eda(config)
+        run_staged_finalize_winner(config, suite)
+        print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
+        print("=" * 60)
+        print("\n  Tournament finalize finished.")
+        print(f"  Kaggle bundle: {PROJECT_ROOT / 'submission'}")
+        return
+
+    if pipeline == "staged_1e_only":
+        print("\n  Pipeline: staged_1e_only — pseudo-refine only (reuse existing caches)")
+        if not (PERCH_FINAL_DIR / "final_head.keras").exists() and not (
+            PERCH_FINAL_DIR / "final_head.weights.h5"
+        ).exists():
+            print("  [1e] Missing stage-1d head in logs/meta_agent/perch/final/ — run stage 1d first.")
+        elif not PSEUDO_LABELS_NPZ.exists():
+            print(f"  [1e] Missing {PSEUDO_LABELS_NPZ.name} — run pseudo cache build first.")
+        else:
+            run_stage_1e_pseudo_refine(config, suite)
+        print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
+        print("=" * 60)
+        print(f"  Perch final: {PERCH_FINAL_DIR}")
+        print(f"  Submission: {PROJECT_ROOT / 'submission'}")
         return
 
     staged_pipelines = (
@@ -2200,29 +4149,19 @@ def main():
         "staged_1a_1b",
         "staged_1a_1b_1c",
         "staged_full",
+        "staged_tournament",
     )
     if pipeline in staged_pipelines:
         if meta_cfg.get("run_eda", False):
             run_phase0_eda(config)
-        run_stage_1a_arch_search(config, suite)
-        if pipeline in ("staged_1a_1b", "staged_1a_1b_1c", "staged_full") or _stage_1b_cfg(
-            config
-        ).get("enabled", False):
-            run_stage_1b_perch_refine(config, suite)
-        if pipeline in ("staged_1a_1b_1c", "staged_full") or _stage_1c_cfg(config).get(
-            "enabled", False
-        ):
-            run_stage_1c_aug_search(config, suite)
-        if pipeline == "staged_full" or _stage_1d_cfg(config).get("enabled", False):
-            if _skip_if_completed(config, META_LOGS / "arch_search_1d_results.json", "Stage 1d"):
-                pass
-            else:
-                run_stage_1d_final_train(config)
+        run_staged_pipeline_sequential(config, suite, pipeline)
         print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
         print("=" * 60)
-        print("\n  Overnight perch pipeline finished.")
-        print(f"  Kaggle bundle (if 1d succeeded): {PROJECT_ROOT / 'submission'}")
-        print(f"  Full model dir: {PERCH_FINAL_DIR}")
+        mode = "tournament" if _use_tournament_mode(config, pipeline) else "sequential"
+        print(f"\n  Staged pipeline finished ({mode}).")
+        print(f"  Tournament results: {TOURNAMENT_RESULTS}")
+        print(f"  Kaggle bundle: {PROJECT_ROOT / 'submission'}")
+        print(f"  Perch final: {PERCH_FINAL_DIR}  |  CNN final: {CNN_FINAL_DIR}")
         return
 
     if meta_cfg.get("run_eda", True):

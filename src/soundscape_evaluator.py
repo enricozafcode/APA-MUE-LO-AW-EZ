@@ -18,6 +18,40 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 PRIMARY_META_METRIC = "macro_average_precision"
 
 
+def soundscape_window_row_ids(
+    labels_csv: Path,
+    *,
+    sort_for_benchmark: bool = False,
+) -> list[str]:
+    """
+    Row ids for labeled soundscape windows in cache-build order (groupby iteration).
+
+    ``sort_for_benchmark=True`` matches ``build_soundscape_ground_truth`` index order.
+    """
+    lab = pd.read_csv(labels_csv)
+
+    def _tok(val: object) -> set[str]:
+        if pd.isna(val) or val == "":
+            return set()
+        return {t.strip() for t in str(val).split(";") if t.strip()}
+
+    grp = (
+        lab.groupby(["filename", "start", "end"], sort=False)["primary_label"]
+        .agg(lambda s: set().union(*[_tok(v) for v in s]))
+        .reset_index()
+    )
+    grp["end_sec"] = pd.to_timedelta(grp["end"]).dt.total_seconds().astype(int)
+    grp["row_id"] = (
+        grp["filename"].str.replace(".ogg", "", regex=False)
+        + "_"
+        + grp["end_sec"].astype(str)
+    )
+    row_ids = grp["row_id"].tolist()
+    if sort_for_benchmark:
+        row_ids = sorted(row_ids)
+    return row_ids
+
+
 def competition_macro_auc(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, int]:
     """
     BirdCLEF macro ROC-AUC: mean per-class AUC over species with both positives
@@ -259,19 +293,43 @@ class SoundscapeEvalSuite:
         )
         return self.score_from_pred_df(pred_df)
 
-    def score_perch_mem_dir(self, archive_dir: Path) -> SoundscapeScore | None:
+    def score_perch_mem_dir(
+        self,
+        archive_dir: Path,
+        *,
+        val_cache: Path | None = None,
+    ) -> SoundscapeScore | None:
         """
-        Score from ``best_val_preds.npy`` saved during cached-val head training
-        (avoids re-running ONNX on every soundscape window).
+        Score from ``best_val_preds.npy`` saved during cached-val head training.
+
+        Predictions are aligned to benchmark ``row_id`` order (val cache iteration
+        order differs from sorted ``y_true_df`` index).
         """
         archive_dir = Path(archive_dir)
         preds_path = archive_dir / "best_val_preds.npy"
         if not preds_path.exists():
             return None
         preds = np.load(preds_path).astype(np.float32)
-        if preds.shape != self.y_true.shape:
-            return None
-        return self.score_arrays(preds)
+
+        row_ids: list[str] | None = None
+        if val_cache is not None and Path(val_cache).exists():
+            try:
+                d = np.load(str(val_cache), allow_pickle=True)
+                if "row_ids" in d.files:
+                    row_ids = [str(r) for r in d["row_ids"].tolist()]
+            except (OSError, ValueError):
+                pass
+        if row_ids is None:
+            labels_csv = self.data_dir / "train_soundscapes_labels.csv"
+            if labels_csv.exists():
+                row_ids = soundscape_window_row_ids(labels_csv, sort_for_benchmark=False)
+
+        if row_ids is not None and len(row_ids) == len(preds):
+            return self.score_birdnet_val_preds(preds, row_ids)
+
+        if preds.shape == self.y_true.shape:
+            return self.score_arrays(preds)
+        return None
 
     def score_birdnet_val_preds(
         self,
@@ -287,11 +345,40 @@ class SoundscapeEvalSuite:
         yt, yp, _ = align_predictions(self.y_true_df, pred_df)
         return self.score_arrays(yp)
 
+    def score_birdnet_mem_dir(
+        self,
+        archive_dir: Path,
+        *,
+        val_cache: Path | None = None,
+    ) -> SoundscapeScore | None:
+        """Score staged BirdNET head from ``best_val_preds.npy`` (macro AP / AUC / median AUC)."""
+        archive_dir = Path(archive_dir)
+        preds_path = archive_dir / "best_val_preds.npy"
+        if not preds_path.exists():
+            return None
+        preds = np.load(preds_path).astype(np.float32)
+        row_ids: list[str] | None = None
+        if val_cache is not None and Path(val_cache).exists():
+            try:
+                d = np.load(str(val_cache), allow_pickle=True)
+                if "row_ids" in d.files:
+                    row_ids = [str(r) for r in d["row_ids"].tolist()]
+            except (OSError, ValueError):
+                pass
+        if row_ids is not None and len(row_ids) == len(preds):
+            return self.score_birdnet_val_preds(preds, row_ids)
+        if preds.shape == self.y_true.shape:
+            return self.score_arrays(preds)
+        return None
+
     def score_birdnet_artifacts(
         self,
         logs_dir: Path,
         val_npz: Path,
     ) -> SoundscapeScore | None:
+        sc = self.score_birdnet_mem_dir(logs_dir, val_cache=val_npz)
+        if sc is not None:
+            return sc
         aligned = self.aligned_birdnet_preds(logs_dir, val_npz)
         if aligned is None:
             return None

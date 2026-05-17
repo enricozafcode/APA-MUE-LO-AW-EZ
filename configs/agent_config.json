@@ -11,12 +11,15 @@
   "llm_researcher": {
     "enabled": true,
     "provider": "ollama",
-    "model": "deepseek-r1:8b",
-    "temperature": 0.6
+    "model": "gemma4:latest",
+    "temperature": 0.2
   },
   "researcher": {
-    "model": "deepseek-r1:8b",
-    "temperature": 0.6
+    "model": "gemma4:latest",
+    "temperature": 0.2,
+    "timeout_seconds": 600,
+    "stream_debug": false,
+    "batch_size": 3
   },
   "execution": {
     "timeout_seconds": 1800,
@@ -30,22 +33,22 @@
   },
   "search": {
     "cheap": {
-      "max_samples": 2000,
-      "epochs": 3,
+      "max_samples": 50,
+      "epochs": 1,
       "val_split": 0.2
     },
     "medium": {
-      "max_samples": 10000,
-      "epochs": 15,
+      "max_samples": 50,
+      "epochs": 2,
       "val_split": 0.2
     },
     "final": {
-      "max_samples": null,
-      "epochs": 15,
+      "max_samples": 50,
+      "epochs": 2,
       "val_split": 0.1
     },
     "linear_budget": 0,
-    "random_budget": 50,
+    "random_budget": 0,
     "phase2": {
       "random_experiments": 5,
       "focused_experiments": 5,
@@ -74,8 +77,8 @@
       "enabled": false,
       "use_all_candidates": true,
       "top_k": 5,
-      "max_samples": 10000,
-      "epochs": 15,
+      "max_samples": 50,
+      "epochs": 2,
       "val_split": 0.2,
       "split_mode": "group_holdout"
     },
@@ -89,62 +92,158 @@
     "generate_insights": false
   },
   "meta_agent": {
-    "pipeline": "staged_full",
+    "pipeline": "staged_tournament",
+    "track_order": ["cnn", "birdnet", "perch"],
+    "tournament": {
+      "enabled": true,
+      "auto_finalize": true
+    },
     "skip_completed_stages": false,
     "primary_metric": "macro_average_precision",
     "run_eda": false,
-    "aug_baselines": ["light", "medium", "high"],
-    "arch_search_iterations_per_aug": 10,
-    "arch_search_cnn_max_samples": 2000,
-    "arch_search_head_train_max_samples": 2000,
-    "arch_search_embed_sample_frac": 0.5,
-    "arch_search_embed_max_samples": null,
+    "aug_baselines": ["high"],
+    "arch_search_iterations_per_aug": 1,
+    "arch_search_cnn_max_samples": 50,
+    "arch_search_head_train_max_samples": 50,
+    "arch_search_embed_sample_frac": 1.0,
+    "arch_search_embed_max_samples": 50,
     "force_rebuild_embed_cache": false,
-    "cnn_iterations": 0,
-    "birdnet_iterations": 0,
-    "perch_iterations": 30,
+    "cnn_iterations": 2,
+    "cnn_staged": true,
+    "birdnet_iterations": 2,
+    "perch_iterations": 2,
     "ensemble_iterations": 0,
+    "cnn_stage_1b": {
+      "enabled": true,
+      "top_k_models": 1,
+      "experiments_per_researcher_call": 1,
+      "initial_iterations": 1,
+      "bonus_iterations_on_improve": 1,
+      "max_iterations_per_model": 2
+    },
+    "cnn_stage_1c": {
+      "enabled": true,
+      "mode": "presets",
+      "planner_rounds": 1,
+      "experiments_per_round": 1,
+      "aug_presets": ["medium"],
+      "include_winner_aug_baseline": true,
+      "head_train_samples": 50
+    },
+    "cnn_stage_1d": {
+      "enabled": true,
+      "copy_to_submission": true,
+      "final_timeout_seconds": 7200
+    },
+    "birdnet_stage_1b": {
+      "enabled": true,
+      "top_k_models": 1,
+      "experiments_per_researcher_call": 1,
+      "initial_iterations": 1,
+      "bonus_iterations_on_improve": 1,
+      "max_iterations_per_model": 2
+    },
+    "birdnet_stage_1c": {
+      "enabled": true,
+      "mode": "presets",
+      "aug_presets": ["medium"],
+      "include_winner_aug_baseline": true
+    },
+    "birdnet_stage_1d": {
+      "enabled": true,
+      "embed_sample_frac": 1.0,
+      "rebuild_full_train_cache": false,
+      "copy_to_submission": true,
+      "final_timeout_seconds": 7200
+    },
+    "birdnet_stage_1e": {
+      "enabled": true,
+      "max_soundscape_files": 5,
+      "top1_threshold": 0.55,
+      "runnerup_max": 0.35,
+      "pseudo_label_weight": 0.8,
+      "sample_weight_supervised": 1.0,
+      "sample_weight_labeled_val": 1.0,
+      "include_labeled_val_in_refine": true,
+      "sample_weight_pseudo": 0.5,
+      "fine_tune_epochs": 2,
+      "fine_tune_lr": 0.0002,
+      "val_split": 0.1,
+      "rebuild_pseudo_cache": false,
+      "refine_timeout_seconds": 7200,
+      "copy_to_submission": true
+    },
+    "cnn_stage_1e": {
+      "enabled": true,
+      "max_soundscape_files": 5,
+      "top1_threshold": 0.55,
+      "runnerup_max": 0.35,
+      "pseudo_label_weight": 0.8,
+      "sample_weight_supervised": 1.0,
+      "sample_weight_pseudo": 0.5,
+      "fine_tune_epochs": 2,
+      "fine_tune_lr": 0.0002,
+      "rebuild_pseudo_cache": false,
+      "refine_timeout_seconds": 7200,
+      "copy_to_submission": true
+    },
     "stage_1b": {
       "enabled": true,
-      "top_k_models": 2,
-      "initial_iterations": 5,
-      "bonus_iterations_on_improve": 5,
-      "max_iterations_per_model": 25
+      "top_k_models": 1,
+      "experiments_per_researcher_call": 1,
+      "initial_iterations": 1,
+      "bonus_iterations_on_improve": 1,
+      "max_iterations_per_model": 2
     },
     "stage_1c": {
       "enabled": true,
-      "mode": "llm",
-      "head_train_samples": 2000,
+      "mode": "presets",
+      "planner_rounds": 1,
+      "experiments_per_round": 1,
+      "aug_presets": ["medium"],
+      "include_preset_baselines": true,
+      "include_winner_aug_baseline": true,
+      "head_train_samples": 50,
       "embed_subset_only": true,
       "force_rebuild_embed_cache": false,
-      "explore": {
-        "iterations": 10,
-        "temperature": 0.7,
-        "researcher_timeout_seconds": 300
-      },
-      "refine": {
-        "enabled": true,
-        "initial_iterations": 5,
-        "bonus_iterations_on_improve": 5,
-        "max_iterations": 15,
-        "temperature": 0.5,
-        "researcher_timeout_seconds": 300
-      }
+      "researcher_timeout_seconds": 600,
+      "stream_debug": false
     },
     "stage_1d": {
       "enabled": true,
       "embed_sample_frac": 1.0,
-      "rebuild_full_train_cache": true,
+      "rebuild_full_train_cache": false,
       "copy_to_submission": true,
       "final_timeout_seconds": 7200
+    },
+    "stage_1e": {
+      "enabled": true,
+      "max_soundscape_files": 5,
+      "top1_threshold": 0.55,
+      "runnerup_max": 0.35,
+      "pseudo_label_weight": 0.8,
+      "sample_weight_supervised": 1.0,
+      "sample_weight_labeled_val": 1.0,
+      "include_labeled_val_in_refine": true,
+      "sample_weight_pseudo": 0.5,
+      "fine_tune_epochs": 2,
+      "fine_tune_lr": 0.0002,
+      "val_split": 0.1,
+      "file_batch_size": 16,
+      "heartbeat_every": 5,
+      "partial_save_every": 500,
+      "rebuild_pseudo_cache": false,
+      "refine_timeout_seconds": 7200,
+      "copy_to_submission": true
     }
   },
   "perch": {
+    "use_llm_memory_summaries": false,
     "onnx_dataset": "rishikeshjani/perch-onnx-for-birdclef-2026",
     "perch_labels_model": "google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu",
-    "max_train_samples": null,
+    "max_train_samples": 50,
     "embed_batch_size": 16,
-    "head_train_max_samples": 2000,
+    "head_train_max_samples": 50,
     "force_rebuild_cache": false,
     "skip_final_retrain": true
   },

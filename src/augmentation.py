@@ -367,51 +367,58 @@ class AudioAugmenter:
     def _prob(self, strategy: str) -> float:
         return self.cfg.get(strategy, {}).get("probability", 0.5)
 
-    def _roll(self, strategy: str) -> bool:
-        return np.random.rand() < self._prob(strategy)
+    def _roll(self, strategy: str, rng: np.random.Generator) -> bool:
+        return float(rng.random()) < self._prob(strategy)
 
-    def time_stretch(self, audio: np.ndarray, sr: int) -> np.ndarray:
+    def time_stretch(self, audio: np.ndarray, sr: int, rng: np.random.Generator) -> np.ndarray:
         if not _LIBROSA_AVAILABLE:
             return audio
         c = self.cfg["time_stretch"]
-        rate = np.random.uniform(c.get("rate_min", 0.9), c.get("rate_max", 1.1))
+        rate = float(rng.uniform(c.get("rate_min", 0.9), c.get("rate_max", 1.1)))
         return librosa.effects.time_stretch(audio, rate=rate)
 
-    def pitch_shift(self, audio: np.ndarray, sr: int) -> np.ndarray:
+    def pitch_shift(self, audio: np.ndarray, sr: int, rng: np.random.Generator) -> np.ndarray:
         if not _LIBROSA_AVAILABLE:
             return audio
         c = self.cfg["pitch_shift"]
-        n_steps = np.random.randint(c.get("steps_min", -2), c.get("steps_max", 2) + 1)
+        n_steps = int(rng.integers(c.get("steps_min", -2), c.get("steps_max", 2) + 1))
         return librosa.effects.pitch_shift(audio, sr=sr, n_steps=n_steps)
 
-    def noise_injection(self, audio: np.ndarray, sr: int) -> np.ndarray:
+    def noise_injection(self, audio: np.ndarray, sr: int, rng: np.random.Generator) -> np.ndarray:
         c = self.cfg["noise_injection"]
         level = c.get("noise_level", 0.005)
-        return audio + level * np.random.randn(len(audio)).astype(audio.dtype)
+        return audio + level * rng.normal(0.0, 1.0, size=len(audio)).astype(audio.dtype)
 
-    def time_shift(self, audio: np.ndarray, sr: int) -> np.ndarray:
+    def time_shift(self, audio: np.ndarray, sr: int, rng: np.random.Generator) -> np.ndarray:
         c = self.cfg["time_shift"]
         max_fraction = c.get("shift_max_fraction", 0.5)
-        shift = int(np.random.uniform(-max_fraction, max_fraction) * len(audio))
+        shift = int(rng.uniform(-max_fraction, max_fraction) * len(audio))
         return np.roll(audio, shift)
 
-    def gain_jitter(self, audio: np.ndarray, sr: int) -> np.ndarray:
+    def gain_jitter(self, audio: np.ndarray, sr: int, rng: np.random.Generator) -> np.ndarray:
         c = self.cfg["gain_jitter"]
-        gain_db = float(np.random.uniform(c.get("min_db", -6.0), c.get("max_db", 6.0)))
+        gain_db = float(rng.uniform(c.get("min_db", -6.0), c.get("max_db", 6.0)))
         return np.clip(audio * (10.0 ** (gain_db / 20.0)), -1.0, 1.0).astype(audio.dtype)
 
-    def apply(self, audio: np.ndarray, sr: int) -> np.ndarray:
+    def apply(
+        self,
+        audio: np.ndarray,
+        sr: int,
+        rng: np.random.Generator | None = None,
+    ) -> np.ndarray:
         """Apply all enabled strategies with their individual probabilities."""
-        if self._enabled("time_stretch") and self._roll("time_stretch"):
-            audio = self.time_stretch(audio, sr)
-        if self._enabled("pitch_shift") and self._roll("pitch_shift"):
-            audio = self.pitch_shift(audio, sr)
-        if self._enabled("noise_injection") and self._roll("noise_injection"):
-            audio = self.noise_injection(audio, sr)
-        if self._enabled("time_shift") and self._roll("time_shift"):
-            audio = self.time_shift(audio, sr)
-        if self._enabled("gain_jitter") and self._roll("gain_jitter"):
-            audio = self.gain_jitter(audio, sr)
+        if rng is None:
+            rng = np.random.default_rng()
+        if self._enabled("time_stretch") and self._roll("time_stretch", rng):
+            audio = self.time_stretch(audio, sr, rng)
+        if self._enabled("pitch_shift") and self._roll("pitch_shift", rng):
+            audio = self.pitch_shift(audio, sr, rng)
+        if self._enabled("noise_injection") and self._roll("noise_injection", rng):
+            audio = self.noise_injection(audio, sr, rng)
+        if self._enabled("time_shift") and self._roll("time_shift", rng):
+            audio = self.time_shift(audio, sr, rng)
+        if self._enabled("gain_jitter") and self._roll("gain_jitter", rng):
+            audio = self.gain_jitter(audio, sr, rng)
         return audio
 
     def active_strategies(self) -> list[str]:

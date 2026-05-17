@@ -31,6 +31,11 @@ class ExperimentMemory:
 
     def _ranking_value(self, entry: dict) -> float:
         """Scalar used to sort runs (higher is better)."""
+        ss = entry.get("soundscape_macro_ap")
+        if ss is None:
+            ss = (entry.get("metrics") or {}).get("soundscape_macro_ap")
+        if ss is not None:
+            return float(ss)
         if self.ranking_metric == "macro_roc_auc":
             v = entry.get("macro_roc_auc")
         else:
@@ -54,6 +59,11 @@ class ExperimentMemory:
             if success and metrics.get("median_per_class_auc") is not None
             else None
         )
+        soundscape_ap = (
+            float(metrics["soundscape_macro_ap"])
+            if success and metrics and metrics.get("soundscape_macro_ap") is not None
+            else None
+        )
         entry = {
             "timestamp": datetime.utcnow().isoformat(),
             "spec": spec,
@@ -61,6 +71,7 @@ class ExperimentMemory:
             "macro_roc_auc": auc,
             "macro_average_precision": ap,
             "median_per_class_auc": med,
+            "soundscape_macro_ap": soundscape_ap,
             "ranking_metric": self.ranking_metric,
             "metrics": metrics or {},
             "reasoning": spec.get("reasoning", ""),
@@ -102,6 +113,11 @@ class ExperimentMemory:
         return len(self._runs)
 
     def _format_run_score(self, r: dict) -> str:
+        if r.get("soundscape_macro_ap") is not None:
+            ss = float(r["soundscape_macro_ap"])
+            subset = r.get("macro_average_precision")
+            subset_s = f" subset_train_AP={float(subset):.5f}" if subset is not None else ""
+            return f"soundscape_AP={ss:.5f} (ranking){subset_s}"
         if r.get("metrics"):
             return format_metrics_dict(r["metrics"], ranking_metric=self.ranking_metric)
         return format_metrics_dict(

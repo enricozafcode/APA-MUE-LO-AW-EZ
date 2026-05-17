@@ -47,8 +47,12 @@ else:
 
 try:
     from .soundscape_evaluator import PRIMARY_META_METRIC, format_metrics_dict
+    from .cnn_soundscape_cache import DEFAULT_SOUNDSCAPE_MEL_CACHE_DIR
+    from .cnn_focal_cache import DEFAULT_FOCAL_MEL_CACHE_DIR
 except ImportError:
     from soundscape_evaluator import PRIMARY_META_METRIC, format_metrics_dict
+    from cnn_soundscape_cache import DEFAULT_SOUNDSCAPE_MEL_CACHE_DIR
+    from cnn_focal_cache import DEFAULT_FOCAL_MEL_CACHE_DIR
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -149,7 +153,7 @@ def _load_focal_mel(audio_path, sample_rate, clip_seconds, n_mels, n_frames, cfg
         )
         embed_aug = get_audio_embedding_aug(str(preset))
         audio_aug = AudioAugmenter(embed_aug.get("audio", {}))
-        wav = audio_aug.apply(wav.astype(np.float32), sample_rate)
+        wav = audio_aug.apply(wav.astype(np.float32), sample_rate, rng)
         if embed_aug.get("use_snr_mixing"):
             mix_prob = float(embed_aug.get("mix_prob", 0.35))
             if rng.random() < mix_prob:
@@ -180,6 +184,8 @@ def _default_load_mel(audio_path, sample_rate, clip_seconds, n_mels, n_frames):
     else:
         wav = wav[:target_len]
     return _wav_to_mel(wav, sample_rate, n_mels, n_frames)
+
+_FOCAL_MEL_CACHE_DIR = None
 """.strip()
 
 
@@ -265,76 +271,116 @@ def main():
         except Exception:
             pass
 
-    # 1) First pass: collect candidate files quickly (no audio decode yet)
-    candidates = []
-    total = len(train_df)
-    for i, row in enumerate(train_df.itertuples(index=False)):
-        label = str(getattr(row, lcol))
-        rel = getattr(row, fcol)
-        if label not in sp2i:
-            continue
-        ap = paths.train_audio_dir / str(rel)
-        if not ap.exists():
-            continue
-        candidates.append((label, ap))
+    _focal_cache_file = None
+    if aug_preset and _FOCAL_MEL_CACHE_DIR:
+        _ms_key = "all" if max_samples is None else int(max_samples)
+        _focal_cache_file = (
+            Path(_FOCAL_MEL_CACHE_DIR)
+            / f"focal_train_{{aug_preset}}_{{_ms_key}}_{{n_mels}}x{{n_frames}}_sr{{int(sample_rate)}}.npz"
+        )
 
-    if not candidates:
-        raise RuntimeError("No candidate audio files found after path/label filtering.")
-
-    # 2) Stratified sampler: at least 2 samples/species when available, then fill randomly.
-    rng = np.random.default_rng(42)
-    by_label = dict()
-    for label, ap in candidates:
-        by_label.setdefault(label, []).append(ap)
-    for paths_list in by_label.values():
-        rng.shuffle(paths_list)
-
-    budget = len(candidates) if (max_samples is None) else min(int(max_samples), len(candidates))
-    selected = []
-    leftovers = []
-    min_per_species = 2
-    for label, paths_list in by_label.items():
-        take = min(len(paths_list), min_per_species)
-        for ap in paths_list[:take]:
-            if len(selected) < budget:
-                selected.append((label, ap))
-        for ap in paths_list[take:]:
-            leftovers.append((label, ap))
-
-    if len(selected) < budget:
-        rng.shuffle(leftovers)
-        selected.extend(leftovers[: budget - len(selected)])
-
-    represented_species = len(set(label for label, _ap in selected))
-    print(
-        "  Candidate files=", len(candidates),
-        "selected=", len(selected),
-        "budget=", budget,
-        "represented_species=", represented_species,
-    )
-
-    # 3) Decode selected audio files and build tensors (train: audio aug + soundscape SNR before mel).
-    load_rng = np.random.default_rng(42)
-    X_items, y_items = [], []
-    for i, (label, ap) in enumerate(selected, start=1):
+    if _focal_cache_file is not None and _focal_cache_file.exists():
+        print(f"FOCAL_TRAIN_CACHE: loading {{_focal_cache_file.name}}")
+        _fcd = np.load(str(_focal_cache_file), allow_pickle=True)
+        X_all = _fcd["X_train"].astype(np.float32)
+        y_all = _fcd["y_train"].astype(np.float32)
         try:
-            if aug_preset:
-                mel = _load_focal_mel(ap, sample_rate, clip_seconds, n_mels, n_frames, cfg, paths, load_rng)
-            else:
-                mel = mel_fn(ap, sample_rate, clip_seconds, n_mels, n_frames)
+            import json as _json
+            _manifest = _json.loads(str(_fcd["manifest"]))
+            represented_species = int(_manifest.get("represented_species", 0))
         except Exception:
-            continue
-        yv = np.zeros(len(species_cols), dtype=np.float32)
-        yv[sp2i[label]] = 1.0
-        X_items.append(mel)
-        y_items.append(yv)
-        if len(X_items) % 500 == 0:
-            print(f"  Loaded {{len(X_items)}}/{{len(selected)}} selected samples...")
+            represented_species = 0
+        print(
+            f"  Focal cache clips={{X_all.shape[0]}} represented_species={{represented_species}}"
+        )
+    else:
+        # 1) First pass: collect candidate files quickly (no audio decode yet)
+        candidates = []
+        for row in train_df.itertuples(index=False):
+            label = str(getattr(row, lcol))
+            rel = getattr(row, fcol)
+            if label not in sp2i:
+                continue
+            ap = paths.train_audio_dir / str(rel)
+            if not ap.exists():
+                continue
+            candidates.append((label, ap))
 
-    if not X_items:
-        raise RuntimeError("No samples loaded.")
-    X_all = np.stack(X_items, dtype=np.float32)
-    y_all = np.stack(y_items, dtype=np.float32)
+        if not candidates:
+            raise RuntimeError("No candidate audio files found after path/label filtering.")
+
+        # 2) Stratified sampler: at least 2 samples/species when available, then fill randomly.
+        rng = np.random.default_rng(42)
+        by_label = dict()
+        for label, ap in candidates:
+            by_label.setdefault(label, []).append(ap)
+        for paths_list in by_label.values():
+            rng.shuffle(paths_list)
+
+        budget = len(candidates) if (max_samples is None) else min(int(max_samples), len(candidates))
+        selected = []
+        leftovers = []
+        min_per_species = 2
+        for label, paths_list in by_label.items():
+            take = min(len(paths_list), min_per_species)
+            for ap in paths_list[:take]:
+                if len(selected) < budget:
+                    selected.append((label, ap))
+            for ap in paths_list[take:]:
+                leftovers.append((label, ap))
+
+        if len(selected) < budget:
+            rng.shuffle(leftovers)
+            selected.extend(leftovers[: budget - len(selected)])
+
+        represented_species = len(set(label for label, _ap in selected))
+        print(
+            "  Candidate files=", len(candidates),
+            "selected=", len(selected),
+            "budget=", budget,
+            "represented_species=", represented_species,
+        )
+
+        # 3) Decode selected audio (deterministic aug seed=42) or custom build_features.
+        load_rng = np.random.default_rng(42)
+        X_items, y_items = [], []
+        for i, (label, ap) in enumerate(selected, start=1):
+            try:
+                if aug_preset:
+                    mel = _load_focal_mel(ap, sample_rate, clip_seconds, n_mels, n_frames, cfg, paths, load_rng)
+                else:
+                    mel = mel_fn(ap, sample_rate, clip_seconds, n_mels, n_frames)
+            except Exception:
+                continue
+            yv = np.zeros(len(species_cols), dtype=np.float32)
+            yv[sp2i[label]] = 1.0
+            X_items.append(mel)
+            y_items.append(yv)
+            if len(X_items) % 500 == 0:
+                print(f"  Loaded {{len(X_items)}}/{{len(selected)}} selected samples...")
+
+        if not X_items:
+            raise RuntimeError("No samples loaded.")
+        X_all = np.stack(X_items, dtype=np.float32)
+        y_all = np.stack(y_items, dtype=np.float32)
+
+        if _focal_cache_file is not None and aug_preset:
+            _focal_cache_file.parent.mkdir(parents=True, exist_ok=True)
+            import json as _json
+            _manifest = {{
+                "aug_preset": aug_preset,
+                "max_samples": max_samples,
+                "n_mels": n_mels,
+                "n_frames": n_frames,
+                "represented_species": represented_species,
+            }}
+            np.savez_compressed(
+                str(_focal_cache_file),
+                X_train=X_all,
+                y_train=y_all,
+                manifest=_json.dumps(_manifest),
+            )
+            print(f"FOCAL_TRAIN_CACHE: saved {{_focal_cache_file.name}} clips={{len(X_items)}}")
 
     # 4) Train on all focal clips. Selection/evaluation is done externally
     # on labeled train_soundscapes via _append_eval_wrapper.
@@ -739,13 +785,24 @@ def _final_config_override_block(base_cfg):
         f"    return {repr(safe_cfg)}\n"
     )
 
-def assemble_script(slot_code, *, is_final=False, model_save_path=""):
+def assemble_script(
+    slot_code,
+    *,
+    is_final: bool = False,
+    model_save_path: str = "",
+    focal_cache_dir: Path | str | None = None,
+):
+    focal_line = ""
+    if focal_cache_dir is not None and not is_final:
+        focal_line = f'\n_FOCAL_MEL_CACHE_DIR = r"{Path(focal_cache_dir).resolve()}"\n'
     suffix = _make_harness_suffix(is_final=is_final, model_save_path=model_save_path)
-    return f"{HARNESS_PREFIX}\n\n# --- GENERATED MODEL CODE ---\n{slot_code.strip()}\n\n{suffix}\n"
+    return f"{HARNESS_PREFIX}{focal_line}\n\n# --- GENERATED MODEL CODE ---\n{slot_code.strip()}\n\n{suffix}\n"
 
-def _append_eval_wrapper(script, run_id, eval_dir):
+def _append_eval_wrapper(script, run_id, eval_dir, mel_cache_dir=None):
     yt = eval_dir / f"y_true_{run_id}.npy"
     yp = eval_dir / f"y_pred_{run_id}.npy"
+    cache_dir = Path(mel_cache_dir) if mel_cache_dir is not None else DEFAULT_SOUNDSCAPE_MEL_CACHE_DIR
+    cache_dir_str = str(cache_dir.resolve())
     return script + f"""
 
 import numpy as _np
@@ -827,40 +884,76 @@ if _target_windows <= 0:
     raise RuntimeError(f"Invalid clip_seconds={{_clip_seconds}} for soundscape evaluation.")
 _target_samples = _window_samples * _target_windows
 
+_cache_path = (
+    __import__("pathlib").Path(r"{cache_dir_str}")
+    / f"soundscape_mels_{{_n_mels}}x{{_n_frames}}_sr{{_sr}}_hop{{_hop_length}}.npz"
+)
 _pred_rows = []
-for _fi, _fpath in enumerate(_ogg_files, start=1):
-    if (_fi % 10) == 0:
-        print(f"SOUNDSCAPE_EVAL_PROGRESS: {{_fi}}/{{len(_ogg_files)}} files")
-    _name = _fpath.stem
-    _y_full, _ = librosa.load(str(_fpath), sr=_sr, mono=True)
-    if len(_y_full) > _target_samples:
-        _y_full = _y_full[:_target_samples]
-    elif len(_y_full) < _target_samples:
-        _y_full = _np.pad(_y_full, (0, _target_samples - len(_y_full)))
-
-    _batch = _np.zeros((_target_windows, _n_mels, _n_frames, 1), dtype=_np.float32)
-    for _wi in range(_target_windows):
-        _st = _wi * _window_samples
-        _seg = _y_full[_st : _st + _window_samples]
-        _mel = librosa.feature.melspectrogram(
-            y=_seg,
-            sr=_sr,
-            n_mels=_n_mels,
-            n_fft=_n_fft,
-            hop_length=_hop_length,
-            power=2.0,
-        )
-        _mel_db = librosa.power_to_db(_mel, ref=_np.max)
-        _mel_r = _tf.image.resize(_mel_db[..., _np.newaxis], (_n_mels, _n_frames)).numpy().astype(_np.float32)
-        _batch[_wi] = _mel_r
-
-    _preds = model.predict(_batch, verbose=0).astype(_np.float32)
-    for _wi in range(_target_windows):
-        _end_sec = int(round((_wi + 1) * _clip_seconds))
-        _row = {{"row_id": f"{{_name}}_{{_end_sec}}" }}
-        for _col, _p in zip(_species_cols, _preds[_wi]):
+if _cache_path.exists():
+    print(f"SOUNDSCAPE_EVAL_CACHE: loading {{_cache_path.name}}")
+    _cd = _np.load(str(_cache_path), allow_pickle=True)
+    _X_all = _cd["X_mels"].astype(_np.float32)
+    _cached_ids = [str(x) for x in _cd["row_ids"]]
+    _bs = max(1, int(_cfg.get("batch_size", 32)))
+    _pred_chunks = []
+    for _si in range(0, len(_X_all), _bs):
+        _pred_chunks.append(model.predict(_X_all[_si : _si + _bs], verbose=0).astype(_np.float32))
+    _preds_all = _np.concatenate(_pred_chunks, axis=0) if _pred_chunks else _np.zeros((0, len(_species_cols)), dtype=_np.float32)
+    for _rid, _pv in zip(_cached_ids, _preds_all):
+        _row = {{"row_id": _rid}}
+        for _col, _p in zip(_species_cols, _pv):
             _row[_col] = float(_p)
         _pred_rows.append(_row)
+else:
+    _cache_X = []
+    _cache_ids = []
+    for _fi, _fpath in enumerate(_ogg_files, start=1):
+        if (_fi % 10) == 0:
+            print(f"SOUNDSCAPE_EVAL_PROGRESS: {{_fi}}/{{len(_ogg_files)}} files")
+        _name = _fpath.stem
+        _y_full, _ = librosa.load(str(_fpath), sr=_sr, mono=True)
+        if len(_y_full) > _target_samples:
+            _y_full = _y_full[:_target_samples]
+        elif len(_y_full) < _target_samples:
+            _y_full = _np.pad(_y_full, (0, _target_samples - len(_y_full)))
+
+        _batch = _np.zeros((_target_windows, _n_mels, _n_frames, 1), dtype=_np.float32)
+        for _wi in range(_target_windows):
+            _st = _wi * _window_samples
+            _seg = _y_full[_st : _st + _window_samples]
+            _mel = librosa.feature.melspectrogram(
+                y=_seg,
+                sr=_sr,
+                n_mels=_n_mels,
+                n_fft=_n_fft,
+                hop_length=_hop_length,
+                power=2.0,
+            )
+            _mel_db = librosa.power_to_db(_mel, ref=_np.max)
+            _mel_r = _tf.image.resize(_mel_db[..., _np.newaxis], (_n_mels, _n_frames)).numpy().astype(_np.float32)
+            _batch[_wi] = _mel_r
+            _end_sec = int(round((_wi + 1) * _clip_seconds))
+            _rid = f"{{_name}}_{{_end_sec}}"
+            if _rid in _y_true_df.index:
+                _cache_X.append(_mel_r)
+                _cache_ids.append(_rid)
+
+        _preds = model.predict(_batch, verbose=0).astype(_np.float32)
+        for _wi in range(_target_windows):
+            _end_sec = int(round((_wi + 1) * _clip_seconds))
+            _row = {{"row_id": f"{{_name}}_{{_end_sec}}" }}
+            for _col, _p in zip(_species_cols, _preds[_wi]):
+                _row[_col] = float(_p)
+            _pred_rows.append(_row)
+
+    if _cache_X:
+        _cache_path.parent.mkdir(parents=True, exist_ok=True)
+        _np.savez_compressed(
+            str(_cache_path),
+            X_mels=_np.stack(_cache_X, axis=0).astype(_np.float32),
+            row_ids=_np.array(_cache_ids, dtype=object),
+        )
+        print(f"SOUNDSCAPE_EVAL_CACHE: saved {{_cache_path.name}} windows={{len(_cache_ids)}}")
 
 _pred_df = _pd.DataFrame(_pred_rows)
 _pred_renamed = _pred_df.rename(columns={{_c: f"{{_c}}_pred" for _c in _species_cols}})
@@ -963,10 +1056,27 @@ def build_model(input_shape, num_classes):
 # EXPERIMENT RUNNER (with LLM auto-fix on failure)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def run_experiment(slot_code, run_id, code_dir, eval_dir, executor, evaluator):
+def run_experiment(
+    slot_code,
+    run_id,
+    code_dir,
+    eval_dir,
+    executor,
+    evaluator,
+    mel_cache_dir=None,
+    focal_cache_dir=None,
+    *,
+    is_final: bool = False,
+):
     """Run a single experiment. Returns (metrics_or_None, exec_result)."""
-    script = assemble_script(slot_code)
-    script = _append_eval_wrapper(script, run_id, eval_dir)
+    if focal_cache_dir is None and not is_final:
+        focal_cache_dir = DEFAULT_FOCAL_MEL_CACHE_DIR
+    script = assemble_script(
+        slot_code,
+        is_final=is_final,
+        focal_cache_dir=focal_cache_dir,
+    )
+    script = _append_eval_wrapper(script, run_id, eval_dir, mel_cache_dir=mel_cache_dir)
     script_path = code_dir / f"{run_id}.py"
     script_path.write_text(script, encoding="utf-8")
     (code_dir / f"{run_id}_slot.py").write_text(slot_code, encoding="utf-8")
@@ -1003,13 +1113,32 @@ def _extract_best_epoch(stdout: str) -> int | None:
         return None
 
 
-def run_experiment_until_success(slot_code, run_id, code_dir, eval_dir,
-                                 executor, evaluator, llm, temperature, max_attempts=5, use_llm_fixes=True):
+def run_experiment_until_success(
+    slot_code,
+    run_id,
+    code_dir,
+    eval_dir,
+    executor,
+    evaluator,
+    llm,
+    temperature,
+    max_attempts=5,
+    use_llm_fixes=True,
+    mel_cache_dir=None,
+    focal_cache_dir=None,
+):
     """Run experiment, auto-fix with LLM on failure."""
     current_slot = slot_code
     for attempt in range(1, max_attempts + 1):
         metrics, result = run_experiment(
-            current_slot, f"{run_id}_a{attempt}", code_dir, eval_dir, executor, evaluator
+            current_slot,
+            f"{run_id}_a{attempt}",
+            code_dir,
+            eval_dir,
+            executor,
+            evaluator,
+            mel_cache_dir=mel_cache_dir,
+            focal_cache_dir=focal_cache_dir,
         )
         if metrics and metrics.get("status") == "success":
             best_epoch = _extract_best_epoch(result.stdout or "")
@@ -2412,7 +2541,9 @@ def run_transfer_exploration_phase(
         run_id = f"T{it:03d}"
         (transfer_dir / f"{run_id}_slot.py").write_text(slot, encoding="utf-8")
         full_script = assemble_script(slot)
-        full_script = _append_eval_wrapper(full_script, run_id, eval_dir)
+        full_script = _append_eval_wrapper(
+            full_script, run_id, eval_dir, mel_cache_dir=DEFAULT_SOUNDSCAPE_MEL_CACHE_DIR
+        )
         script_path = transfer_dir / f"{run_id}.py"
         script_path.write_text(full_script, encoding="utf-8")
 
@@ -2666,7 +2797,9 @@ def _run_final_training(
     else:
         slot_code = generate_slot_code(fp)
     script = assemble_script(slot_code, is_final=True, model_save_path=model_path)
-    script = _append_eval_wrapper(script, "final", dirs["eval"])
+    script = _append_eval_wrapper(
+        script, "final", dirs["eval"], mel_cache_dir=DEFAULT_SOUNDSCAPE_MEL_CACHE_DIR
+    )
 
     script_path = dirs["logs"] / "final_run.py"
     script_path.write_text(script, encoding="utf-8")
@@ -2813,6 +2946,14 @@ def run_phase3_final_only(
 
 def agent_loop(config):
     global GENERATION_SYSTEM_PROMPT, TRANSFER_SYSTEM_PROMPT
+
+    if config.get("cnn_staged"):
+        try:
+            from .cnn_staged import dispatch_cnn_staged
+        except ImportError:
+            from cnn_staged import dispatch_cnn_staged
+        dispatch_cnn_staged(config)
+        return
 
     root = Path(__file__).resolve().parents[1]
     cnn_cfg = config.get("cnn", {})

@@ -1,5 +1,5 @@
 """
-Experiment memory for the Perch agent.
+Experiment memory for the BirdNET agent.
 
 - Full history stays in experiment_memory.jsonl (append-only audit log).
 - Researcher sees a lean run list: arch_type, arch_description, and scores only (~30 runs).
@@ -31,11 +31,11 @@ _SPEC_KEYS_COMPACT = (
     "optimizer",
     "epochs",
     "patience",
-    "perch_weight",
+    "blend_weight",
     "strategy",
 )
 
-_SUMMARIZER_SYSTEM = """You compress Perch head architecture search logs into short structured insights.
+_SUMMARIZER_SYSTEM = """You compress BirdNET head architecture search logs into short structured insights.
 Respond with ONLY one JSON object (no markdown). Keys:
   "batch_insight": one sentence on what this batch of runs showed overall,
   "arch_insights": list of objects, each with:
@@ -45,8 +45,8 @@ Respond with ONLY one JSON object (no markdown). Keys:
 Merge duplicate arch_types in this batch into one insight each."""
 
 
-class PerchExperimentMemory(ExperimentMemory):
-    """ExperimentMemory with rolling LLM summaries for the Perch researcher."""
+class BirdnetExperimentMemory(ExperimentMemory):
+    """ExperimentMemory with rolling LLM summaries for the BirdNET researcher."""
 
     DIGEST_FILE = "memory_digest.json"
 
@@ -217,8 +217,8 @@ class PerchExperimentMemory(ExperimentMemory):
             parts.append(f"drop{spec['dropout']}")
         if spec.get("learning_rate") is not None:
             parts.append(f"lr{spec['learning_rate']}")
-        if spec.get("perch_weight") is not None:
-            parts.append(f"pw{spec['perch_weight']}")
+        if spec.get("blend_weight") is not None:
+            parts.append(f"pw{spec['blend_weight']}")
         if spec.get("optimizer"):
             parts.append(str(spec["optimizer"])[:5])
         return "|".join(parts) if parts else "default"
@@ -371,7 +371,7 @@ class PerchExperimentMemory(ExperimentMemory):
             return None
         compact = [self._run_compact(r, i) for i, r in batch]
         user = (
-            f"Summarize these {len(batch)} Perch head experiments. "
+            f"Summarize these {len(batch)} BirdNET head experiments. "
             f"Ranking metric: {self.ranking_metric} (higher is better).\n"
             f"Runs JSON:\n{json.dumps(compact, indent=2)}\n\n"
             "If multiple runs share arch_type, merge into one arch_insights entry."
