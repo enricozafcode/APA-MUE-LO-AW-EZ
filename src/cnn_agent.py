@@ -151,7 +151,7 @@ def _load_focal_mel(audio_path, sample_rate, clip_seconds, n_mels, n_frames, cfg
             load_random_soundscape_noise,
             mix_snr,
         )
-        embed_aug = get_audio_embedding_aug(str(preset))
+        embed_aug = get_audio_embedding_aug(str(preset), cache_dir=_FOCAL_MEL_CACHE_DIR)
         audio_aug = AudioAugmenter(embed_aug.get("audio", {}))
         wav = audio_aug.apply(wav.astype(np.float32), sample_rate, rng)
         if embed_aug.get("use_snr_mixing"):
@@ -191,29 +191,48 @@ _FOCAL_MEL_CACHE_DIR = None
 
 def _make_harness_suffix(*, is_final=False, model_save_path=""):
     if is_final:
-        max_line = "    max_samples = None  # FINAL RUN: use ALL data"
-        val_line = "    val_split = float(cfg.get('val_split', 0.1))  # FINAL RUN: checkpoint on validation"
+        # Respect cfg['max_samples'] when set (e.g. cnn_stage_1d.max_samples=500
+        # during development). Defaults to None → use ALL data, which is the
+        # original FINAL-RUN intent. Previously this line hardcoded `None`,
+        # silently ignoring stage_1d.max_samples and loading every focal clip
+        # with heavy augmentation — the most common cause of 1d "getting stuck".
+        max_line = (
+            "    _ms = cfg.get('max_samples', None)\n"
+            "    max_samples = None if _ms is None else int(_ms)  # FINAL RUN: cfg-controlled (default ALL data)"
+        )
+        val_line = (
+            "    _vs = cfg.get('val_split', 0.1)\n"
+            "    val_split = float(_vs) if _vs is not None else 0.1  # FINAL RUN: checkpoint on validation"
+        )
         ckpt_line = "    checkpoint_best = True"
+        # NOTE: `save_block` is NOT itself an f-string — it's a regular Python
+        # string spliced verbatim into the outer assembled script. The braces
+        # below must therefore be SINGLE `{...}` so they form valid f-string
+        # substitutions *inside the generated script*. Doubled `{{...}}` here
+        # used to print literal text like "final_save_target={_mp}" at runtime.
         save_block = (
             f'\n    _mp = Path(r"{model_save_path}")\n'
             "    _mp.parent.mkdir(parents=True, exist_ok=True)\n"
-            "    print(f\"PHASE3_DEBUG: final_save_target={{_mp}}\")\n"
+            '    print(f"PHASE3_DEBUG: final_save_target={_mp}")\n'
             "    if checkpoint_best and has_validation and (_ckpt is not None) and _ckpt.exists():\n"
-            "        print(f\"PHASE3_DEBUG: restoring_best_checkpoint=True path={{_ckpt}}\")\n"
+            '        print(f"PHASE3_DEBUG: restoring_best_checkpoint=True path={_ckpt}")\n'
             "        model = tf.keras.models.load_model(_ckpt)\n"
             '        print(f"MODEL_RESTORED_FROM_BEST: {_ckpt}")\n'
             "    else:\n"
             "        print(\n"
-            "            f\"PHASE3_DEBUG: restoring_best_checkpoint=False \"\n"
-            "            f\"checkpoint_best={{checkpoint_best}} has_validation={{has_validation}} \"\n"
-            "            f\"ckpt_exists={{(_ckpt is not None and _ckpt.exists())}}\"\n"
+            '            f"PHASE3_DEBUG: restoring_best_checkpoint=False "\n'
+            '            f"checkpoint_best={checkpoint_best} has_validation={has_validation} "\n'
+            '            f"ckpt_exists={(_ckpt is not None and _ckpt.exists())}"\n'
             "        )\n"
             "    model.save(_mp)\n"
             '    print(f"MODEL_SAVED: {_mp}")\n'
         )
     else:
         max_line = '    max_samples = cfg.get("max_samples", 1500)'
-        val_line = "    val_split = float(cfg.get('val_split', 0.2))"
+        val_line = (
+            "    _vs = cfg.get('val_split', 0.2)\n"
+            "    val_split = float(_vs) if _vs is not None else 0.2"
+        )
         ckpt_line = "    checkpoint_best = bool(cfg.get('use_best_checkpoint', True))"
         save_block = ""
 
@@ -227,21 +246,27 @@ def main():
 {val_line}
 {ckpt_line}
     print(
-        f"PHASE3_DEBUG: config max_samples={{max_samples}} "
-        f"val_split_requested={{val_split}} checkpoint_best={{checkpoint_best}}"
+        f"PHASE3_DEBUG: val_split_requested={{val_split}} checkpoint_best={{checkpoint_best}}",
+        flush=True,
     )
     sample_rate   = cfg.get("sample_rate", 32000)
     clip_seconds  = cfg.get("clip_seconds", 5.0)
-    n_mels        = cfg.get("n_mels", 64)
-    n_frames      = cfg.get("n_frames", 128)
-    epochs        = cfg.get("epochs", 3)
-    batch_size    = cfg.get("batch_size", 32)
+    n_mels        = int(cfg.get("n_mels", 64))
+    n_frames      = int(cfg.get("n_frames", 128))
+    epochs        = int(cfg.get("epochs", 3))
+    batch_size    = int(cfg.get("batch_size", 32))
     learning_rate = cfg.get("learning_rate", 1e-3)
     aug_prob      = float(cfg.get("aug_prob", 0.0))
     aug_noise_std = float(cfg.get("aug_noise_std", 0.0))
     aug_time_mask = int(cfg.get("aug_time_mask", 0))
     aug_freq_mask = int(cfg.get("aug_freq_mask", 0))
     aug_preset    = cfg.get("aug_preset")
+    print(
+        f"CONFIG_ACTIVE: max_samples={{max_samples}} epochs={{epochs}} "
+        f"n_mels={{n_mels}} n_frames={{n_frames}} batch_size={{batch_size}} "
+        f"aug_preset={{aug_preset}}",
+        flush=True,
+    )
 
     optimizer_name = cfg.get("optimizer", "adam")
     if optimizer_name == "sgd_momentum":
@@ -294,54 +319,78 @@ def main():
             f"  Focal cache clips={{X_all.shape[0]}} represented_species={{represented_species}}"
         )
     else:
-        # 1) First pass: collect candidate files quickly (no audio decode yet)
-        candidates = []
-        for row in train_df.itertuples(index=False):
-            label = str(getattr(row, lcol))
-            rel = getattr(row, fcol)
-            if label not in sp2i:
-                continue
-            ap = paths.train_audio_dir / str(rel)
-            if not ap.exists():
-                continue
-            candidates.append((label, ap))
-
-        if not candidates:
-            raise RuntimeError("No candidate audio files found after path/label filtering.")
-
-        # 2) Stratified sampler: at least 2 samples/species when available, then fill randomly.
-        rng = np.random.default_rng(42)
-        by_label = dict()
-        for label, ap in candidates:
-            by_label.setdefault(label, []).append(ap)
-        for paths_list in by_label.values():
-            rng.shuffle(paths_list)
-
-        budget = len(candidates) if (max_samples is None) else min(int(max_samples), len(candidates))
+        # Locked clip list shared across CNN phases (1a–1d); same seed/max_samples → same files.
+        import json as _json
+        _clip_seed = int(cfg.get("focal_clip_seed", 42))
+        _ms_key = "all" if max_samples is None else int(max_samples)
+        _manifest_file = None
+        if _FOCAL_MEL_CACHE_DIR:
+            _manifest_file = (
+                Path(_FOCAL_MEL_CACHE_DIR)
+                / f"focal_train_clip_manifest_{{_ms_key}}_sr{{int(sample_rate)}}_seed{{_clip_seed}}.jsonl"
+            )
         selected = []
-        leftovers = []
-        min_per_species = 2
-        for label, paths_list in by_label.items():
-            take = min(len(paths_list), min_per_species)
-            for ap in paths_list[:take]:
-                if len(selected) < budget:
-                    selected.append((label, ap))
-            for ap in paths_list[take:]:
-                leftovers.append((label, ap))
+        if _manifest_file is not None and _manifest_file.exists():
+            print(f"FOCAL_CLIP_MANIFEST: loading {{_manifest_file.name}}")
+            with _manifest_file.open(encoding="utf-8") as _mf:
+                for _line in _mf:
+                    _line = _line.strip()
+                    if not _line:
+                        continue
+                    _row = _json.loads(_line)
+                    selected.append((str(_row["label"]), Path(_row["path"])))
+            represented_species = len(set(_l for _l, _ in selected))
+            print(
+                f"  Manifest clips={{len(selected)}} represented_species={{represented_species}}"
+            )
+        else:
+            candidates = []
+            for row in train_df.itertuples(index=False):
+                label = str(getattr(row, lcol))
+                rel = getattr(row, fcol)
+                if label not in sp2i:
+                    continue
+                ap = paths.train_audio_dir / str(rel)
+                if not ap.exists():
+                    continue
+                candidates.append((label, ap))
 
-        if len(selected) < budget:
-            rng.shuffle(leftovers)
-            selected.extend(leftovers[: budget - len(selected)])
+            if not candidates:
+                raise RuntimeError("No candidate audio files found after path/label filtering.")
 
-        represented_species = len(set(label for label, _ap in selected))
-        print(
-            "  Candidate files=", len(candidates),
-            "selected=", len(selected),
-            "budget=", budget,
-            "represented_species=", represented_species,
-        )
+            rng = np.random.default_rng(_clip_seed)
+            by_label = dict()
+            for label, ap in candidates:
+                by_label.setdefault(label, []).append(ap)
+            for paths_list in by_label.values():
+                rng.shuffle(paths_list)
 
-        # 3) Decode selected audio (deterministic aug seed=42) or custom build_features.
+            budget = len(candidates) if (max_samples is None) else min(int(max_samples), len(candidates))
+            selected = []
+            leftovers = []
+            min_per_species = 2
+            for label, paths_list in by_label.items():
+                take = min(len(paths_list), min_per_species)
+                for ap in paths_list[:take]:
+                    if len(selected) < budget:
+                        selected.append((label, ap))
+                for ap in paths_list[take:]:
+                    leftovers.append((label, ap))
+
+            if len(selected) < budget:
+                rng.shuffle(leftovers)
+                selected.extend(leftovers[: budget - len(selected)])
+
+            represented_species = len(set(label for label, _ap in selected))
+            print(
+                "  Candidate files=", len(candidates),
+                "selected=", len(selected),
+                "budget=", budget,
+                "represented_species=", represented_species,
+                "clip_seed=", _clip_seed,
+            )
+
+        # Decode selected audio (deterministic aug seed=42) or custom build_features.
         load_rng = np.random.default_rng(42)
         X_items, y_items = [], []
         for i, (label, ap) in enumerate(selected, start=1):
@@ -432,13 +481,21 @@ def main():
     X_train_fit, aug_changed = _apply_training_augmentation(
         X_train, aug_prob, aug_noise_std, aug_time_mask, aug_freq_mask, seed=42
     )
-    print(f"AUG_APPLIED: changed={{aug_changed}}/{{len(X_train)}}")
+    print(f"AUG_APPLIED: changed={{aug_changed}}/{{len(X_train)}}", flush=True)
 
     model = build_model(X_train.shape[1:], len(species_cols))
     model.compile(optimizer=_opt, loss="binary_crossentropy")
     model.summary()
     has_validation = False
-    print(f"PHASE3_DEBUG: has_validation={{has_validation}}")
+    print(f"PHASE3_DEBUG: has_validation={{has_validation}}", flush=True)
+    _n_train = len(X_train_fit)
+    _fit_bs = max(1, min(int(batch_size), _n_train))
+    _steps_per_epoch = max(1, (_n_train + _fit_bs - 1) // _fit_bs)
+    print(
+        f"TRAIN_START: samples={{_n_train}} batch_size={{_fit_bs}} "
+        f"steps_per_epoch={{_steps_per_epoch}} epochs={{epochs}}",
+        flush=True,
+    )
     fit_kwargs = {{}}
     callbacks = []
     train_start_ts = time.time()
@@ -455,10 +512,13 @@ def main():
         done = epoch + 1
         avg_per_epoch = elapsed_total / max(done, 1)
         eta = max(0.0, avg_per_epoch * max(epochs - done, 0))
+        _loss = logs.get("loss") if logs else None
+        _loss_s = f" loss={{float(_loss):.6f}}" if _loss is not None else ""
         print(
-            f"TRAIN_PROGRESS: epoch={{done}}/{{epochs}} "
+            f"TRAIN_HEARTBEAT: epoch={{done}}/{{epochs}} "
             f"epoch_time_s={{epoch_elapsed:.1f}} "
-            f"elapsed_s={{elapsed_total:.1f}} eta_s={{eta:.1f}}"
+            f"elapsed_s={{elapsed_total:.1f}} eta_s={{eta:.1f}}{{_loss_s}}",
+            flush=True,
         )
         if logs is not None and ("val_loss" in logs) and (logs["val_loss"] is not None):
             cur_val = float(logs["val_loss"])
@@ -466,9 +526,20 @@ def main():
                 best_val_loss[0] = cur_val
                 best_epoch[0] = done
 
+    def _on_batch_end(batch, logs=None):
+        if logs is None:
+            return
+        _bl = logs.get("loss")
+        if _bl is not None and (batch == 0 or (batch + 1) % max(1, _steps_per_epoch) == 0):
+            print(
+                f"TRAIN_BATCH: batch={{batch + 1}} loss={{float(_bl):.6f}}",
+                flush=True,
+            )
+
     callbacks.append(tf.keras.callbacks.LambdaCallback(
         on_epoch_begin=_on_epoch_begin,
         on_epoch_end=_on_epoch_end,
+        on_train_batch_end=_on_batch_end,
     ))
     _ckpt = None
     if checkpoint_best and has_validation:
@@ -489,11 +560,12 @@ def main():
     history = model.fit(
         X_train_fit, y_train,
         epochs=epochs,
-        batch_size=min(batch_size, len(X_train)),
-        verbose=1,
+        batch_size=_fit_bs,
+        verbose=2,
         callbacks=callbacks,
         **fit_kwargs,
     )
+    print("TRAIN_DONE", flush=True)
     if best_epoch[0] is not None:
         print(f"BEST_EPOCH_BY_VAL_LOSS: epoch={{best_epoch[0]}}/{{epochs}} val_loss={{best_val_loss[0]:.6f}}")
     else:
@@ -889,8 +961,9 @@ _cache_path = (
     / f"soundscape_mels_{{_n_mels}}x{{_n_frames}}_sr{{_sr}}_hop{{_hop_length}}.npz"
 )
 _pred_rows = []
+print("SOUNDSCAPE_EVAL_START", flush=True)
 if _cache_path.exists():
-    print(f"SOUNDSCAPE_EVAL_CACHE: loading {{_cache_path.name}}")
+    print(f"SOUNDSCAPE_EVAL_CACHE: loading {{_cache_path.name}}", flush=True)
     _cd = _np.load(str(_cache_path), allow_pickle=True)
     _X_all = _cd["X_mels"].astype(_np.float32)
     _cached_ids = [str(x) for x in _cd["row_ids"]]
@@ -1014,10 +1087,12 @@ GENERATION_SYSTEM_PROMPT = (
     "Rules:\n"
     "- Define exactly get_training_config() and build_model(input_shape, num_classes)\n"
     "- Optional build_features(audio_path, sample_rate, clip_seconds, n_mels, n_frames)\n"
-    "- Do NOT define main()\n"
+    "- Do NOT define main(), _ORIG_GET_TRAINING_CONFIG, or _META_OVERRIDES\n"
     "- No executable top-level statements except imports/assignments/function defs\n"
     "- Final layer must be Dense(num_classes, activation='sigmoid')\n"
     "- Compile with binary_crossentropy\n"
+    "- Keras 3: use Input(shape=...) with Sequential; for residuals use Functional API "
+    "(Input → conv branches → Add), never model.add(layers.Add()([shortcut, model])).\n"
 )
 
 SAFE_BASELINE_SLOT_CODE = """def get_training_config():
@@ -1081,7 +1156,21 @@ def run_experiment(
     script_path.write_text(script, encoding="utf-8")
     (code_dir / f"{run_id}_slot.py").write_text(slot_code, encoding="utf-8")
 
-    result = executor.run_file(script_path)
+    timeout_s = getattr(executor, "timeout_seconds", None)
+    print(
+        f"  [CNN Run] {run_id} → training + soundscape eval "
+        f"(timeout={timeout_s}s, log stream on)",
+        flush=True,
+    )
+    t0 = time.time()
+    result = executor.run_file(script_path, stream_output=True, label=run_id)
+    elapsed = time.time() - t0
+    if getattr(result, "timed_out", False):
+        print(f"  [CNN Run] {run_id} TIMED OUT after {elapsed:.1f}s", flush=True)
+    elif result.success:
+        print(f"  [CNN Run] {run_id} finished OK in {elapsed:.1f}s", flush=True)
+    else:
+        print(f"  [CNN Run] {run_id} failed in {elapsed:.1f}s (exit {result.return_code})", flush=True)
     if not result.success:
         return None, result
 
@@ -1126,8 +1215,18 @@ def run_experiment_until_success(
     use_llm_fixes=True,
     mel_cache_dir=None,
     focal_cache_dir=None,
+    reapply_overrides=None,
 ):
-    """Run experiment, auto-fix with LLM on failure."""
+    """Run experiment, auto-fix with LLM on failure.
+
+    ``reapply_overrides`` (optional) is a callable ``str -> str`` that
+    re-injects the meta-agent's locked training overrides (locked
+    augmentation, mel shape, max_samples, etc.) into a fresh slot. When the
+    LLM returns a fix it usually emits only ``get_training_config`` +
+    ``build_model`` with no ``_META_OVERRIDES`` block, which silently
+    overrode locked augmentation on every retry. Always passing the LLM
+    fix through this callback before using it keeps the lock in place.
+    """
     current_slot = slot_code
     for attempt in range(1, max_attempts + 1):
         metrics, result = run_experiment(
@@ -1149,9 +1248,14 @@ def run_experiment_until_success(
                 print(f"    Fixed after {attempt} attempts")
             return current_slot, metrics, result, attempt
 
-        error_text = _clean_error_text(result.stderr) if not result.success else "No valid metrics produced."
+        if getattr(result, "timed_out", False):
+            error_text = result.stderr or f"Timed out after {getattr(executor, 'timeout_seconds', '?')}s"
+        elif not result.success:
+            error_text = _clean_error_text(result.stderr or result.stdout)
+        else:
+            error_text = "No valid metrics produced (check EVAL_ARTIFACTS_SAVED in log)."
         err_path = code_dir / f"{run_id}_a{attempt}_stderr.log"
-        err_path.write_text(result.stderr or "", encoding="utf-8")
+        err_path.write_text((result.stderr or "") + "\n--- stdout ---\n" + (result.stdout or ""), encoding="utf-8")
         if attempt == max_attempts:
             print(f"    Failed all {max_attempts} attempts. Error: {_truncate(error_text, 200)}")
             return current_slot, None, result, attempt
@@ -1160,20 +1264,41 @@ def run_experiment_until_success(
             print(f"    Attempt {attempt} failed (LLM fixes disabled for this run).")
             return current_slot, None, result, attempt
 
-        print(f"    Attempt {attempt} failed, requesting LLM fix...")
+        llm_timeout = getattr(llm, "timeout_seconds", 600)
+        print(
+            f"    Attempt {attempt} failed — requesting LLM fix "
+            f"(coder timeout={llm_timeout:.0f}s)…",
+            flush=True,
+        )
+        if result.stdout and "TRAIN_HEARTBEAT" not in result.stdout and "TRAIN_START" not in result.stdout:
+            print("    (no TRAIN_* lines in log — failure likely before/during setup)", flush=True)
         fix_prompt = (
             f"The model code failed.\nError:\n{_truncate(error_text, 3000)}\n\n"
             f"Current code:\n```python\n{current_slot}\n```\n\n"
-            "Fix it. Return ONLY a python code block with get_training_config() and build_model()."
+            "Fix build_model() and/or get_training_config(). Return ONLY one ```python``` block "
+            "with those two functions. Do NOT include _ORIG_GET_TRAINING_CONFIG, "
+            "_META_OVERRIDES, harness code, or main(). "
+            "For residual blocks use Functional API, not Add() on a Sequential model."
         )
+        t_fix = time.time()
         resp = llm.generate_from_messages(
             messages=[{"role": "system", "content": GENERATION_SYSTEM_PROMPT},
                       {"role": "user", "content": fix_prompt}],
             temperature=temperature,
         )
+        print(f"    [LLM fix] done in {time.time() - t_fix:.1f}s", flush=True)
         candidate = extract_python_code(resp)
         issues = validate_slot_code(candidate) if candidate else ["No code found."]
         if not issues:
+            # The LLM almost always returns a bare get_training_config + build_model
+            # with no _META_OVERRIDES block. If we just took the candidate as-is,
+            # locked augmentation / mel shape / max_samples would silently revert
+            # to whatever the LLM chose — that's the "stage 1b changes aug" bug.
+            if reapply_overrides is not None:
+                try:
+                    candidate = reapply_overrides(candidate)
+                except Exception as exc:
+                    print(f"    [Warning] reapply_overrides failed: {exc!r} — using raw LLM fix")
             current_slot = candidate
         else:
             print(f"    LLM fix invalid: {issues}")

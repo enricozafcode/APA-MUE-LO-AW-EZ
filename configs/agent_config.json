@@ -2,24 +2,25 @@
   "project_name": "apa-birdclef-autonomous-agent",
   "track": "birdclef",
   "random_seed": 42,
-  "max_iterations": 2,
+  "max_iterations": 5,
   "llm": {
     "provider": "ollama",
     "model": "qwen2.5-coder:7b",
-    "temperature": 0.2
+    "temperature": 0.2,
+    "timeout_seconds": 600
   },
   "llm_researcher": {
     "enabled": true,
     "provider": "ollama",
-    "model": "gemma4:latest",
+    "model": "qwen2.5-coder:7b",
     "temperature": 0.2
   },
   "researcher": {
-    "model": "gemma4:latest",
+    "model": "qwen2.5-coder:7b",
     "temperature": 0.2,
     "timeout_seconds": 600,
     "stream_debug": false,
-    "batch_size": 3
+    "batch_size": 2
   },
   "execution": {
     "timeout_seconds": 1800,
@@ -33,19 +34,19 @@
   },
   "search": {
     "cheap": {
-      "max_samples": 50,
-      "epochs": 1,
+      "max_samples": 1500,
+      "epochs": 3,
       "val_split": 0.2
     },
     "medium": {
-      "max_samples": 50,
-      "epochs": 2,
+      "max_samples": 1500,
+      "epochs": 5,
       "val_split": 0.2
     },
     "final": {
-      "max_samples": 50,
-      "epochs": 2,
-      "val_split": 0.1
+      "max_samples": null,
+      "epochs": 12,
+      "val_split": 0.0
     },
     "linear_budget": 0,
     "random_budget": 0,
@@ -53,7 +54,7 @@
       "random_experiments": 5,
       "focused_experiments": 5,
       "tweak_experiments": 5,
-      "augmentation_tweak_experiments": 8,
+      "augmentation_tweak_experiments": 10,
       "ai_free_experiments": 10,
       "final_tweak_experiments": 10,
       "top_results_keep": 2
@@ -93,7 +94,8 @@
   },
   "meta_agent": {
     "pipeline": "staged_tournament",
-    "track_order": ["cnn", "birdnet", "perch"],
+    "track_order": ["cnn"],
+    "excluded_tracks": ["birdnet", "perch"],
     "tournament": {
       "enabled": true,
       "auto_finalize": true
@@ -102,41 +104,50 @@
     "primary_metric": "macro_average_precision",
     "run_eda": false,
     "aug_baselines": ["high"],
-    "arch_search_iterations_per_aug": 1,
-    "arch_search_cnn_max_samples": 50,
-    "arch_search_head_train_max_samples": 50,
+    "arch_search_iterations_per_aug": 5,
+    "focal_clip_seed": 42,
+    "arch_search_cnn_max_samples": 1500,
+    "arch_search_head_train_max_samples": 1500,
     "arch_search_embed_sample_frac": 1.0,
-    "arch_search_embed_max_samples": 50,
+    "arch_search_embed_max_samples": 1500,
     "force_rebuild_embed_cache": false,
-    "cnn_iterations": 2,
+    "cnn_iterations": 5,
     "cnn_staged": true,
-    "birdnet_iterations": 2,
-    "perch_iterations": 2,
+    "birdnet_iterations": 0,
+    "perch_iterations": 0,
     "ensemble_iterations": 0,
     "cnn_stage_1b": {
       "enabled": true,
       "top_k_models": 1,
-      "experiments_per_researcher_call": 1,
-      "initial_iterations": 1,
-      "bonus_iterations_on_improve": 1,
-      "max_iterations_per_model": 2
+      "experiments_per_researcher_call": 2,
+      "initial_iterations": 5,
+      "bonus_iterations_on_improve": 2,
+      "max_iterations_per_model": 7
     },
     "cnn_stage_1c": {
       "enabled": true,
-      "mode": "presets",
-      "planner_rounds": 1,
-      "experiments_per_round": 1,
-      "aug_presets": ["medium"],
+      "mode": "both",
+      "planner_rounds": 5,
+      "experiments_per_round": 2,
+      "aug_presets": ["high"],
       "include_winner_aug_baseline": true,
-      "head_train_samples": 50
+      "include_preset_baselines": false,
+      "include_champion_reference": true,
+      "head_train_samples": 1500,
+      "researcher_format_json": true,
+      "researcher_num_predict": 4096
     },
     "cnn_stage_1d": {
       "enabled": true,
+      "epochs": 12,
+      "max_samples": null,
+      "val_split": 0.0,
+      "rebuild_focal_cache": true,
       "copy_to_submission": true,
       "final_timeout_seconds": 7200
     },
     "birdnet_stage_1b": {
-      "enabled": true,
+      "enabled": false,
       "top_k_models": 1,
       "experiments_per_researcher_call": 1,
       "initial_iterations": 1,
@@ -144,20 +155,20 @@
       "max_iterations_per_model": 2
     },
     "birdnet_stage_1c": {
-      "enabled": true,
+      "enabled": false,
       "mode": "presets",
       "aug_presets": ["medium"],
       "include_winner_aug_baseline": true
     },
     "birdnet_stage_1d": {
-      "enabled": true,
+      "enabled": false,
       "embed_sample_frac": 1.0,
       "rebuild_full_train_cache": false,
       "copy_to_submission": true,
       "final_timeout_seconds": 7200
     },
     "birdnet_stage_1e": {
-      "enabled": true,
+      "enabled": false,
       "max_soundscape_files": 5,
       "top1_threshold": 0.55,
       "runnerup_max": 0.35,
@@ -175,20 +186,23 @@
     },
     "cnn_stage_1e": {
       "enabled": true,
-      "max_soundscape_files": 5,
+      "skip_fine_tune_without_pseudo": true,
+      "max_soundscape_files": null,
+      "max_pseudo_windows": null,
+      "heartbeat_every": 10,
       "top1_threshold": 0.55,
       "runnerup_max": 0.35,
       "pseudo_label_weight": 0.8,
       "sample_weight_supervised": 1.0,
       "sample_weight_pseudo": 0.5,
-      "fine_tune_epochs": 2,
+      "fine_tune_epochs": 5,
       "fine_tune_lr": 0.0002,
-      "rebuild_pseudo_cache": false,
+      "rebuild_pseudo_cache": true,
       "refine_timeout_seconds": 7200,
       "copy_to_submission": true
     },
     "stage_1b": {
-      "enabled": true,
+      "enabled": false,
       "top_k_models": 1,
       "experiments_per_researcher_call": 1,
       "initial_iterations": 1,
@@ -196,7 +210,7 @@
       "max_iterations_per_model": 2
     },
     "stage_1c": {
-      "enabled": true,
+      "enabled": false,
       "mode": "presets",
       "planner_rounds": 1,
       "experiments_per_round": 1,
@@ -210,14 +224,14 @@
       "stream_debug": false
     },
     "stage_1d": {
-      "enabled": true,
+      "enabled": false,
       "embed_sample_frac": 1.0,
       "rebuild_full_train_cache": false,
       "copy_to_submission": true,
       "final_timeout_seconds": 7200
     },
     "stage_1e": {
-      "enabled": true,
+      "enabled": false,
       "max_soundscape_files": 5,
       "top1_threshold": 0.55,
       "runnerup_max": 0.35,

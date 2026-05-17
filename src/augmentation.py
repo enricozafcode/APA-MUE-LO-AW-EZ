@@ -19,6 +19,8 @@ Usage:
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,20 @@ except ImportError:
 
 
 BASELINE_AUG_NAMES: tuple[str, ...] = ("light", "medium", "high")
+
+
+def normalize_baseline_aug_name(name: str, *, default: str = "medium") -> str:
+    """Map refine slugs (e.g. rank1_high_shallow_cnn) and preset_* ids to light/medium/high."""
+    s = str(name or "").strip().lower()
+    if s in BASELINE_AUG_NAMES:
+        return s
+    if s.startswith("preset_"):
+        return normalize_baseline_aug_name(s[7:], default=default)
+    if s.startswith("rank") and "_" in s:
+        parts = s.split("_", 2)
+        if len(parts) >= 2:
+            return normalize_baseline_aug_name(parts[1], default=default)
+    return default
 
 
 # ---------------------------------------------------------------------------
@@ -134,9 +150,34 @@ def json_deepcopy(d: dict) -> dict:
     return copy.deepcopy(d)
 
 
-def get_audio_embedding_aug(name: str) -> dict[str, Any]:
-    """Full augmentation dict for embedding caches (BirdNET / Perch)."""
+def custom_embedding_aug_path(cache_dir: Path, preset: str) -> Path:
+    """CNN 1c LLM custom audio/SNR configs (focal mel cache key)."""
+    safe = re.sub(r"[^a-z0-9_]+", "_", str(preset).strip().lower()).strip("_")[:48]
+    return Path(cache_dir) / "custom_embedding_augs" / f"{safe or 'custom'}.json"
+
+
+def register_custom_embedding_aug(
+    cache_dir: Path,
+    preset: str,
+    embed_aug: dict[str, Any],
+) -> Path:
+    path = custom_embedding_aug_path(cache_dir, preset)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(embed_aug, indent=2), encoding="utf-8")
+    return path
+
+
+def get_audio_embedding_aug(
+    name: str,
+    *,
+    cache_dir: Path | str | None = None,
+) -> dict[str, Any]:
+    """Full augmentation dict for embedding / CNN focal mel caches."""
     key = str(name).strip().lower()
+    if cache_dir is not None:
+        custom = custom_embedding_aug_path(Path(cache_dir), key)
+        if custom.exists():
+            return json.loads(custom.read_text(encoding="utf-8"))
     if key not in AUDIO_EMBEDDING_BASELINES:
         raise KeyError(f"Unknown audio baseline {name!r}; choose from {list(BASELINE_AUG_NAMES)}")
     preset = AUDIO_EMBEDDING_BASELINES[key]

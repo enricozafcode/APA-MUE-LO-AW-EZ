@@ -79,6 +79,15 @@ def configure_tensorflow_cpu_only() -> None:
                     tf.config.set_visible_devices([], dev.device_type)
                 except (RuntimeError, ValueError):
                     pass
+        # macOS: Keras model.fit() can hang during graph compile; eager is safer.
+        try:
+            tf.config.run_functions_eagerly(True)
+        except (RuntimeError, ValueError, AttributeError):
+            pass
+        try:
+            tf.config.optimizer.set_jit(False)
+        except (RuntimeError, ValueError, AttributeError):
+            pass
     except ImportError:
         pass
 

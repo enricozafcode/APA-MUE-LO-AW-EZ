@@ -1,8 +1,9 @@
 """
 Precomputed focal training mels for CNN stage 1a/1b (fixed aug) and 1c (per preset).
 
-Builds once per (aug_preset, max_samples, n_mels, n_frames) so architecture search
-experiments train on identical tensors. Uses seed=42 for clip selection and audio aug.
+Builds once per (aug_preset, max_samples, n_mels, n_frames). Clip *files* are locked
+in focal_train_clip_manifest_{max_samples}_sr*_seed*.jsonl so 1a/1b/1c/1d compare the
+same audio; only augmentation (mel content) varies by preset.
 """
 
 from __future__ import annotations
@@ -25,6 +26,120 @@ else:
 DEFAULT_FOCAL_MEL_CACHE_DIR = DEFAULT_SOUNDSCAPE_MEL_CACHE_DIR
 FOCAL_CLIP_SEED = 42
 FOCAL_AUG_SEED = 42
+
+
+def focal_clip_seed_from_config(config: dict | None) -> int:
+    """Clip-selection RNG seed shared across CNN stages (1a–1d)."""
+    if not config:
+        return FOCAL_CLIP_SEED
+    meta = config.get("meta_agent") or {}
+    return int(
+        meta.get("focal_clip_seed")
+        or (config.get("search") or {}).get("random_seed")
+        or config.get("random_seed", FOCAL_CLIP_SEED)
+    )
+
+
+def focal_clip_manifest_path(
+    cache_dir: Path,
+    *,
+    max_samples: int | None,
+    seed: int = FOCAL_CLIP_SEED,
+    sample_rate: int = 32000,
+) -> Path:
+    ms_key = "all" if max_samples is None else int(max_samples)
+    return (
+        Path(cache_dir)
+        / f"focal_train_clip_manifest_{ms_key}_sr{int(sample_rate)}_seed{int(seed)}.jsonl"
+    )
+
+
+def save_focal_clip_manifest(path: Path, clips: list[tuple[str, Path]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for label, ap in clips:
+            f.write(json.dumps({"label": label, "path": str(ap)}) + "\n")
+
+
+def load_focal_clip_manifest(path: Path) -> list[tuple[str, Path]]:
+    clips: list[tuple[str, Path]] = []
+    with Path(path).open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            clips.append((str(row["label"]), Path(row["path"])))
+    return clips
+
+
+def ensure_focal_clip_manifest(
+    cache_dir: Path,
+    *,
+    max_samples: int | None,
+    train_df=None,
+    paths=None,
+    species_cols: list[str] | None = None,
+    seed: int = FOCAL_CLIP_SEED,
+    sample_rate: int = 32000,
+    force: bool = False,
+) -> Path:
+    """
+    Lock the stratified focal clip list once per (max_samples, seed).
+    All CNN phases / aug presets reuse the same audio files for fair comparison.
+    """
+    cache_dir = Path(cache_dir)
+    manifest_path = focal_clip_manifest_path(
+        cache_dir, max_samples=max_samples, seed=seed, sample_rate=sample_rate
+    )
+    if manifest_path.exists() and not force:
+        return manifest_path
+
+    if train_df is None or paths is None or species_cols is None:
+        paths = resolve_birdclef_paths() if paths is None else paths
+        tables = load_core_tables(paths)
+        train_df = tables["train"] if train_df is None else train_df
+        species_cols = (
+            species_columns_from_sample_submission(tables["sample_submission"])
+            if species_cols is None
+            else species_cols
+        )
+
+    selected, represented = select_focal_training_clips(
+        train_df, paths, species_cols, max_samples=max_samples, seed=seed
+    )
+    save_focal_clip_manifest(manifest_path, selected)
+    print(
+        f"  [focal manifest] locked {len(selected)} clips "
+        f"(seed={seed} max_samples={max_samples} species={represented}) → {manifest_path.name}"
+    )
+    return manifest_path
+
+
+def resolve_focal_training_clips(
+    train_df,
+    paths,
+    species_cols: list[str],
+    *,
+    max_samples: int | None,
+    cache_dir: Path | None = None,
+    seed: int = FOCAL_CLIP_SEED,
+    sample_rate: int = 32000,
+) -> tuple[list[tuple[str, Path]], int]:
+    """Return the locked clip list (create manifest on first use)."""
+    cache_dir = Path(cache_dir or DEFAULT_FOCAL_MEL_CACHE_DIR)
+    manifest_path = ensure_focal_clip_manifest(
+        cache_dir,
+        max_samples=max_samples,
+        train_df=train_df,
+        paths=paths,
+        species_cols=species_cols,
+        seed=seed,
+        sample_rate=sample_rate,
+    )
+    clips = load_focal_clip_manifest(manifest_path)
+    represented = len({label for label, _ in clips})
+    return clips, represented
 
 
 def focal_train_cache_path(
@@ -133,6 +248,7 @@ def load_focal_mel(
     aug_preset: str | None,
     paths,
     rng: np.random.Generator,
+    cache_dir: Path | None = None,
 ) -> np.ndarray:
     import librosa
 
@@ -144,7 +260,7 @@ def load_focal_mel(
         wav = wav[:target_len]
 
     if aug_preset:
-        embed_aug = get_audio_embedding_aug(str(aug_preset))
+        embed_aug = get_audio_embedding_aug(str(aug_preset), cache_dir=cache_dir)
         audio_aug = AudioAugmenter(embed_aug.get("audio", {}))
         wav = audio_aug.apply(wav.astype(np.float32), sample_rate, rng)
         if embed_aug.get("use_snr_mixing"):
@@ -206,8 +322,14 @@ def build_focal_train_cache(
     species_cols = species_columns_from_sample_submission(tables["sample_submission"])
     sp2i = {s: i for i, s in enumerate(species_cols)}
 
-    selected, represented = select_focal_training_clips(
-        train_df, paths, species_cols, max_samples=max_samples, seed=clip_seed
+    selected, represented = resolve_focal_training_clips(
+        train_df,
+        paths,
+        species_cols,
+        max_samples=max_samples,
+        cache_dir=cache_dir,
+        seed=clip_seed,
+        sample_rate=sample_rate,
     )
     load_rng = np.random.default_rng(aug_seed)
 
@@ -226,6 +348,7 @@ def build_focal_train_cache(
                 aug_preset=aug_preset,
                 paths=paths,
                 rng=load_rng,
+                cache_dir=cache_dir,
             )
         except Exception:
             continue
@@ -277,9 +400,16 @@ def ensure_focal_train_cache(
     n_frames: int = 128,
     sample_rate: int = 32000,
     clip_seconds: float = 5.0,
+    clip_seed: int = FOCAL_CLIP_SEED,
     force: bool = False,
 ) -> Path:
     cache_dir = Path(cache_dir or DEFAULT_FOCAL_MEL_CACHE_DIR)
+    ensure_focal_clip_manifest(
+        cache_dir,
+        max_samples=max_samples,
+        seed=clip_seed,
+        sample_rate=sample_rate,
+    )
     path = focal_train_cache_path(
         cache_dir,
         aug_preset=aug_preset,
@@ -299,4 +429,5 @@ def ensure_focal_train_cache(
         n_frames=n_frames,
         sample_rate=sample_rate,
         clip_seconds=clip_seconds,
+        clip_seed=clip_seed,
     )

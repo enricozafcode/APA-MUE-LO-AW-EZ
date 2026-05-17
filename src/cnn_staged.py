@@ -124,7 +124,12 @@ CNN_CODER_SYSTEM = (
     + "\n\nYou implement the researcher's arch_description as a full Keras CNN on mel input "
     "(batch, n_mels, n_frames, 1). Use only tf.keras layers. "
     "get_training_config() must return epochs, batch_size, learning_rate, optimizer, n_mels, n_frames, "
-    "val_split, and optional aug_prob/aug_noise_std/aug_time_mask/aug_freq_mask/aug_preset."
+    "val_split, and optional aug_prob/aug_noise_std/aug_time_mask/aug_freq_mask/aug_preset.\n"
+    "Keras 3 rules:\n"
+    "- Prefer Sequential with Input(shape=...) as the first layer.\n"
+    "- For residual/skip connections use the Functional API (Input → branches → Add → head), "
+    "NOT model.add(layers.Add()([shortcut, model])).\n"
+    "- If unsure about residuals, set residuals=False and use a plain Conv block stack."
 )
 
 
@@ -190,9 +195,21 @@ def _spec_to_coder_prompt(spec: dict) -> str:
 
 
 def generate_cnn_slot_code(
-    coder_llm: LLMClient, spec: dict, temperature: float, max_retries: int = 5
+    coder_llm: LLMClient,
+    spec: dict,
+    temperature: float,
+    max_retries: int = 5,
+    *,
+    seed_slot_code: str | None = None,
 ) -> str | None:
     prompt = _spec_to_coder_prompt(spec)
+    if seed_slot_code:
+        prompt += (
+            "\n\nRefine mode: start from this working 1a slot. "
+            "Keep build_model structure stable; only adjust hyperparameters in get_training_config() "
+            "unless the arch_description requires a minimal safe fix.\n"
+            f"```python\n{seed_slot_code.strip()[:12000]}\n```"
+        )
     current = prompt
     for attempt in range(1, max_retries + 1):
         print(f"  [Coder] Attempt {attempt}/{max_retries}...")
@@ -385,6 +402,8 @@ def _resolve_dirs(config: dict) -> dict[str, Path]:
 
 
 def _cheap_training_overrides(config: dict) -> dict[str, Any]:
+    from cnn_focal_cache import focal_clip_seed_from_config
+
     sc = config.get("search", {})
     cheap = sc.get("cheap", {})
     meta = config.get("meta_agent", {})
@@ -393,7 +412,36 @@ def _cheap_training_overrides(config: dict) -> dict[str, Any]:
         "max_samples": max_samples,
         "epochs": cheap.get("epochs", 3),
         "val_split": cheap.get("val_split", 0.2),
+        "focal_clip_seed": focal_clip_seed_from_config(config),
     }
+
+
+def _enforced_training_overrides(config: dict, spec: dict | None = None) -> dict[str, Any]:
+    """Merge cheap caps + locked aug; refine also locks mel shape from 1a winner."""
+    ov = dict(_cheap_training_overrides(config))
+    locked = _locked_cnn_aug(config)
+    if locked:
+        ov.update({k: v for k, v in locked.items() if k != "aug_preset"})
+        if locked.get("aug_preset"):
+            ov["aug_preset"] = locked["aug_preset"]
+    refine = config.get("cnn_refine") or {}
+    if refine.get("enabled"):
+        seed = dict(refine.get("seed_spec") or {})
+        for key in ("n_mels", "n_frames", "sample_rate", "clip_seconds"):
+            if key in seed:
+                ov[key] = seed[key]
+    if spec:
+        # Spec aug fields from researcher (architecture knobs stay in generated code).
+        for key in (
+            "aug_prob",
+            "aug_noise_std",
+            "aug_time_mask",
+            "aug_freq_mask",
+            "aug_preset",
+        ):
+            if key in spec and key not in ov:
+                ov[key] = spec[key]
+    return ov
 
 
 def merge_aug_into_slot(slot_code: str, aug_dict: dict) -> str:
@@ -401,7 +449,7 @@ def merge_aug_into_slot(slot_code: str, aug_dict: dict) -> str:
     aug_repr = repr(dict(aug_dict))
     return (
         slot_code.strip()
-        + f"\n\n# --- META AUG OVERRIDE ---\n"
+        + f"\n\n{_META_AUG_MARKER}\n"
         f"_META_AUG = {aug_repr}\n\n"
         f"def get_training_config():\n"
         f"    cfg = _ORIG_GET_TRAINING_CONFIG()\n"
@@ -412,12 +460,13 @@ def merge_aug_into_slot(slot_code: str, aug_dict: dict) -> str:
 
 def inject_aug_override(slot_code: str, aug_dict: dict) -> str:
     """Rename original get_training_config and add override."""
-    if "def get_training_config" not in slot_code:
-        return slot_code
+    base = _strip_slot_meta_overrides(slot_code)
+    if "def get_training_config" not in base:
+        return base
     renamed = re.sub(
         r"^def get_training_config\s*\(",
         "def _ORIG_GET_TRAINING_CONFIG(",
-        slot_code,
+        base,
         count=1,
         flags=re.MULTILINE,
     )
@@ -508,9 +557,30 @@ def _execute_cnn_slot(
         spec.update({k: v for k, v in locked_aug.items() if k != "aug_preset"})
         if locked_aug.get("aug_preset"):
             spec["aug_preset"] = locked_aug["aug_preset"]
-    slot_code = generate_cnn_slot_code(coder_llm, spec, coder_temp)
+    seed_slot: str | None = None
+    refine = config.get("cnn_refine") or {}
+    if refine.get("enabled"):
+        parent_slot = Path(refine.get("parent_memory_dir", "")) / "best_model_slot.py"
+        if parent_slot.exists():
+            seed_slot = parent_slot.read_text(encoding="utf-8")
+    slot_code = generate_cnn_slot_code(
+        coder_llm, spec, coder_temp, seed_slot_code=seed_slot
+    )
     if not slot_code:
         return None, "", spec
+    enforced = _enforced_training_overrides(config, spec)
+    slot_code = _apply_slot_overrides(slot_code, enforced)
+    print(
+        "  [CNN] Enforced get_training_config(): "
+        f"max_samples={enforced.get('max_samples')} epochs={enforced.get('epochs')} "
+        f"n_mels={enforced.get('n_mels')} n_frames={enforced.get('n_frames')} "
+        f"aug_preset={enforced.get('aug_preset')} "
+        f"aug_prob={enforced.get('aug_prob')} "
+        f"aug_noise_std={enforced.get('aug_noise_std')} "
+        f"aug_time_mask={enforced.get('aug_time_mask')} "
+        f"aug_freq_mask={enforced.get('aug_freq_mask')}",
+        flush=True,
+    )
     run_id = f"iter_{iteration:03d}_{slot_label}"
     slot_code, metrics, _result, _att = run_experiment_until_success(
         slot_code,
@@ -524,6 +594,11 @@ def _execute_cnn_slot(
         max_attempts=max_attempts,
         mel_cache_dir=_soundscape_mel_cache_dir(config),
         focal_cache_dir=_soundscape_mel_cache_dir(config),
+        # Re-inject locked overrides into every LLM auto-fix. Without this,
+        # an LLM fix on attempt 2+ would drop _META_OVERRIDES and let the
+        # bare get_training_config() take effect, which is how stage 1b was
+        # ending up with aug_prob=0/aug_noise_std=0/... despite "high" lock.
+        reapply_overrides=lambda code: _apply_slot_overrides(code, enforced),
     )
     return metrics, slot_code, spec
 
@@ -546,8 +621,10 @@ def _warm_soundscape_mel_cache(config: dict) -> None:
 
 
 def _focal_cache_params(config: dict) -> tuple[str, int | None, int, int]:
+    from augmentation import normalize_baseline_aug_name
+
     cheap = (config.get("search") or {}).get("cheap") or {}
-    preset = str(
+    preset = normalize_baseline_aug_name(
         config.get("meta_aug_preset")
         or (config.get("cnn_augmentation") or {}).get("aug_preset")
         or "medium"
@@ -555,7 +632,7 @@ def _focal_cache_params(config: dict) -> tuple[str, int | None, int, int]:
     max_samples = cheap.get("max_samples")
     trial = config.get("cnn_1c_trial") or {}
     if trial:
-        preset = str(
+        preset = normalize_baseline_aug_name(
             trial.get("aug_preset")
             or (trial.get("aug_dict") or {}).get("aug_preset")
             or preset
@@ -567,11 +644,14 @@ def _focal_cache_params(config: dict) -> tuple[str, int | None, int, int]:
 
 
 def _warm_focal_train_cache(config: dict) -> None:
+    from cnn_focal_cache import focal_clip_seed_from_config
+
     preset, max_samples, n_mels, n_frames = _focal_cache_params(config)
     cache_dir = _soundscape_mel_cache_dir(config)
+    clip_seed = focal_clip_seed_from_config(config)
     print(
         f"  [CNN] Focal train cache → {cache_dir} "
-        f"preset={preset} max_samples={max_samples} ({n_mels}x{n_frames})"
+        f"preset={preset} max_samples={max_samples} ({n_mels}x{n_frames}) clip_seed={clip_seed}"
     )
     ensure_focal_train_cache(
         cache_dir,
@@ -579,6 +659,7 @@ def _warm_focal_train_cache(config: dict) -> None:
         max_samples=max_samples,
         n_mels=n_mels,
         n_frames=n_frames,
+        clip_seed=clip_seed,
     )
 
 
@@ -614,11 +695,18 @@ def run_cnn_explore(config: dict) -> None:
             config.get("meta_agent", {}).get("researcher_timeout_seconds", 600)
         ),
     )
-    coder_llm = LLMClient(provider=provider, model=coder_model)
+    coder_timeout = float(
+        config.get("llm", {}).get("timeout_seconds")
+        or config.get("researcher", {}).get("timeout_seconds", 600)
+    )
+    coder_llm = LLMClient(
+        provider=provider, model=coder_model, timeout_seconds=coder_timeout
+    )
     executor = CodeExecutor(
         python_executable=config["execution"]["python_executable"],
         timeout_seconds=timeout,
     )
+    print(f"  [CNN] Experiment subprocess timeout={timeout:.0f}s  coder LLM timeout={coder_timeout:.0f}s")
     evaluator = Evaluator(row_id_column_name="row_id")
     memory = ExperimentMemory(mem_dir, ranking_metric=ranking_metric)
     researcher = CnnResearcher(
@@ -637,8 +725,11 @@ def run_cnn_explore(config: dict) -> None:
     if memory.total() == 0:
         print("\n  ITERATION 0 — Safe CNN baseline")
         run_id = "iter_000_baseline"
+        baseline_code = _apply_slot_overrides(
+            SAFE_BASELINE_SLOT_CODE, _enforced_training_overrides(config)
+        )
         slot_code, metrics, _r, _a = run_experiment_until_success(
-            SAFE_BASELINE_SLOT_CODE,
+            baseline_code,
             run_id,
             code_dir,
             eval_dir,
@@ -750,11 +841,18 @@ def run_cnn_refine(config: dict) -> None:
     timeout = float(config.get("execution", {}).get("timeout_seconds", 1800))
 
     researcher_llm = LLMClient(provider=provider, model=researcher_model, timeout_seconds=600)
-    coder_llm = LLMClient(provider=provider, model=coder_model)
+    coder_timeout = float(
+        config.get("llm", {}).get("timeout_seconds")
+        or config.get("researcher", {}).get("timeout_seconds", 600)
+    )
+    coder_llm = LLMClient(
+        provider=provider, model=coder_model, timeout_seconds=coder_timeout
+    )
     executor = CodeExecutor(
         python_executable=config["execution"]["python_executable"],
         timeout_seconds=timeout,
     )
+    print(f"  [CNN] Experiment subprocess timeout={timeout:.0f}s  coder LLM timeout={coder_timeout:.0f}s")
     evaluator = Evaluator(row_id_column_name="row_id")
     memory = ExperimentMemory(mem_dir, ranking_metric=ranking_metric)
 
@@ -846,19 +944,61 @@ def run_cnn_refine(config: dict) -> None:
     print(f"\n{'=' * 60}\n  CNN refine done | best={best_score_ever:.5f}\n{'=' * 60}")
 
 
+_META_OVERRIDE_MARKER = "# --- META OVERRIDES ---"
+_META_AUG_MARKER = "# --- META AUG OVERRIDE ---"
+
+
+def _strip_slot_meta_overrides(slot_code: str) -> str:
+    """Remove injected override wrappers so _apply_slot_overrides is idempotent."""
+    code = slot_code
+    for marker in (_META_OVERRIDE_MARKER, _META_AUG_MARKER):
+        idx = code.find(marker)
+        if idx >= 0:
+            code = code[:idx]
+    # LLM fixes sometimes copy the wrapper; drop delegate-only stubs.
+    code = re.sub(
+        r"\ndef _ORIG_GET_TRAINING_CONFIG\(\):\s*\n"
+        r"\s*cfg = _ORIG_GET_TRAINING_CONFIG\(\)\s*\n"
+        r"\s*cfg\.update\([^)]+\)\s*\n"
+        r"\s*return cfg\s*",
+        "\n",
+        code,
+        flags=re.MULTILINE,
+    )
+    code = re.sub(
+        r"\ndef get_training_config\(\):\s*\n"
+        r"\s*cfg = _ORIG_GET_TRAINING_CONFIG\(\)\s*\n"
+        r"\s*cfg\.update\([^)]+\)\s*\n"
+        r"\s*return cfg\s*",
+        "\n",
+        code,
+        flags=re.MULTILINE,
+    )
+    code = re.sub(
+        r"^def _ORIG_GET_TRAINING_CONFIG\s*\(",
+        "def get_training_config(",
+        code,
+        flags=re.MULTILINE,
+    )
+    return code.rstrip()
+
+
 def _apply_slot_overrides(slot_code: str, overrides: dict) -> str:
     """Single get_training_config() override after renaming the original."""
+    base = _strip_slot_meta_overrides(slot_code)
+    if "def get_training_config" not in base:
+        return base
     renamed = re.sub(
         r"^def get_training_config\s*\(",
         "def _ORIG_GET_TRAINING_CONFIG(",
-        slot_code,
+        base,
         count=1,
         flags=re.MULTILINE,
     )
     ov = repr(dict(overrides))
     return (
         renamed.strip()
-        + f"\n\n# --- META OVERRIDES ---\n"
+        + f"\n\n{_META_OVERRIDE_MARKER}\n"
         f"_META_OVERRIDES = {ov}\n\n"
         f"def get_training_config():\n"
         f"    cfg = _ORIG_GET_TRAINING_CONFIG()\n"
@@ -883,17 +1023,28 @@ def run_cnn_1c_trial(config: dict) -> dict:
         "max_samples": trial.get("max_samples", 2000),
         "epochs": trial.get("epochs", config.get("search", {}).get("cheap", {}).get("epochs", 3)),
         "val_split": trial.get("val_split", 0.2),
+        "focal_clip_seed": _cheap_training_overrides(config)["focal_clip_seed"],
     }
-    slot_code = _apply_slot_overrides(slot_code, {**aug_dict, **train_overrides})
+    # Capture the full aug+training override dict so we can re-inject it
+    # if the LLM auto-fix returns a bare slot during a retry.
+    _full_overrides = {**aug_dict, **train_overrides}
+    slot_code = _apply_slot_overrides(slot_code, _full_overrides)
 
     provider = config["llm"]["provider"]
-    coder_llm = LLMClient(provider=provider, model=config["llm"]["model"])
+    coder_timeout = float(
+        config.get("llm", {}).get("timeout_seconds")
+        or config.get("researcher", {}).get("timeout_seconds", 600)
+    )
+    coder_llm = LLMClient(
+        provider=provider, model=config["llm"]["model"], timeout_seconds=coder_timeout
+    )
     coder_temp = float(config["llm"].get("temperature", 0.2))
     timeout = float(config.get("execution", {}).get("timeout_seconds", 1800))
     executor = CodeExecutor(
         python_executable=config["execution"]["python_executable"],
         timeout_seconds=timeout,
     )
+    print(f"  [CNN] Experiment subprocess timeout={timeout:.0f}s  coder LLM timeout={coder_timeout:.0f}s")
     evaluator = Evaluator(row_id_column_name="row_id")
     trial_id = str(trial.get("trial_id", "trial"))
     metrics, slot_code, _ = _execute_locked_slot(
@@ -908,6 +1059,7 @@ def run_cnn_1c_trial(config: dict) -> dict:
         max_attempts=int(trial.get("max_attempts", 3)),
         mel_cache_dir=_soundscape_mel_cache_dir(config),
         focal_cache_dir=_soundscape_mel_cache_dir(config),
+        reapply_overrides=lambda code: _apply_slot_overrides(code, _full_overrides),
     )
     rv = _ranking_value_from_metrics(metrics)
     entry = {
@@ -948,29 +1100,7 @@ def run_cnn_1c_trial(config: dict) -> dict:
 
 def inject_training_cap(slot_code: str, overrides: dict) -> str:
     """Force max_samples/epochs/val_split for fast search trials."""
-    cap_repr = repr(overrides)
-    if "_ORIG_GET_TRAINING_CONFIG" in slot_code:
-        return (
-            slot_code
-            + f"\n\ndef get_training_config():\n"
-            f"    cfg = _ORIG_GET_TRAINING_CONFIG()\n"
-            f"    cfg.update({cap_repr})\n"
-            f"    return cfg\n"
-        )
-    renamed = re.sub(
-        r"^def get_training_config\s*\(",
-        "def _ORIG_GET_TRAINING_CONFIG(",
-        slot_code,
-        count=1,
-        flags=re.MULTILINE,
-    )
-    return (
-        renamed
-        + f"\n\ndef get_training_config():\n"
-        f"    cfg = _ORIG_GET_TRAINING_CONFIG()\n"
-        f"    cfg.update({cap_repr})\n"
-        f"    return cfg\n"
-    )
+    return _apply_slot_overrides(slot_code, overrides)
 
 
 def _execute_locked_slot(
@@ -985,6 +1115,8 @@ def _execute_locked_slot(
     coder_temp: float,
     max_attempts: int,
     mel_cache_dir: Path | None = None,
+    focal_cache_dir: Path | None = None,
+    reapply_overrides=None,
 ) -> tuple[dict | None, str, int]:
     slot_code, metrics, _r, att = run_experiment_until_success(
         slot_code,
@@ -998,12 +1130,16 @@ def _execute_locked_slot(
         max_attempts=max_attempts,
         use_llm_fixes=max_attempts > 1,
         mel_cache_dir=mel_cache_dir,
+        focal_cache_dir=focal_cache_dir or mel_cache_dir,
+        reapply_overrides=reapply_overrides,
     )
     return metrics, slot_code, att
 
 
 def run_cnn_final_train(config: dict) -> dict:
     """Full-data CNN training (stage 1d)."""
+    from cnn_focal_cache import focal_clip_seed_from_config
+
     ft = config.get("cnn_final_train") or {}
     dirs = _resolve_dirs(config)
     mem_dir = dirs["mem_dir"]
@@ -1011,12 +1147,40 @@ def run_cnn_final_train(config: dict) -> dict:
     locked_path = Path(ft["locked_slot_path"])
     slot_code = locked_path.read_text(encoding="utf-8")
     aug_dict = dict(ft.get("aug_dict") or {})
-
+    aug_preset = str(aug_dict.get("aug_preset") or "high")
     sc_final = config.get("search", {}).get("final", {})
+    max_samples = ft.get("max_samples", sc_final.get("max_samples"))
+    clip_seed = focal_clip_seed_from_config(config)
+    cache_dir = _soundscape_mel_cache_dir(config)
+    cheap = (config.get("search") or {}).get("cheap") or {}
+    n_mels = int(cheap.get("n_mels", 64))
+    n_frames = int(cheap.get("n_frames", 128))
+    ensure_focal_train_cache(
+        cache_dir,
+        aug_preset=aug_preset,
+        max_samples=int(max_samples) if max_samples is not None else None,
+        n_mels=n_mels,
+        n_frames=n_frames,
+        clip_seed=clip_seed,
+        force=bool(ft.get("rebuild_focal_cache", False)),
+    )
+
+    # `.get("val_split", default)` only kicks in when the key is missing — a
+    # key that is *present but None* (which happens when meta_agent forwards
+    # an empty stage_1d.val_split) would otherwise propagate None into the
+    # generated training script and crash on float(None). Resolve to a real
+    # number here so the slot override is always usable.
+    _epochs = ft.get("epochs")
+    if _epochs is None:
+        _epochs = sc_final.get("epochs", 15)
+    _val_split = ft.get("val_split")
+    if _val_split is None:
+        _val_split = sc_final.get("val_split", 0.1)
     train_cfg = {
-        "max_samples": None,
-        "epochs": ft.get("epochs", sc_final.get("epochs", 15)),
-        "val_split": ft.get("val_split", sc_final.get("val_split", 0.1)),
+        "max_samples": int(max_samples) if max_samples is not None else None,
+        "epochs": int(_epochs),
+        "val_split": float(_val_split),
+        "focal_clip_seed": clip_seed,
     }
     slot_code = _apply_slot_overrides(slot_code, {**aug_dict, **train_cfg})
 
@@ -1035,19 +1199,28 @@ def run_cnn_final_train(config: dict) -> dict:
     )
     print("=" * 60)
     print(f"  CNN STAGED — Final train (1d) → {model_path}")
+    print(f"  timeout={timeout}s  streaming output (TRAIN_HEARTBEAT / TRAIN_BATCH / MODEL_SAVED)")
     print("=" * 60)
-    result = executor.run_file(script_path)
+    # Stream stdout live — without this the parent buffers everything until
+    # the subprocess exits, so a 2-hour final-train run appears completely
+    # silent (and looks "stuck") even when it is progressing normally.
+    result = executor.run_file(script_path, stream_output=True, label="1d")
     ok = result.success and "MODEL_SAVED" in (result.stdout or "")
     summary = {"success": ok, "model_path": str(model_path)}
     (mem_dir / "final_train_result.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     if not ok:
-        print(f"  [1d] Failed: {(result.stderr or '')[-500:]}")
+        tail = (result.stderr or result.stdout or "")[-800:]
+        print(f"  [1d] Failed: {tail}")
     return summary
 
 
 def run_cnn_pseudo_refine(config: dict) -> dict:
     """Pseudo-label refine (stage 1e) — requires cnn_pseudo cache + final model."""
-    from cnn_pseudo import build_cnn_pseudo_cache, build_cnn_pseudo_refine_script
+    from cnn_pseudo import (
+        build_cnn_pseudo_cache,
+        build_cnn_pseudo_refine_script,
+        pseudo_npz_is_empty,
+    )
 
     cfg = config.get("cnn_pseudo_refine") or {}
     dirs = _resolve_dirs(config)
@@ -1067,9 +1240,33 @@ def run_cnn_pseudo_refine(config: dict) -> dict:
             runnerup_max=float(cfg.get("runnerup_max", 0.35)),
             pseudo_label_weight=float(cfg.get("pseudo_label_weight", 0.8)),
             max_files=cfg.get("max_soundscape_files"),
+            max_windows=cfg.get("max_pseudo_windows"),
+            heartbeat_every=int(cfg.get("heartbeat_every", 10)),
         )
         if pseudo_stats.get("empty_pseudo"):
             print("\n  [CNN 1e] Continuing with supervised-only fine-tune (no pseudo windows).")
+    save_path = Path(cfg.get("model_save_path", teacher.parent / "model_pseudo.keras"))
+    _no_pseudo = pseudo_stats.get("empty_pseudo") or pseudo_npz_is_empty(pseudo_npz)
+    if cfg.get("skip_fine_tune_without_pseudo", True) and _no_pseudo and teacher.exists():
+        import shutil
+
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(teacher, save_path)
+        print(
+            f"\n  [CNN 1e] No pseudo labels — skipped fine-tune; copied teacher → {save_path.name}"
+        )
+        summary = {
+            "success": True,
+            "pseudo_npz": str(pseudo_npz),
+            "pseudo_stats": pseudo_stats,
+            "skipped_fine_tune": True,
+        }
+        (mem_dir / "pseudo_refine_result.json").write_text(
+            json.dumps(summary, indent=2), encoding="utf-8"
+        )
+        return summary
+    _mss = cfg.get("max_supervised_samples")
+    _aug = dict(cfg.get("aug_dict") or {})
     script = build_cnn_pseudo_refine_script(
         slot_code_path=slot_path,
         teacher_model_path=teacher,
@@ -1079,6 +1276,9 @@ def run_cnn_pseudo_refine(config: dict) -> dict:
         epochs=int(cfg.get("fine_tune_epochs", 15)),
         learning_rate=float(cfg.get("fine_tune_lr", 2e-4)),
         model_save_path=str(cfg.get("model_save_path", teacher.parent / "model_pseudo.keras")),
+        focal_cache_dir=_soundscape_mel_cache_dir(config),
+        max_supervised_samples=int(_mss) if _mss is not None else None,
+        aug_dict=_aug,
     )
     script_path = code_dir / "pseudo_refine.py"
     script_path.write_text(script, encoding="utf-8")
@@ -1089,11 +1289,17 @@ def run_cnn_pseudo_refine(config: dict) -> dict:
     )
     print("=" * 60)
     print("  CNN STAGED — Pseudo-label refine (1e)")
+    print(f"  timeout={timeout}s  streaming output")
     print("=" * 60)
-    result = executor.run_file(script_path)
+    # Same rationale as 1d — fine-tune runs are long and the buffered
+    # `run_file` mode hides progress entirely.
+    result = executor.run_file(script_path, stream_output=True, label="1e")
     ok = result.success and "PSEUDO_REFINE_DONE" in (result.stdout or "")
     summary = {"success": ok, "pseudo_npz": str(pseudo_npz), "pseudo_stats": pseudo_stats}
     (mem_dir / "pseudo_refine_result.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    if not ok:
+        tail = (result.stderr or result.stdout or "")[-800:]
+        print(f"  [1e] Failed: {tail}")
     return summary
 
 

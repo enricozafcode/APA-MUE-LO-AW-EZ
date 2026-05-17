@@ -55,11 +55,14 @@ def labeled_soundscape_window_keys(labels_csv: Path) -> set[tuple[str, int]]:
 def unlabeled_soundscape_files(
     soundscapes_dir: Path,
     labels_csv: Path,
+    *,
+    max_files: int | None = None,
 ) -> list[Path]:
     """`.ogg` files with at least one window not present in the labels CSV."""
     labeled = labeled_soundscape_window_keys(labels_csv)
     if not labeled:
-        return sorted(soundscapes_dir.glob("*.ogg"))
+        files = sorted(soundscapes_dir.glob("*.ogg"))
+        return files[: int(max_files)] if max_files is not None else files
 
     out: list[Path] = []
     import librosa
@@ -78,6 +81,8 @@ def unlabeled_soundscape_files(
                 break
         if has_unlabeled:
             out.append(fp)
+            if max_files is not None and len(out) >= int(max_files):
+                break
     return out
 
 
