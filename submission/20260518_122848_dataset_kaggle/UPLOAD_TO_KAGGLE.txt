@@ -1,0 +1,20 @@
+BirdCLEF 2026 — Perch head dataset for Kaggle inference
+=======================================================
+Created: 2026-05-18T12:28:49
+Folder:  20260518_122848_dataset_kaggle
+
+1. Zip this folder (or upload files as a new Kaggle Dataset).
+2. In submission/kaggle_upload/*.ipynb set MODEL_DATASET_SLUG to your slug.
+3. Attach: your dataset + rishikeshjani/perch-onnx-for-birdclef-2026 + competition.
+
+Files included:
+  - bc_indices.npy
+  - mapping_meta.json
+  - perch_best_aug_config.json
+  - perch_best_head_code.py
+  - perch_final_head.keras
+  - perch_final_head.weights.h5
+  - perch_final_head_pseudo.keras
+  - perch_final_head_pseudo.weights.h5
+  - proxy_map.json
+  - species_cols.json

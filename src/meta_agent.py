@@ -39,6 +39,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 for _stream in (sys.stdout, sys.stderr):
@@ -149,6 +150,148 @@ def _safe_copy2(src: Path, dst: Path) -> None:
     if src_r == dst_r:
         return
     shutil.copy2(src_r, dst_r)
+
+
+# Files to zip as a Kaggle Dataset for ``submission/kaggle_upload`` Perch inference.
+PERCH_KAGGLE_BUNDLE_NAMES: tuple[str, ...] = (
+    "perch_best_head_code.py",
+    "perch_final_head_pseudo.weights.h5",
+    "perch_final_head.weights.h5",
+    "perch_final_head_pseudo.keras",
+    "perch_final_head.keras",
+    "bc_indices.npy",
+    "proxy_map.json",
+    "species_cols.json",
+    "mapping_meta.json",
+    "perch_best_aug_config.json",
+)
+
+
+def _perch_bundle_src_candidates(name: str) -> list[Path]:
+    """Resolve a bundle filename from ``submission/`` then ``perch/final/``."""
+    sub = PROJECT_ROOT / "submission"
+    final = PERCH_FINAL_DIR
+    out: list[Path] = [sub / name]
+    alt: dict[str, list[str]] = {
+        "perch_final_head_pseudo.weights.h5": [
+            "final_head_pseudo.weights.h5",
+            "best_head.weights.h5",
+            "final_head.weights.h5",
+        ],
+        "perch_final_head.weights.h5": [
+            "final_head.weights.h5",
+            "best_head.weights.h5",
+            "final_head_pseudo.weights.h5",
+        ],
+        "perch_final_head_pseudo.keras": [
+            "final_head_pseudo.keras",
+            "best_head.keras",
+            "final_head.keras",
+        ],
+        "perch_final_head.keras": [
+            "final_head.keras",
+            "best_head.keras",
+            "final_head_pseudo.keras",
+        ],
+        "perch_best_head_code.py": ["best_head_code.py"],
+    }
+    for alt_name in alt.get(name, []):
+        out.append(final / alt_name)
+        out.append(sub / alt_name)
+    return out
+
+
+def _bundle_kaggle_dataset_enabled(config: dict, stage_key: str) -> bool:
+    meta = _meta_cfg(config)
+    default = bool(meta.get("bundle_kaggle_dataset", True))
+    if stage_key == "stage_1e":
+        return bool(_stage_1e_cfg(config).get("bundle_kaggle_dataset", default))
+    if stage_key == "stage_1d":
+        return bool(_stage_1d_cfg(config).get("bundle_kaggle_dataset", default))
+    return default
+
+
+def bundle_perch_kaggle_dataset(config: dict) -> Path | None:
+    """
+    Create ``submission/<YYYYMMDD_HHMMSS>_dataset_kaggle/`` with every file needed
+    to upload as a Kaggle Dataset for the Perch inference notebook.
+    """
+    sub = PROJECT_ROOT / "submission"
+    sub.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = sub / f"{stamp}_dataset_kaggle"
+    if out_dir.exists():
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        out_dir = sub / f"{stamp}_dataset_kaggle"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    copied: list[str] = []
+    missing: list[str] = []
+    for name in PERCH_KAGGLE_BUNDLE_NAMES:
+        src: Path | None = None
+        for candidate in _perch_bundle_src_candidates(name):
+            if candidate.exists():
+                src = candidate
+                break
+        if src is None:
+            missing.append(name)
+            continue
+        _safe_copy2(src, out_dir / name)
+        copied.append(name)
+
+    # Notebook prefers *_pseudo.weights.h5 — alias from final weights if needed.
+    pseudo_w = out_dir / "perch_final_head_pseudo.weights.h5"
+    final_w = out_dir / "perch_final_head.weights.h5"
+    if not pseudo_w.exists() and final_w.exists():
+        _safe_copy2(final_w, pseudo_w)
+        if "perch_final_head_pseudo.weights.h5" not in copied:
+            copied.append("perch_final_head_pseudo.weights.h5")
+    if not final_w.exists() and pseudo_w.exists():
+        _safe_copy2(pseudo_w, final_w)
+        if "perch_final_head.weights.h5" not in copied:
+            copied.append("perch_final_head.weights.h5")
+
+    required = {
+        "perch_best_head_code.py",
+        "species_cols.json",
+        "bc_indices.npy",
+        "proxy_map.json",
+    }
+    has_weights = pseudo_w.exists() or final_w.exists() or any(
+        (out_dir / n).exists()
+        for n in ("perch_final_head_pseudo.keras", "perch_final_head.keras")
+    )
+    if not has_weights or not required.issubset(set(copied)):
+        print(
+            "  [Kaggle bundle] Incomplete — missing required artifacts "
+            f"(weights={has_weights}, missing={missing})"
+        )
+        shutil.rmtree(out_dir, ignore_errors=True)
+        return None
+
+    readme = out_dir / "UPLOAD_TO_KAGGLE.txt"
+    readme.write_text(
+        "BirdCLEF 2026 — Perch head dataset for Kaggle inference\n"
+        "=======================================================\n"
+        f"Created: {datetime.now().isoformat(timespec='seconds')}\n"
+        f"Folder:  {out_dir.name}\n\n"
+        "1. Zip this folder (or upload files as a new Kaggle Dataset).\n"
+        "2. In submission/kaggle_upload/*.ipynb set MODEL_DATASET_SLUG to your slug.\n"
+        "3. Attach: your dataset + rishikeshjani/perch-onnx-for-birdclef-2026 + competition.\n\n"
+        "Files included:\n"
+        + "".join(f"  - {n}\n" for n in sorted(copied))
+        + (
+            "\nOptional (not required at inference):\n"
+            + "".join(f"  - {n}\n" for n in sorted(missing))
+            if missing
+            else ""
+        ),
+        encoding="utf-8",
+    )
+    print(f"  [Kaggle bundle] {len(copied)} file(s) → {out_dir}")
+    if missing:
+        print(f"  [Kaggle bundle] Optional skipped: {', '.join(missing)}")
+    return out_dir
 
 
 def _print_1c_phase_header(title: str, *, lines: list[str] | None = None) -> None:
@@ -4505,6 +4648,7 @@ def run_stage_1d_final_train(
     ok = result.success and "FINAL_RETRAIN_DONE" in (result.stdout or "")
     metric = _meta_primary_metric(config)
     soundscape_score: dict | None = None
+    bundle_dir: Path | None = None
     if ok:
         info_src = Path(refine_winner["memory_dir"]) / "best_model_info.json"
         if info_src.exists():
@@ -4549,10 +4693,15 @@ def run_stage_1d_final_train(
                 f"Aug config:    perch_best_aug_config.json\n"
                 f"Full train NPZ: ../logs/meta_agent/perch_cache/final/train_emb_{preset}_full.npz\n"
                 f"Val NPZ:        ../logs/meta_agent/perch_cache/val_emb.npz\n"
-                f"Run kaggle_inference.ipynb or your notebook with these paths.\n",
+                f"Run kaggle_inference.ipynb or your notebook with these paths.\n"
+                f"Timestamped Kaggle upload folder: submission/<YYYYMMDD_HHMMSS>_dataset_kaggle/\n",
                 encoding="utf-8",
             )
             print(f"  Kaggle-ready artifacts → {sub}")
+            if _bundle_kaggle_dataset_enabled(config, "stage_1d") and not _stage_1e_cfg(
+                config
+            ).get("enabled", True):
+                bundle_dir = bundle_perch_kaggle_dataset(config)
     else:
         print(f"  [Stage 1d] Final retrain failed: {(result.stderr or '')[-500:]}")
 
@@ -4565,6 +4714,8 @@ def run_stage_1d_final_train(
         "primary_metric": metric,
         "soundscape_score": soundscape_score,
     }
+    if ok and bundle_dir is not None:
+        summary["kaggle_dataset_dir"] = str(bundle_dir)
     ARCH_SEARCH_1D_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 
@@ -4769,9 +4920,22 @@ def run_stage_1e_pseudo_refine(config: dict, suite: SoundscapeEvalSuite) -> dict
                 _safe_copy2(pseudo_weights, sub / "perch_final_head_pseudo.weights.h5")
                 _safe_copy2(pseudo_weights, sub / "perch_final_head.weights.h5")
             _safe_copy2(head_code_path, sub / "perch_best_head_code.py")
+            for name in (
+                "bc_indices.npy",
+                "proxy_map.json",
+                "species_cols.json",
+                "mapping_meta.json",
+            ):
+                src = PERCH_FINAL_DIR / name
+                if src.exists():
+                    _safe_copy2(src, sub / name)
             print(f"  [1e] Submission bundle updated → {sub}")
     else:
         print(f"  [Stage 1e] Pseudo refine failed: {(result.stderr or '')[-500:]}")
+
+    bundle_dir: Path | None = None
+    if ok and _bundle_kaggle_dataset_enabled(config, "stage_1e"):
+        bundle_dir = bundle_perch_kaggle_dataset(config)
 
     summary = {
         "stage": "1e_pseudo_refine",
@@ -4784,6 +4948,8 @@ def run_stage_1e_pseudo_refine(config: dict, suite: SoundscapeEvalSuite) -> dict
         "score_1d": score_1d,
         "score_1e": score_1e,
     }
+    if bundle_dir is not None:
+        summary["kaggle_dataset_dir"] = str(bundle_dir)
     ARCH_SEARCH_1E_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"\n  Results saved → {ARCH_SEARCH_1E_RESULTS}")
     return summary
@@ -4943,6 +5109,16 @@ def main():
         print("=" * 60)
         print("\n  Tournament finalize finished.")
         print(f"  Kaggle bundle: {PROJECT_ROOT / 'submission'}")
+        return
+
+    if pipeline == "bundle_kaggle_dataset":
+        out = bundle_perch_kaggle_dataset(config)
+        if out:
+            print(f"\n  Upload this folder as a Kaggle Dataset: {out}")
+            print(f"  See {out / 'UPLOAD_TO_KAGGLE.txt'}")
+        else:
+            print("\n  [bundle_kaggle_dataset] Failed — check submission/ has Perch artifacts.")
+        print("=" * 60)
         return
 
     if pipeline == "staged_1e_only":

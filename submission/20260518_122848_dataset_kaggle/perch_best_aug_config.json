@@ -1,0 +1,36 @@
+{
+  "use_snr_mixing": true,
+  "mix_prob": 0.55,
+  "snr_min_db": -5.0,
+  "snr_max_db": 15.0,
+  "audio": {
+    "time_stretch": {
+      "enabled": false,
+      "probability": 0.5,
+      "rate_min": 0.9,
+      "rate_max": 1.1
+    },
+    "pitch_shift": {
+      "enabled": false,
+      "probability": 0.5,
+      "steps_min": -2,
+      "steps_max": 2
+    },
+    "noise_injection": {
+      "enabled": true,
+      "probability": 0.4,
+      "noise_level": 0.005
+    },
+    "time_shift": {
+      "enabled": true,
+      "probability": 0.5,
+      "shift_max_fraction": 0.4
+    },
+    "gain_jitter": {
+      "enabled": true,
+      "probability": 0.4,
+      "min_db": -6.0,
+      "max_db": 6.0
+    }
+  }
+}

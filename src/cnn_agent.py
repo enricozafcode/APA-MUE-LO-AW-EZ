@@ -865,7 +865,7 @@ def assemble_script(
     focal_cache_dir: Path | str | None = None,
 ):
     focal_line = ""
-    if focal_cache_dir is not None and not is_final:
+    if focal_cache_dir is not None:
         focal_line = f'\n_FOCAL_MEL_CACHE_DIR = r"{Path(focal_cache_dir).resolve()}"\n'
     suffix = _make_harness_suffix(is_final=is_final, model_save_path=model_save_path)
     return f"{HARNESS_PREFIX}{focal_line}\n\n# --- GENERATED MODEL CODE ---\n{slot_code.strip()}\n\n{suffix}\n"
@@ -2921,7 +2921,12 @@ def _run_final_training(
         })
     else:
         slot_code = generate_slot_code(fp)
-    script = assemble_script(slot_code, is_final=True, model_save_path=model_path)
+    script = assemble_script(
+        slot_code,
+        is_final=True,
+        model_save_path=model_path,
+        focal_cache_dir=DEFAULT_FOCAL_MEL_CACHE_DIR,
+    )
     script = _append_eval_wrapper(
         script, "final", dirs["eval"], mel_cache_dir=DEFAULT_SOUNDSCAPE_MEL_CACHE_DIR
     )

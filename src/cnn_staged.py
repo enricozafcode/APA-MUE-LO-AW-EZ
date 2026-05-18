@@ -1186,7 +1186,12 @@ def run_cnn_final_train(config: dict) -> dict:
 
     model_path = Path(ft["model_save_path"])
     model_path.parent.mkdir(parents=True, exist_ok=True)
-    script = assemble_script(slot_code, is_final=True, model_save_path=str(model_path))
+    script = assemble_script(
+        slot_code,
+        is_final=True,
+        model_save_path=str(model_path),
+        focal_cache_dir=cache_dir,
+    )
     script_path = code_dir / "final_train.py"
     script_path.write_text(script, encoding="utf-8")
 

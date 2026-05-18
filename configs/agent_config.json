@@ -102,6 +102,7 @@
     },
     "skip_completed_stages": false,
     "primary_metric": "macro_average_precision",
+    "bundle_kaggle_dataset": true,
     "run_eda": true,
     "eda": {
       "use_llm_codegen": true,
@@ -206,6 +207,7 @@
       "rebuild_full_train_cache": true,
       "score_after_retrain": true,
       "copy_to_submission": true,
+      "bundle_kaggle_dataset": true,
       "final_timeout_seconds": 7200
     },
     "stage_1e": {
@@ -227,7 +229,8 @@
       "partial_save_every": 500,
       "rebuild_pseudo_cache": true,
       "refine_timeout_seconds": 7200,
-      "copy_to_submission": true
+      "copy_to_submission": true,
+      "bundle_kaggle_dataset": true
     },
     "birdnet_stage_1b": {
       "enabled": false,
