@@ -27,7 +27,22 @@ class ExperimentMemory:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.ranking_metric = ranking_metric
         self._runs: list[dict] = []
+        self._stage_ctx: dict | None = None
         self._load()
+
+    def set_stage(
+        self,
+        *,
+        track: str,
+        stage: str,
+        label: str | None = None,
+    ) -> None:
+        """Tag subsequent ``log()`` calls for the experiment timeline JSON/plots."""
+        self._stage_ctx = {
+            "track": track,
+            "stage": stage,
+            "label": label or f"{track.upper()} Stage {stage}",
+        }
 
     def _ranking_value(self, entry: dict) -> float:
         """Scalar used to sort runs (higher is better)."""
@@ -81,6 +96,18 @@ class ExperimentMemory:
         with self.path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
         self._runs.append(entry)
+        if self._stage_ctx:
+            try:
+                from experiment_tracker import record_experiment
+
+                record_experiment(
+                    entry,
+                    stage_ctx=self._stage_ctx,
+                    memory_dir=self.path.parent,
+                    ranking_metric=self.ranking_metric,
+                )
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ read
 

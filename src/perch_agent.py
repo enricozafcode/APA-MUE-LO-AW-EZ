@@ -105,7 +105,9 @@ def configure_tensorflow_cpu_only() -> None:
 def _find_or_download_onnx(dataset_slug: str) -> Path:
     """Download Perch ONNX model via kagglehub; return path to .onnx file."""
     import kagglehub
-    print(f"  [Setup] Locating ONNX model ({dataset_slug})...")
+    from run_log import setup_once
+
+    setup_once("perch_onnx_locate", f"  [Setup] Locating ONNX model ({dataset_slug})...")
     onnx_dir = Path(kagglehub.dataset_download(dataset_slug))
     onnx_files = sorted(onnx_dir.rglob("*.onnx"))
     if not onnx_files:
@@ -113,14 +115,16 @@ def _find_or_download_onnx(dataset_slug: str) -> Path:
             f"No .onnx file found in {onnx_dir}.\n"
             f"Make sure kagglehub is authenticated: kagglehub.login()"
         )
-    print(f"  [Setup] ONNX model: {onnx_files[0]}")
+    setup_once("perch_onnx_path", f"  [Setup] ONNX model: {onnx_files[0]}")
     return onnx_files[0]
 
 
 def _find_or_download_perch_labels(model_slug: str) -> Path:
     """Download Perch SavedModel (for labels.csv) via kagglehub."""
     import kagglehub
-    print(f"  [Setup] Locating Perch labels ({model_slug})...")
+    from run_log import setup_once
+
+    setup_once("perch_labels_locate", f"  [Setup] Locating Perch labels ({model_slug})...")
     model_dir = Path(kagglehub.model_download(model_slug))
     label_files = sorted(model_dir.rglob("labels.csv"))
     if not label_files:
@@ -128,7 +132,7 @@ def _find_or_download_perch_labels(model_slug: str) -> Path:
             f"No labels.csv found in {model_dir}.\n"
             f"Make sure kagglehub is authenticated: kagglehub.login()"
         )
-    print(f"  [Setup] Labels CSV: {label_files[0]}")
+    setup_once("perch_labels_path", f"  [Setup] Labels CSV: {label_files[0]}")
     return label_files[0]
 
 
@@ -140,7 +144,9 @@ def _load_onnx_session(onnx_path: Path):
     """Load ONNX session; auto-detect embedding (1536-d) and logit outputs."""
     import onnxruntime as ort
     import numpy as np
-    print("  [Perch] Loading ONNX session...")
+    from run_log import setup_once
+
+    setup_once("perch_onnx_load", "  [Perch] Loading ONNX session (once per process)...")
     so = ort.SessionOptions()
     so.intra_op_num_threads = 4
     so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
@@ -162,7 +168,10 @@ def _load_onnx_session(onnx_path: Path):
         raise RuntimeError("Could not find 1536-d embedding output in ONNX model")
     if logit_idx is None:
         raise RuntimeError("Could not find large logits output (>5000 classes) in ONNX model")
-    print(f"  [Perch] Loaded. Embedding index={emb_idx}  Logits index={logit_idx}")
+    setup_once(
+        "perch_onnx_ready",
+        f"  [Perch] ONNX ready — embedding idx={emb_idx}, logits idx={logit_idx}",
+    )
     return sess, inp_name, emb_idx, logit_idx
 
 
@@ -2872,6 +2881,25 @@ def _ranking_value_from_metrics(metrics: dict | None) -> float | None:
     return metrics.get("macro_average_precision")
 
 
+def _log_perch_search_complete(memory, mem_dir: Path, *, label: str = "Perch search") -> None:
+    import run_log
+
+    best = memory.best_runs(1)
+    run_log.section_summary(
+        label,
+        [
+            f"Best: {memory._format_run_score(best[0])}" if best else "No successful runs",
+            f"Artifacts: {mem_dir}",
+        ],
+    )
+    if best:
+        run_log.print_final_architecture(
+            track="perch",
+            spec=best[0].get("spec"),
+            memory_dir=mem_dir,
+        )
+
+
 def _format_iteration_metrics(metrics: dict | None) -> str:
     return format_metrics_dict(metrics, ranking_metric=PRIMARY_META_METRIC)
 
@@ -3174,6 +3202,13 @@ def _run_refine_loop(
         print(f"{'─'*60}")
 
         specs = researcher.next_experiments()
+        import run_log
+
+        run_log.print_researcher_proposals(
+            specs,
+            track="perch",
+            round_label=f"refine planner {planner_round}",
+        )
         for slot_i, spec in enumerate(specs, 1):
             if tries_left <= 0 or total_done >= max_total:
                 break
@@ -3182,8 +3217,6 @@ def _run_refine_loop(
             total_done += 1
             tries_left -= 1
             slot_label = str(spec.get("slot") or f"s{slot_i}")
-            if experiments_per_round > 1:
-                print(f"\n  ▸ Try {slot_i}/{len(specs)}: {slot_label}")
 
             metrics, slot_code, spec = _execute_perch_iteration(
                 run_index,
@@ -3202,7 +3235,11 @@ def _run_refine_loop(
             )
 
             rank_val = _ranking_value_from_metrics(metrics)
-            print(f"  [Result] [{slot_label}] {_format_iteration_metrics(metrics)}")
+            run_log.print_run_result(
+                slot=slot_label,
+                metrics=metrics,
+                success=bool(metrics and metrics.get("status") == "success"),
+            )
             memory.log(spec=spec, metrics=metrics, code=slot_code)
 
             if rank_val is not None and rank_val > best_score_ever:
@@ -3488,7 +3525,13 @@ def run(config: dict) -> None:
     )
     coder_llm      = LLMClient(provider=provider, model=coder_model)
     ranking_metric = _ranking_metric_from_config(config)
+    refine_cfg = config.get("perch_refine") or {}
+    refine_enabled = bool(refine_cfg.get("enabled"))
     memory = PerchExperimentMemory(mem_dir, ranking_metric=ranking_metric)
+    if refine_enabled:
+        memory.set_stage(track="perch", stage="1b", label="Perch Stage 1b — Refine")
+    else:
+        memory.set_stage(track="perch", stage="1a", label="Perch Stage 1a — Explore")
     use_llm_memory = bool(config.get("perch", {}).get("use_llm_memory_summaries", False))
     memory.configure_summaries(
         use_llm=use_llm_memory,
@@ -3500,8 +3543,6 @@ def run(config: dict) -> None:
     else:
         memory._update_digest_best()
 
-    refine_cfg = config.get("perch_refine") or {}
-    refine_enabled = bool(refine_cfg.get("enabled"))
     if refine_enabled:
         locked_arch = refine_cfg.get("locked_arch_type") or (refine_cfg.get("seed_spec") or {}).get(
             "arch_type", "residual_mlp"
@@ -3612,6 +3653,7 @@ def run(config: dict) -> None:
         for i, r in enumerate(best, 1):
             print(f"  #{i} {memory._format_run_score(r)} | {r['reasoning'][:80]}")
         print(f"{'='*60}")
+        _log_perch_search_complete(memory, mem_dir, label="Perch Stage 1b — Refine")
         if config.get("perch", {}).get("skip_final_retrain", False):
             print("\n  Final retrain skipped (perch.skip_final_retrain=true).")
             return
@@ -3675,9 +3717,15 @@ def run(config: dict) -> None:
         print(f"{'─'*60}")
 
         specs = researcher.next_experiments()
+        import run_log
+
+        run_log.print_researcher_proposals(
+            specs,
+            track="perch",
+            round_label=round_label.strip(),
+        )
         for slot_i, spec in enumerate(specs, 1):
             slot_label = str(spec.get("slot") or f"s{slot_i}")
-            print(f"\n  ▸ Slot {slot_i}/{len(specs)}: {slot_label}")
             metrics, slot_code, spec = _execute_perch_iteration(
                 iteration,
                 spec=spec,
@@ -3694,7 +3742,11 @@ def run(config: dict) -> None:
                 code_dir=code_dir,
             )
             rank_val = _ranking_value_from_metrics(metrics)
-            print(f"  [Result] [{slot_label}] {_format_iteration_metrics(metrics)}")
+            run_log.print_run_result(
+                slot=slot_label,
+                metrics=metrics,
+                success=bool(metrics and metrics.get("status") == "success"),
+            )
             memory.log(spec=spec, metrics=metrics, code=slot_code)
             best_score_ever = _promote_if_best(
                 rank_val=rank_val,
@@ -3721,6 +3773,7 @@ def run(config: dict) -> None:
     for i, r in enumerate(best, 1):
         print(f"  #{i} {memory._format_run_score(r)} | {r['reasoning'][:80]}")
     print(f"{'='*60}")
+    _log_perch_search_complete(memory, mem_dir, label="Perch Stage 1a — Explore")
 
     # ── Final retrain on full data (train + val) with best spec ──────────────
     if config.get("perch", {}).get("skip_final_retrain", False):

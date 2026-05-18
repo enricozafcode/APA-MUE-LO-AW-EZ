@@ -595,39 +595,79 @@ def _stage_included(max_stage: str, stage: str) -> bool:
 def _run_cnn_track_post_1a(
     config: dict, suite: SoundscapeEvalSuite, max_stage: str
 ) -> None:
+    import run_log
+
     if _stage_included(max_stage, "1b") and _cnn_stage_cfg(config, "stage_1b").get(
         "enabled", False
     ):
+        run_log.section_start("CNN Stage 1b — Architecture refine")
         run_stage_1b_cnn_refine(config, suite)
+        run_log.summarize_stage_json("CNN 1b", CNN_ARCH_1B_RESULTS)
     if _stage_included(max_stage, "1c") and _cnn_stage_cfg(config, "stage_1c").get(
         "enabled", False
     ):
+        run_log.section_start("CNN Stage 1c — Augmentation search (sample)")
         run_stage_1c_cnn_aug_search(config, suite)
+        run_log.summarize_stage_json("CNN 1c", CNN_ARCH_1C_RESULTS)
     if _stage_included(max_stage, "1d") and _cnn_stage_cfg(config, "stage_1d").get(
         "enabled", False
     ):
         if not _skip_if_completed(config, CNN_ARCH_1D_RESULTS, "CNN 1d"):
             run_stage_1d_cnn_final_train(config)
+            run_log.summarize_stage_json(
+                "CNN 1d — Final train",
+                META_LOGS / "cnn" / "final" / "final_train_result.json",
+                winner_keys=(),
+            )
     if _stage_included(max_stage, "1e") and _cnn_stage_cfg(config, "stage_1e").get(
         "enabled", False
     ):
         if not _skip_if_completed(config, CNN_ARCH_1E_RESULTS, "CNN 1e"):
+            run_log.section_start(
+                "CNN Stage 1e — Pseudo-label refine",
+                detail="Full soundscape scan — verbose progress below",
+            )
             run_stage_1e_cnn_pseudo_refine(config, suite)
+            run_log.summarize_stage_json(
+                "CNN 1e — Pseudo refine",
+                CNN_ARCH_1E_RESULTS,
+                winner_keys=(),
+            )
 
 
 def _run_perch_track_post_1a(
     config: dict, suite: SoundscapeEvalSuite, max_stage: str
 ) -> None:
+    import run_log
+
     if _stage_included(max_stage, "1b") and _stage_1b_cfg(config).get("enabled", False):
+        run_log.section_start("Perch Stage 1b — Head refine")
         run_stage_1b_perch_refine(config, suite)
+        run_log.summarize_stage_json("Perch 1b", ARCH_SEARCH_1B_RESULTS)
     if _stage_included(max_stage, "1c") and _stage_1c_cfg(config).get("enabled", False):
+        run_log.section_start("Perch Stage 1c — Augmentation search (sample)")
         run_stage_1c_aug_search(config, suite)
+        run_log.summarize_stage_json("Perch 1c", ARCH_SEARCH_1C_RESULTS)
     if _stage_included(max_stage, "1d") and _stage_1d_cfg(config).get("enabled", False):
         if not _skip_if_completed(config, ARCH_SEARCH_1D_RESULTS, "Perch 1d"):
-            run_stage_1d_final_train(config)
+            run_stage_1d_final_train(config, suite)
+            run_log.summarize_stage_json(
+                "Perch 1d — Final train",
+                ARCH_SEARCH_1D_RESULTS,
+                winner_keys=(),
+            )
     if _stage_included(max_stage, "1e") and _stage_1e_cfg(config).get("enabled", False):
         if not _skip_if_completed(config, ARCH_SEARCH_1E_RESULTS, "Perch 1e"):
+            run_log.section_start(
+                "Perch Stage 1e — Pseudo-label refine",
+                detail="Full soundscape pseudo-labeling — verbose progress below",
+            )
             run_stage_1e_pseudo_refine(config, suite)
+            run_log.summarize_stage_json(
+                "Perch 1e — Pseudo refine",
+                ARCH_SEARCH_1E_RESULTS,
+                winner_keys=(),
+            )
 
 
 def _birdnet_stage_cfg(config: dict, key: str) -> dict:
@@ -983,15 +1023,52 @@ def run_staged_tournament_phase(
         else:
             print(f"\n  [Tournament] {track} — no score (complete 1c or 1a first)")
 
+        import run_log
+
+        cand = candidates[-1] if candidates and candidates[-1].get("track") == track else None
+        if cand:
+            run_log.section_summary(
+                f"{track.upper()} — tournament sample score",
+                [
+                    f"{metric}={float(cand.get('primary_value', 0)):.5f}",
+                    f"aug={cand.get('aug_preset', '—')}",
+                    f"arch={cand.get('arch_type', '—')}",
+                ],
+            )
+        else:
+            run_log.moving_on(f"{track.upper()} sample score")
+
     global_winner = _pick_global_tournament_winner(candidates, metric)
     _print_tournament_final_comparison(config, candidates, metric, global_winner)
     payload = _save_tournament_results(config, candidates, global_winner)
 
+    import run_log
+
     if global_winner:
         print(f"\n  Tournament results saved → {TOURNAMENT_RESULTS}")
         print("  Next: pipeline staged_finalize (or tournament.auto_finalize: true)")
+        spec = run_log.architecture_from_memory_dir(
+            Path(global_winner.get("memory_dir", "")),
+            track=str(global_winner.get("track", "")),
+        )
+        run_log.print_final_architecture(
+            track=str(global_winner.get("track", "winner")),
+            spec=spec,
+            memory_dir=global_winner.get("memory_dir"),
+            extra_lines=[
+                f"Tournament {metric}: {float(global_winner.get('primary_value', 0)):.5f}",
+                f"aug_preset: {global_winner.get('aug_preset', '—')}",
+            ],
+        )
     else:
         print("\n  [Tournament] No global winner — no track has a valid sample score.")
+        run_log.moving_on("tournament global winner")
+
+    run_log.summarize_stage_json(
+        "Tournament Phase A",
+        TOURNAMENT_RESULTS,
+        winner_keys=("global_winner", "winner"),
+    )
 
     return payload
 
@@ -1064,6 +1141,28 @@ def run_staged_finalize_winner(
     out = META_LOGS / "tournament_finalize_results.json"
     out.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"\n  Finalize summary → {out}")
+
+    import run_log
+
+    spec = run_log.architecture_from_memory_dir(
+        Path(winner.get("memory_dir", "")),
+        track=track,
+    )
+    run_log.section_summary(
+        "Tournament Phase B — Finalize",
+        [
+            f"Track: {track.upper()}",
+            f"Success: {ok}",
+            f"aug: {winner.get('aug_preset', '—')}",
+            f"Results: {out}",
+        ],
+    )
+    run_log.print_final_architecture(
+        track=track,
+        spec=spec,
+        memory_dir=winner.get("memory_dir"),
+        extra_lines=[f"Finalize complete — submission under {PROJECT_ROOT / 'submission'}"],
+    )
     return summary
 
 
@@ -1332,6 +1431,15 @@ def run_phase0_eda(config: dict) -> str:
     else:
         print("  [Phase 0] No EDA brief — CNN/Perch will run without data insights.")
 
+    import run_log
+
+    run_log.section_summary(
+        "Phase 0 — EDA",
+        [
+            f"Brief length: {len(brief)} chars" if brief else "No brief produced — Moving on...",
+            f"Logs: {_eda_logs_dir()}",
+        ],
+    )
     print("=" * 60)
     return brief
 
@@ -2085,6 +2193,7 @@ def _run_cnn_1c_llm_search(
         stream_debug=bool(cfg.get("stream_debug", False)),
     )
     memory = ExperimentMemory(aug_mem, ranking_metric=metric)
+    memory.set_stage(track="cnn", stage="1c", label="CNN Stage 1c — Augmentation")
     researcher = CnnAugResearcher(
         llm,
         memory,
@@ -4077,6 +4186,7 @@ def _run_stage_1c_llm_search(
         stream_debug=stream_debug,
     )
     memory = ExperimentMemory(mem_dir, ranking_metric=common["metric"])
+    memory.set_stage(track="perch", stage="1c", label="Perch Stage 1c — Augmentation")
     researcher = AugResearcher(
         llm,
         memory,
@@ -5050,10 +5160,13 @@ def main():
 
     t0 = time.time()
 
+    sys.path.insert(0, str(PROJECT_ROOT / "src"))
+    import run_log
+
     metric = _meta_primary_metric(config)
     suite = _soundscape_suite(config)
-    print(f"\n  Meta-agent pipeline: {pipeline}")
-    print(f"  Ranking metric: {metric} on labeled train_soundscapes")
+    run_log.print_pipeline_roadmap(config, pipeline)
+    print(f"\n  Ranking metric: {metric} on labeled train_soundscapes")
 
     if pipeline == "staged_cnn_1c_only":
         ensure_meta_eda_before_tracks(config)
@@ -5110,6 +5223,10 @@ def main():
         print("=" * 60)
         print("\n  Tournament finalize finished.")
         print(f"  Kaggle bundle: {PROJECT_ROOT / 'submission'}")
+        run_log.print_pipeline_epilogue(
+            tournament_results=TOURNAMENT_RESULTS,
+            finalize_results=META_LOGS / "tournament_finalize_results.json",
+        )
         return
 
     if pipeline == "bundle_kaggle_dataset":
@@ -5152,6 +5269,10 @@ def main():
         print(f"  Tournament results: {TOURNAMENT_RESULTS}")
         print(f"  Kaggle bundle: {PROJECT_ROOT / 'submission'}")
         print(f"  Perch final: {PERCH_FINAL_DIR}  |  CNN final: {CNN_FINAL_DIR}")
+        run_log.print_pipeline_epilogue(
+            tournament_results=TOURNAMENT_RESULTS,
+            finalize_results=META_LOGS / "tournament_finalize_results.json",
+        )
         return
 
     if meta_cfg.get("run_eda", True):

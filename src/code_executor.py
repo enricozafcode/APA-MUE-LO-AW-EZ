@@ -7,6 +7,22 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _emit_stream_line(line: str, prefix: str) -> bool:
+    """Pretty-print streamed child output; return False if suppressed."""
+    try:
+        from run_log import filter_subprocess_line, heartbeat
+
+        if not filter_subprocess_line(line):
+            return False
+        if "TRAIN_HEARTBEAT" in line:
+            heartbeat(line.strip().replace("TRAIN_HEARTBEAT", "train").strip(" :"))
+            return False
+    except ImportError:
+        pass
+    print(f"{prefix}{line}", end="", flush=True)
+    return True
+
+
 @dataclass
 class ExecutionResult:
     success: bool
@@ -95,7 +111,8 @@ class CodeExecutor:
                 line = proc.stdout.readline()
                 if line:
                     lines.append(line)
-                    print(f"{prefix}{line}", end="", flush=True)
+                    if _emit_stream_line(line, prefix):
+                        pass
                 elif proc.poll() is not None:
                     break
                 else:
@@ -103,7 +120,9 @@ class CodeExecutor:
             remainder = proc.stdout.read()
             if remainder:
                 lines.append(remainder)
-                print(f"{prefix}{remainder}", end="", flush=True)
+                for part in remainder.splitlines(keepends=True):
+                    if part.strip():
+                        _emit_stream_line(part, prefix)
         except Exception as exc:
             proc.kill()
             return ExecutionResult(

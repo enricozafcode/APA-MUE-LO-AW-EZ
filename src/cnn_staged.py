@@ -709,6 +709,7 @@ def run_cnn_explore(config: dict) -> None:
     print(f"  [CNN] Experiment subprocess timeout={timeout:.0f}s  coder LLM timeout={coder_timeout:.0f}s")
     evaluator = Evaluator(row_id_column_name="row_id")
     memory = ExperimentMemory(mem_dir, ranking_metric=ranking_metric)
+    memory.set_stage(track="cnn", stage="1a", label="CNN Stage 1a — Explore")
     researcher = CnnResearcher(
         researcher_llm, memory, researcher_temp, batch_size=batch_size
     )
@@ -765,12 +766,18 @@ def run_cnn_explore(config: dict) -> None:
             "slot_code": slot_code,
         })
 
+    import run_log
+
     for iteration in range(1, max_iterations + 1):
         print(f"\n{'─' * 60}\n  PLANNER ROUND {iteration}/{max_iterations}\n{'─' * 60}")
         specs = researcher.next_experiments()
+        run_log.print_researcher_proposals(
+            specs,
+            track="cnn",
+            round_label=f"explore {iteration}/{max_iterations}",
+        )
         for slot_i, spec in enumerate(specs, 1):
             slot_label = str(spec.get("slot") or f"s{slot_i}")
-            print(f"\n  ▸ Slot {slot_i}/{len(specs)}: {slot_label}")
             metrics, slot_code, spec = _execute_cnn_slot(
                 iteration=iteration,
                 spec=spec,
@@ -784,7 +791,11 @@ def run_cnn_explore(config: dict) -> None:
                 train_overrides=train_overrides,
                 config=config,
             )
-            print(f"  [Result] [{slot_label}] {_format_metrics(metrics)}")
+            run_log.print_run_result(
+                slot=slot_label,
+                metrics=metrics,
+                success=bool(metrics and metrics.get("status") == "success"),
+            )
             memory.log(spec=spec, metrics=metrics, code=slot_code or "")
             rv = _ranking_value_from_metrics(metrics)
             run_id = f"iter_{iteration:03d}_{slot_label}"
@@ -813,6 +824,21 @@ def run_cnn_explore(config: dict) -> None:
         if best:
             print(f"  [Best so far] {memory._format_run_score(best[0])}")
 
+    best = memory.best_runs(1)
+    run_log.section_summary(
+        "CNN Stage 1a — Explore",
+        [
+            f"Completed {max_iterations} planner round(s), preset={preset}",
+            f"Best: {memory._format_run_score(best[0])}" if best else "No successful runs",
+            f"Artifacts: {mem_dir}",
+        ],
+    )
+    if best:
+        run_log.print_final_architecture(
+            track="cnn",
+            spec=best[0].get("spec"),
+            memory_dir=mem_dir,
+        )
     print(f"\n{'=' * 60}\n  CNN explore done → {mem_dir}\n{'=' * 60}")
 
 
@@ -855,6 +881,7 @@ def run_cnn_refine(config: dict) -> None:
     print(f"  [CNN] Experiment subprocess timeout={timeout:.0f}s  coder LLM timeout={coder_timeout:.0f}s")
     evaluator = Evaluator(row_id_column_name="row_id")
     memory = ExperimentMemory(mem_dir, ranking_metric=ranking_metric)
+    memory.set_stage(track="cnn", stage="1b", label="CNN Stage 1b — Refine")
 
     champion_path = mem_dir / REFINE_CHAMPION_SPEC_FILE
     champion_path.write_text(json.dumps(seed_spec, indent=2), encoding="utf-8")
@@ -896,6 +923,13 @@ def run_cnn_refine(config: dict) -> None:
             phase = f"bonus ({training_rounds - initial + 1})"
         print(f"\n{'─' * 60}\n  REFINE ROUND {iteration} — {phase}\n{'─' * 60}")
         specs = researcher.next_experiments()[:n_slots]
+        import run_log
+
+        run_log.print_researcher_proposals(
+            specs,
+            track="cnn",
+            round_label=f"refine {iteration} ({phase})",
+        )
         improved = False
         for slot_i, spec in enumerate(specs, 1):
             slot_label = str(spec.get("slot") or f"r{slot_i}")
@@ -911,6 +945,11 @@ def run_cnn_refine(config: dict) -> None:
                 eval_dir=eval_dir,
                 train_overrides=train_overrides,
                 config=config,
+            )
+            run_log.print_run_result(
+                slot=slot_label,
+                metrics=metrics,
+                success=bool(metrics and metrics.get("status") == "success"),
             )
             memory.log(spec=spec, metrics=metrics, code=slot_code or "")
             rv = _ranking_value_from_metrics(metrics)
@@ -941,6 +980,21 @@ def run_cnn_refine(config: dict) -> None:
         if training_rounds >= initial and training_rounds >= initial + bonus and not improved:
             break
 
+    import run_log
+
+    best = memory.best_runs(1)
+    run_log.section_summary(
+        "CNN Stage 1b — Refine",
+        [
+            f"Locked arch: {locked}",
+            f"Training rounds used: {training_rounds}/{max_total}",
+            f"Best score: {best_score_ever:.5f}",
+            f"Best run: {memory._format_run_score(best[0])}" if best else "—",
+            f"Artifacts: {mem_dir}",
+        ],
+    )
+    if best:
+        run_log.print_final_architecture(track="cnn", spec=best[0].get("spec"), memory_dir=mem_dir)
     print(f"\n{'=' * 60}\n  CNN refine done | best={best_score_ever:.5f}\n{'=' * 60}")
 
 
@@ -1202,6 +1256,12 @@ def run_cnn_final_train(config: dict) -> dict:
         python_executable=config["execution"]["python_executable"],
         timeout_seconds=timeout,
     )
+    import run_log
+
+    run_log.section_start(
+        "CNN Stage 1d — Full-data final train",
+        detail=f"Streaming progress below · timeout {timeout}s",
+    )
     print("=" * 60)
     print(f"  CNN STAGED — Final train (1d) → {model_path}")
     print(f"  timeout={timeout}s  streaming output (TRAIN_HEARTBEAT / TRAIN_BATCH / MODEL_SAVED)")
@@ -1213,9 +1273,19 @@ def run_cnn_final_train(config: dict) -> dict:
     ok = result.success and "MODEL_SAVED" in (result.stdout or "")
     summary = {"success": ok, "model_path": str(model_path)}
     (mem_dir / "final_train_result.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    if not ok:
+    import run_log
+
+    if ok:
+        run_log.section_summary(
+            "CNN Stage 1d — Final train",
+            [f"Model saved: {model_path}", "Status: success"],
+        )
+    else:
         tail = (result.stderr or result.stdout or "")[-800:]
-        print(f"  [1d] Failed: {tail}")
+        run_log.section_summary(
+            "CNN Stage 1d — Final train",
+            ["Training did not complete — Moving on...", tail[:200] if tail else ""],
+        )
     return summary
 
 
@@ -1302,9 +1372,24 @@ def run_cnn_pseudo_refine(config: dict) -> dict:
     ok = result.success and "PSEUDO_REFINE_DONE" in (result.stdout or "")
     summary = {"success": ok, "pseudo_npz": str(pseudo_npz), "pseudo_stats": pseudo_stats}
     (mem_dir / "pseudo_refine_result.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    if not ok:
+    import run_log
+
+    if ok:
+        run_log.section_summary(
+            "CNN Stage 1e — Pseudo-label refine",
+            [
+                f"Model: {save_path}",
+                f"Pseudo cache: {pseudo_npz.name}",
+                "Status: success",
+            ],
+        )
+    else:
         tail = (result.stderr or result.stdout or "")[-800:]
         print(f"  [1e] Failed: {tail}")
+        run_log.section_summary(
+            "CNN Stage 1e — Pseudo-label refine",
+            ["Did not complete — Moving on...", tail[:200] if tail else ""],
+        )
     return summary
 
 
