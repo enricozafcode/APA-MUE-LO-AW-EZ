@@ -30,6 +30,12 @@ import sys
 import tempfile
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -3283,6 +3289,19 @@ def run(config: dict) -> None:
         print("=" * 60)
         print("  BirdCLEF Perch Agent — Researcher / Coder Architecture")
         print("=" * 60)
+
+    eda_brief = (config.get("eda_brief") or "").strip()
+    if eda_brief:
+        global PERCH_RESEARCHER_SYSTEM_PROMPT, PERCH_CODER_SYSTEM_PROMPT
+        _eda_block = (
+            "\n\n## DATA INSIGHTS (EDA — factual, data only)\n"
+            + eda_brief
+            + "\n## END OF EDA INSIGHTS\n"
+        )
+        PERCH_RESEARCHER_SYSTEM_PROMPT = PERCH_RESEARCHER_SYSTEM_PROMPT + _eda_block
+        PERCH_CODER_SYSTEM_PROMPT = PERCH_CODER_SYSTEM_PROMPT + _eda_block
+        if not _cfg_quiet(config):
+            print(f"  EDA brief injected into Perch prompts ({len(eda_brief)} chars)")
 
     # ── Step 1: Install deps ──────────────────────────────────────────────
     _ensure_deps()

@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -39,6 +40,12 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 import numpy as np
 import pandas as pd
@@ -799,6 +806,8 @@ def run_staged_tournament_phase(
     print(f"  Track order: {' → '.join(order)}")
     print("=" * 60)
 
+    ensure_meta_eda_before_tracks(config)
+
     summary = _load_1a_summary(config)
     candidates: list[dict] = []
 
@@ -940,6 +949,8 @@ def run_staged_pipeline_sequential(
     print(f"  Order: {' → '.join(order)}  |  Through stage: {max_stage}")
     print("=" * 60)
 
+    ensure_meta_eda_before_tracks(config)
+
     summary = _load_1a_summary(config)
     if max_stage == "1a" and _skip_if_completed(
         config, ARCH_SEARCH_1A_RESULTS, "Stage 1a (all tracks)"
@@ -1037,6 +1048,46 @@ def _score_cnn_arch_search(logs_dir: Path, suite: SoundscapeEvalSuite) -> Sounds
     return None
 
 
+# Truncated ``eda_brief.txt`` body for CNN/Perch system prompts (set by Phase 0).
+_META_EDA_BRIEF: str = ""
+DEFAULT_EDA_BRIEF_MAX_CHARS = 600
+
+
+def _eda_logs_dir() -> Path:
+    return PROJECT_ROOT / "logs" / "eda"
+
+
+def _eda_brief_max_chars(config: dict) -> int:
+    meta_eda = _meta_cfg(config).get("eda") or {}
+    eda_cfg = config.get("eda") or {}
+    return int(
+        meta_eda.get("brief_max_chars")
+        or eda_cfg.get("brief_max_chars")
+        or DEFAULT_EDA_BRIEF_MAX_CHARS
+    )
+
+
+def _strip_eda_report_header(text: str) -> str:
+    """Drop markdown report headers; keep only injectable body."""
+    lines = [ln for ln in text.splitlines() if not ln.strip().startswith("#")]
+    return "\n".join(lines).strip()
+
+
+def _truncate_for_prompt(text: str, max_chars: int) -> str:
+    text = text.strip()
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def prepare_eda_brief_for_prompts(raw: str, config: dict) -> str:
+    """Strip report headers and enforce ``brief_max_chars`` before prompt injection."""
+    return _truncate_for_prompt(
+        _strip_eda_report_header(raw),
+        _eda_brief_max_chars(config),
+    )
+
+
 def _run_subprocess(
     script: str,
     config_override: dict,
@@ -1047,23 +1098,34 @@ def _run_subprocess(
     """Write a temp config with overrides and run a script as subprocess."""
     cfg = json.loads(json.dumps(base_config))
     cfg.update(config_override)
-    # Child agents (CNN / BirdNET / Perch) must not re-run EDA — only meta Phase 0 does.
+    # Child agents (CNN / Perch) must not re-run EDA — only meta Phase 0 does.
     if script != "eda_agent.py":
         cfg.setdefault("eda", {})
         if not config_override.get("eda", {}).get("enabled", False):
             cfg["eda"]["enabled"] = False
+        if script in ("cnn_agent.py", "perch_agent.py") and _META_EDA_BRIEF:
+            cfg["eda_brief"] = _META_EDA_BRIEF
     tmp = Path(tempfile.gettempdir()) / f"meta_{Path(script).stem}_config.json"
     tmp.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
     cmd = [PYTHON, str(PROJECT_ROOT / "src" / script), "--config", str(tmp)]
+    child_env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     if quiet:
-        result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+        result = subprocess.run(
+            cmd,
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env,
+        )
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "").strip()
             print(f"  [subprocess {script}] failed (exit {result.returncode})")
             if err:
                 print(err[-1200:])
         return result.returncode
-    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
+    result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=child_env)
     return result.returncode
 
 
@@ -1071,17 +1133,108 @@ def _run_subprocess(
 # Phase 0 — EDA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_phase0_eda(config: dict) -> None:
+def run_phase0_eda(config: dict) -> str:
+    """
+    Run EDA in-process (summary + 2-sentence brief). Returns truncated brief for prompts.
+    """
+    global _META_EDA_BRIEF
+
     print("\n" + "=" * 60)
     print("  PHASE 0 — Autonomous EDA")
     print("=" * 60)
-    rc = _run_subprocess("eda_agent.py", {}, config)
-    if rc != 0:
-        print("  [Phase 0] EDA agent finished with errors (continuing).")
+
+    try:
+        from eda_agent import build_eda_clients, load_eda_brief, run_eda_phase
+    except ImportError:
+        from .eda_agent import build_eda_clients, load_eda_brief, run_eda_phase
+
+    logs_dir = _eda_logs_dir()
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    meta_eda = _meta_cfg(config).get("eda") or {}
+    force_rebuild = bool(meta_eda.get("force_rebuild", False))
+    executor, llm, max_wall = build_eda_clients(config)
+    temperature = float(
+        meta_eda.get("temperature")
+        or config.get("llm", {}).get("temperature", 0.4)
+    )
+
+    try:
+        run_eda_phase(
+            executor,
+            llm,
+            logs_dir,
+            temperature=temperature,
+            use_llm_codegen=bool(meta_eda.get("use_llm_codegen", True)),
+            max_codegen_attempts=int(meta_eda.get("max_codegen_attempts", 5)),
+            max_codegen_wall_seconds=int(
+                meta_eda.get("max_codegen_wall_seconds", max_wall)
+            ),
+            force_rebuild=force_rebuild,
+            write_brief=True,
+        )
+    except Exception as exc:
+        print(f"  [Phase 0] EDA failed ({exc}) — continuing without brief.")
+
+    raw_brief = load_eda_brief(logs_dir)
+    brief = prepare_eda_brief_for_prompts(raw_brief, config) if raw_brief.strip() else ""
+    _META_EDA_BRIEF = brief
+
+    if brief:
+        cap = _eda_brief_max_chars(config)
+        print(
+            f"  [Phase 0] EDA brief ready ({len(brief)} chars, cap {cap}) "
+            f"→ {_eda_logs_dir() / 'eda_brief.txt'}"
+        )
     else:
-        insights_path = PROJECT_ROOT / "logs" / "eda" / "eda_insights.txt"
-        if insights_path.exists():
-            print(f"  [Phase 0] EDA insights saved → {insights_path}")
+        print("  [Phase 0] No EDA brief — CNN/Perch will run without data insights.")
+
+    print("=" * 60)
+    return brief
+
+
+def load_meta_eda_brief(config: dict) -> str:
+    """Load ``eda_brief.txt`` from disk without re-running EDA."""
+    try:
+        from eda_agent import load_eda_brief
+    except ImportError:
+        from .eda_agent import load_eda_brief
+
+    raw = load_eda_brief(_eda_logs_dir())
+    if not raw.strip():
+        return ""
+    return prepare_eda_brief_for_prompts(raw, config)
+
+
+def ensure_meta_eda_before_tracks(config: dict, *, allow_run: bool = True) -> str:
+    """
+    Phase 0 before the first track: run EDA when ``run_eda`` is true, else optionally
+    load a cached brief (``meta_agent.eda.use_cached_brief``).
+
+    Set ``allow_run=False`` on finalize-only pipelines to skip a full EDA re-run while
+    still injecting a cached brief into subprocess prompts.
+    """
+    global _META_EDA_BRIEF
+
+    if _META_EDA_BRIEF:
+        return _META_EDA_BRIEF
+
+    meta = _meta_cfg(config)
+    meta_eda = meta.get("eda") or {}
+
+    if allow_run and meta.get("run_eda", False):
+        return run_phase0_eda(config)
+
+    if meta_eda.get("use_cached_brief", False):
+        brief = load_meta_eda_brief(config)
+        _META_EDA_BRIEF = brief
+        if brief:
+            print(
+                f"  [EDA] Using cached brief ({len(brief)} chars, "
+                f"cap {_eda_brief_max_chars(config)})"
+            )
+        return brief
+
+    return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4736,24 +4889,21 @@ def main():
     print(f"  Ranking metric: {metric} on labeled train_soundscapes")
 
     if pipeline == "staged_cnn_1c_only":
-        if meta_cfg.get("run_eda", False):
-            run_phase0_eda(config)
+        ensure_meta_eda_before_tracks(config)
         run_stage_1c_cnn_aug_search(config, suite)
         print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
         print("=" * 60)
         return
 
     if pipeline == "staged_perch_1c_only":
-        if meta_cfg.get("run_eda", False):
-            run_phase0_eda(config)
+        ensure_meta_eda_before_tracks(config)
         run_stage_1c_aug_search(config, suite)
         print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
         print("=" * 60)
         return
 
     if pipeline == "staged_perch_1d_1e":
-        if meta_cfg.get("run_eda", False):
-            run_phase0_eda(config)
+        ensure_meta_eda_before_tracks(config, allow_run=False)
         run_staged_perch_1d_1e(config, suite)
         print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
         print("=" * 60)
@@ -4762,8 +4912,7 @@ def main():
         return
 
     if pipeline == "staged_tournament_resume":
-        if meta_cfg.get("run_eda", False):
-            run_phase0_eda(config)
+        ensure_meta_eda_before_tracks(config)
         run_staged_tournament_resume_phase(config, suite)
         if _should_auto_finalize(config, pipeline):
             run_staged_finalize_winner(config, suite)
@@ -4774,8 +4923,7 @@ def main():
         return
 
     if pipeline == "staged_1c_only":
-        if meta_cfg.get("run_eda", False):
-            run_phase0_eda(config)
+        ensure_meta_eda_before_tracks(config)
         run_stage_1c_aug_search(config, suite)
         if _stage_1d_cfg(config).get("enabled", False):
             run_stage_1d_final_train(config)
@@ -4789,8 +4937,7 @@ def main():
         return
 
     if pipeline == "staged_finalize":
-        if meta_cfg.get("run_eda", False):
-            run_phase0_eda(config)
+        ensure_meta_eda_before_tracks(config, allow_run=False)
         run_staged_finalize_winner(config, suite)
         print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
         print("=" * 60)
@@ -4820,8 +4967,6 @@ def main():
         "staged_tournament",
     )
     if pipeline in staged_pipelines:
-        if meta_cfg.get("run_eda", False):
-            run_phase0_eda(config)
         run_staged_pipeline_sequential(config, suite, pipeline)
         print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
         print("=" * 60)
@@ -4833,7 +4978,7 @@ def main():
         return
 
     if meta_cfg.get("run_eda", True):
-        run_phase0_eda(config)
+        ensure_meta_eda_before_tracks(config)
     else:
         print("\n  [Phase 0] EDA skipped (meta_agent.run_eda=false)")
 

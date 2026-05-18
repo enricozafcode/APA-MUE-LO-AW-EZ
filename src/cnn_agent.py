@@ -3093,29 +3093,40 @@ def agent_loop(config):
     for d in dirs.values():
         d.mkdir(parents=True, exist_ok=True)
 
-    # ── Phase EDA: autonomous data exploration before any model training ──────
-    eda_cfg = config.get("eda", {})
-    # Meta-agent subprocesses (staged 1a per baseline) must not re-run EDA each time.
-    if config.get("arch_search_only") or config.get("meta_aug_preset"):
-        eda_default = False
+    # ── EDA brief from meta Phase 0 (short 2-sentence summary only) ─────────────
+    eda_brief = (config.get("eda_brief") or "").strip()
+    if eda_brief:
+        _eda_block = (
+            "\n\n## DATA INSIGHTS (EDA — factual, data only)\n"
+            + eda_brief
+            + "\n## END OF EDA INSIGHTS\n"
+        )
+        GENERATION_SYSTEM_PROMPT = GENERATION_SYSTEM_PROMPT + _eda_block
+        TRANSFER_SYSTEM_PROMPT = TRANSFER_SYSTEM_PROMPT + _eda_block
+        print(f"  EDA brief injected into CNN prompts ({len(eda_brief)} chars)")
     else:
-        eda_default = True
-    if eda_cfg.get("enabled", eda_default):
-        py_exe = config["execution"]["python_executable"]
-        _eda_executor = CodeExecutor(python_executable=py_exe, timeout_seconds=120)
-        _eda_llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
-        _eda_temp = config["llm"].get("temperature", 0.4)
-        eda_insights = run_eda_phase(_eda_executor, _eda_llm, dirs["logs"], temperature=_eda_temp)
-        if eda_insights.strip():
-            _eda_block = (
-                "\n\n## DATA INSIGHTS (from autonomous EDA before training)\n"
-                + eda_insights.strip()
-                + "\n## END OF EDA INSIGHTS\n"
-            )
-            GENERATION_SYSTEM_PROMPT = GENERATION_SYSTEM_PROMPT + _eda_block
-            TRANSFER_SYSTEM_PROMPT   = TRANSFER_SYSTEM_PROMPT   + _eda_block
-    else:
-        print("  EDA phase disabled (eda.enabled=false in config)")
+        eda_cfg = config.get("eda", {})
+        # Meta-agent subprocesses (staged 1a per baseline) must not re-run EDA each time.
+        if config.get("arch_search_only") or config.get("meta_aug_preset"):
+            eda_default = False
+        else:
+            eda_default = True
+        if eda_cfg.get("enabled", eda_default):
+            py_exe = config["execution"]["python_executable"]
+            _eda_executor = CodeExecutor(python_executable=py_exe, timeout_seconds=120)
+            _eda_llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
+            _eda_temp = config["llm"].get("temperature", 0.4)
+            eda_insights = run_eda_phase(_eda_executor, _eda_llm, dirs["logs"], temperature=_eda_temp)
+            if eda_insights.strip():
+                _eda_block = (
+                    "\n\n## DATA INSIGHTS (from autonomous EDA before training)\n"
+                    + eda_insights.strip()
+                    + "\n## END OF EDA INSIGHTS\n"
+                )
+                GENERATION_SYSTEM_PROMPT = GENERATION_SYSTEM_PROMPT + _eda_block
+                TRANSFER_SYSTEM_PROMPT = TRANSFER_SYSTEM_PROMPT + _eda_block
+        else:
+            print("  EDA phase disabled (eda.enabled=false in config)")
 
     sc = config.get("search", {})
     if config.get("arch_search_only"):

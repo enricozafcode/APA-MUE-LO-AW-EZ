@@ -19,6 +19,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import librosa
 import numpy as np
 import pandas as pd
