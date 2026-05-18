@@ -106,10 +106,14 @@
     "run_eda": true,
     "eda": {
       "use_llm_codegen": true,
+      "use_iterative_eda": true,
+      "exploration_iterations": 10,
+      "fixes_per_iteration": 5,
+      "staged_codegen": false,
       "max_codegen_attempts": 5,
       "script_timeout_seconds": 600,
       "llm_timeout_seconds": 600,
-      "max_codegen_wall_seconds": 1200,
+      "max_codegen_wall_seconds": 7200,
       "brief_max_chars": 600,
       "use_cached_brief": true,
       "force_rebuild": false

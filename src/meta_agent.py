@@ -1314,6 +1314,7 @@ def run_phase0_eda(config: dict) -> str:
             ),
             force_rebuild=force_rebuild,
             write_brief=True,
+            config=config,
         )
     except Exception as exc:
         print(f"  [Phase 0] EDA failed ({exc}) — continuing without brief.")

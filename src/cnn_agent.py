@@ -3121,7 +3121,9 @@ def agent_loop(config):
             _eda_executor = CodeExecutor(python_executable=py_exe, timeout_seconds=120)
             _eda_llm = LLMClient(provider=config["llm"]["provider"], model=config["llm"]["model"])
             _eda_temp = config["llm"].get("temperature", 0.4)
-            eda_insights = run_eda_phase(_eda_executor, _eda_llm, dirs["logs"], temperature=_eda_temp)
+            eda_insights = run_eda_phase(
+                _eda_executor, _eda_llm, dirs["logs"], temperature=_eda_temp, config=config
+            )
             if eda_insights.strip():
                 _eda_block = (
                     "\n\n## DATA INSIGHTS (from autonomous EDA before training)\n"
