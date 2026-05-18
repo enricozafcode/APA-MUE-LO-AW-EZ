@@ -21,6 +21,7 @@ Stage 1c: try fixed embedding aug presets (default: medium + high) with locked 1
 Stage 1d: full-data final retrain (best aug + best head) → ``logs/meta_agent/perch/final/``.
 Stage 1e: pseudo-label unlabeled soundscapes (hardcoded thresholds) + fine-tune the 1d head.
 Use ``pipeline: staged_1c_only`` (Perch) or ``staged_cnn_1c_only`` (CNN) to re-run stage 1c after 1a/1b.
+After a crashed tournament mid–Perch 1c: ``staged_perch_1c_only`` then ``staged_tournament_resume``.
 Set ``stage_1c.mode`` to ``presets`` (recommended) | ``llm`` | ``both``; ``aug_presets``: [``medium``, ``high``].
 
 Run:
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -249,6 +251,22 @@ def _arch_iters_per_baseline(config: dict, track_iters: int) -> int:
         return int(per)
     n_aug = max(1, len(_baseline_names(config)))
     return max(1, int(track_iters) // n_aug)
+
+
+def _stage_1d_embed_cap(config: dict, cfg: dict) -> int | None:
+    """
+    Clip limit for stage-1d embed only.
+
+    ``stage_1d.max_train_samples: null`` → all focal rows in train.csv (no cap).
+    Search stages keep ``arch_search_embed_max_samples`` / ``perch.max_train_samples``.
+    """
+    if "max_train_samples" in cfg:
+        cap = cfg.get("max_train_samples")
+        return int(cap) if cap is not None else None
+    full_frac = float(cfg.get("embed_sample_frac", 1.0))
+    if full_frac >= 1.0:
+        return None
+    return _embed_max_samples(config)
 
 
 def _embed_max_samples(config: dict) -> int | None:
@@ -869,7 +887,7 @@ def run_staged_finalize_winner(
     elif track == "perch":
         if _stage_1d_cfg(config).get("enabled", True):
             if not _skip_if_completed(config, ARCH_SEARCH_1D_RESULTS, "Perch 1d finalize"):
-                run_stage_1d_final_train(config)
+                run_stage_1d_final_train(config, suite)
         if _stage_1e_cfg(config).get("enabled", True):
             if not _skip_if_completed(config, ARCH_SEARCH_1E_RESULTS, "Perch 1e finalize"):
                 run_stage_1e_pseudo_refine(config, suite)
@@ -3033,6 +3051,184 @@ def _ensure_shared_1c_val_cache(config: dict) -> Path:
     return PERCH_SHARED_VAL_CACHE
 
 
+_PERCH_HEAD_ARTIFACTS = ("best_head.keras", "final_head.keras", "best_head.weights.h5")
+
+
+def _perch_mem_dir_has_head(mem_dir: Path) -> bool:
+    mem_dir = Path(mem_dir)
+    return any((mem_dir / name).exists() for name in _PERCH_HEAD_ARTIFACTS)
+
+
+def _trial_index_from_aug_preset(preset: str) -> int | None:
+    m = re.match(r"aug_r(\d+)", preset)
+    return int(m.group(1)) if m else None
+
+
+def _merge_1c_runs_by_preset(runs: list[dict]) -> list[dict]:
+    by_preset: dict[str, dict] = {}
+    for run in runs:
+        preset = str(run.get("aug_preset", ""))
+        if preset:
+            by_preset[preset] = run
+    return sorted(
+        by_preset.values(),
+        key=lambda r: _trial_index_from_aug_preset(str(r.get("aug_preset", ""))) or 0,
+    )
+
+
+def _collect_resumed_perch_1c_llm_runs(
+    suite: SoundscapeEvalSuite,
+    *,
+    baselines: list[str],
+    total_runs: int,
+    leader: _Stage1cLeader | None,
+) -> tuple[list[dict], int]:
+    """Reload completed aug_search trials that already have a trained head."""
+    aug_root = META_LOGS / "perch" / "aug_search"
+    runs: list[dict] = []
+    if not aug_root.is_dir():
+        return runs, 1
+
+    candidates: list[tuple[int, Path]] = []
+    for mem_dir in aug_root.iterdir():
+        if not mem_dir.is_dir() or mem_dir.name == "memory":
+            continue
+        if not _perch_mem_dir_has_head(mem_dir):
+            continue
+        trial_idx = _trial_index_from_aug_preset(mem_dir.name)
+        if trial_idx is None:
+            continue
+        candidates.append((trial_idx, mem_dir))
+    candidates.sort(key=lambda x: x[0])
+
+    for trial_idx, mem_dir in candidates:
+        preset = mem_dir.name
+        cache_dir = _perch_aug_search_cache_dir(preset, baselines)
+        train_cache = cache_dir / f"train_emb_{preset}.npz"
+        aug_cfg_path = cache_dir / f"{preset}_aug_config.json"
+        aug_spec: dict = {}
+        if aug_cfg_path.exists():
+            try:
+                aug_spec = {"aug_config": json.loads(aug_cfg_path.read_text(encoding="utf-8"))}
+            except (json.JSONDecodeError, OSError):
+                pass
+        run = {
+            "aug_preset": preset,
+            "memory_dir": str(mem_dir),
+            "train_cache": str(train_cache),
+            "cache_dir": str(cache_dir),
+            "aug_config_path": str(aug_cfg_path),
+            "aug_spec": aug_spec,
+            "resumed": True,
+        }
+        run = _score_1c_run(
+            suite,
+            run,
+            preset=preset,
+            aug_spec=aug_spec,
+            run_index=trial_idx,
+            total=total_runs,
+            leader=leader,
+        )
+        runs.append(run)
+
+    next_idx = max((idx for idx, _ in candidates), default=0) + 1
+    return runs, next_idx
+
+
+def _retry_incomplete_perch_1c_head_trains(
+    config: dict,
+    suite: SoundscapeEvalSuite,
+    *,
+    baselines: list[str],
+    head_code_path: Path,
+    head_spec: dict,
+    indices_path: Path | None,
+    mapping_src: Path,
+    clip_subset_path: Path | None,
+    total_runs: int,
+    leader: _Stage1cLeader | None,
+) -> list[dict]:
+    """Re-run head training when embed cache exists but best_head was never written."""
+    aug_root = META_LOGS / "perch" / "aug_search"
+    runs: list[dict] = []
+    if not aug_root.is_dir():
+        return runs
+
+    pending: list[tuple[int, Path, Path]] = []
+    for mem_dir in aug_root.iterdir():
+        if not mem_dir.is_dir() or mem_dir.name == "memory":
+            continue
+        if _perch_mem_dir_has_head(mem_dir):
+            continue
+        trial_idx = _trial_index_from_aug_preset(mem_dir.name)
+        if trial_idx is None:
+            continue
+        preset = mem_dir.name
+        cache_dir = _perch_aug_search_cache_dir(preset, baselines)
+        train_cache = cache_dir / f"train_emb_{preset}.npz"
+        if train_cache.exists():
+            pending.append((trial_idx, mem_dir, train_cache))
+    pending.sort(key=lambda x: x[0])
+    if not pending:
+        return runs
+
+    print(
+        f"\n  [1c] Retrying head train for {len(pending)} trial(s) with embed cache but no head…",
+        flush=True,
+    )
+    for trial_idx, mem_dir, train_cache in pending:
+        preset = mem_dir.name
+        cache_dir = train_cache.parent
+        aug_cfg_path = cache_dir / f"{preset}_aug_config.json"
+        aug_dict: dict = {}
+        if aug_cfg_path.exists():
+            try:
+                aug_dict = json.loads(aug_cfg_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        trial = _build_1c_trial_payload(
+            preset=preset,
+            aug_dict=aug_dict,
+            head_code_path=head_code_path,
+            head_spec={**head_spec, "aug_preset": preset, "aug_phase": "aug"},
+            indices_path=indices_path if clip_subset_path is None else None,
+            train_cache=train_cache,
+            force_rebuild_train=False,
+        )
+        _run_perch_1c_sweep_subprocess(
+            config,
+            [trial],
+            mapping_src=mapping_src,
+            clip_subset_path=clip_subset_path,
+        )
+        if not _perch_mem_dir_has_head(mem_dir):
+            label = _short_aug_display_name(preset, aug_dict)
+            _print_1c_iteration_result(trial_idx, total_runs, label, None, failed=True)
+            continue
+        aug_spec = {"aug_config": aug_dict} if aug_dict else {}
+        run = {
+            "aug_preset": preset,
+            "memory_dir": str(mem_dir),
+            "train_cache": str(train_cache),
+            "cache_dir": str(cache_dir),
+            "aug_config_path": str(aug_cfg_path),
+            "aug_spec": aug_spec,
+            "retried_head_train": True,
+        }
+        run = _score_1c_run(
+            suite,
+            run,
+            preset=preset,
+            aug_spec=aug_spec,
+            run_index=trial_idx,
+            total=total_runs,
+            leader=leader,
+        )
+        runs.append(run)
+    return runs
+
+
 class _Stage1cLeader:
     """Track best soundscape AP across all completed 1c trials (presets + LLM)."""
 
@@ -3159,9 +3355,20 @@ def _score_1c_run(
     leader: _Stage1cLeader | None = None,
 ) -> dict:
     mem_dir = Path(run["memory_dir"])
+    if not _perch_mem_dir_has_head(mem_dir):
+        label = _short_aug_display_name(preset, aug_spec)
+        _print_1c_iteration_result(run_index, total, label, None, failed=True)
+        run["score"] = None
+        run["aug_preset"] = preset
+        run["aug_spec"] = aug_spec
+        run["error"] = "head_train"
+        return run
     sc = suite.score_perch_mem_dir(mem_dir, val_cache=PERCH_SHARED_VAL_CACHE)
     if sc is None:
-        sc = suite.score_perch(mem_dir)
+        try:
+            sc = suite.score_perch(mem_dir)
+        except FileNotFoundError:
+            sc = None
     subset_ap = None
     info_path = mem_dir / "best_model_info.json"
     if info_path.exists():
@@ -3594,6 +3801,12 @@ def _run_stage_1c_llm_search(
         for k, v in common.items()
         if k not in ("run_index_start", "run_index_total")
     }
+    resume_partial = bool(
+        search_cfg.get(
+            "resume_partial_trials",
+            _stage_1c_cfg(config).get("resume_partial_trials", True),
+        )
+    )
 
     winner_mem = trial_kw["winner_mem"]
     head_code_path = trial_kw["head_code_path"]
@@ -3605,13 +3818,45 @@ def _run_stage_1c_llm_search(
         leader = _Stage1cLeader()
     from aug_researcher import aug_dict_from_logged_spec, slug_from_spec
 
+    if resume_partial:
+        resumed, next_idx = _collect_resumed_perch_1c_llm_runs(
+            suite,
+            baselines=baselines,
+            total_runs=total_runs,
+            leader=leader,
+        )
+        retried = _retry_incomplete_perch_1c_head_trains(
+            config,
+            suite,
+            baselines=baselines,
+            head_code_path=head_code_path,
+            head_spec=head_spec,
+            indices_path=indices_path,
+            mapping_src=winner_mem,
+            clip_subset_path=clip_subset_path,
+            total_runs=total_runs,
+            leader=leader,
+        )
+        runs = _merge_1c_runs_by_preset(resumed + retried)
+        if runs:
+            print(
+                f"\n  [1c] Resumed {len(runs)} trial(s) from disk "
+                f"(next new trial index: {next_idx})",
+                flush=True,
+            )
+            run_idx = max(next_idx - 1, run_idx)
+
     for round_i in range(1, planner_rounds + 1):
+        if run_idx >= total_runs:
+            break
         print(f"\n  Round {round_i}/{planner_rounds} — LLM planner ({experiments_per_round} configs)…")
         specs = researcher.next_experiments()
         trials: list[dict] = []
         round_meta: list[tuple[int, dict, str]] = []
 
         for slot_i, spec in enumerate(specs, 1):
+            if run_idx >= total_runs:
+                break
             run_idx += 1
             slot = str(spec.get("slot") or f"a{slot_i}")
             spec = dict(spec)
@@ -3669,6 +3914,15 @@ def _run_stage_1c_llm_search(
                 )
                 _print_1c_iteration_result(trial_idx, total_runs, label, None, failed=True)
                 continue
+            mem_path = Path(trial["memory_dir"])
+            if not _perch_mem_dir_has_head(mem_path):
+                memory.log(
+                    spec=spec,
+                    metrics={"status": "failed", "error": "head_train"},
+                    code="",
+                )
+                _print_1c_iteration_result(trial_idx, total_runs, label, None, failed=True)
+                continue
             run = {
                 "aug_preset": preset,
                 "memory_dir": trial["memory_dir"],
@@ -3710,7 +3964,63 @@ def _run_stage_1c_llm_search(
             )
             runs.append(run)
 
-    return runs, None
+    return _merge_1c_runs_by_preset(runs), None
+
+
+def run_staged_tournament_resume_phase(
+    config: dict,
+    suite: SoundscapeEvalSuite,
+) -> dict:
+    """
+    Finish tournament Phase A after CNN 1c completed and Perch 1c was interrupted.
+    Reuses CNN candidate from ``cnn_arch_search_1c_results.json``; runs/resumes Perch 1c.
+    """
+    metric = _meta_primary_metric(config)
+    order = _track_order(config)
+
+    print("\n" + "=" * 60)
+    print("  TOURNAMENT RESUME — CNN from checkpoint + Perch 1c (with partial resume)")
+    print(f"  Track order: {' → '.join(order)}")
+    print("=" * 60)
+
+    candidates: list[dict] = []
+    for track in order:
+        if not _track_active(config, track, "staged_tournament"):
+            continue
+        if track == "cnn":
+            cand = _collect_tournament_candidate("cnn", config, metric)
+            if cand:
+                candidates.append(cand)
+                print(
+                    f"\n  [Tournament resume] CNN from checkpoint: "
+                    f"{metric}={float(cand['primary_value']):.5f}"
+                )
+            else:
+                print("\n  [Tournament resume] CNN — no 1c results; run CNN 1c first.")
+        elif track == "perch":
+            if not _skip_if_completed(config, ARCH_SEARCH_1C_RESULTS, "Perch 1c (resume)"):
+                run_stage_1c_aug_search(config, suite)
+            cand = _collect_tournament_candidate("perch", config, metric)
+            if cand:
+                candidates.append(cand)
+                print(
+                    f"\n  [Tournament resume] Perch qualified: "
+                    f"{metric}={float(cand['primary_value']):.5f}"
+                )
+            else:
+                print("\n  [Tournament resume] Perch — no valid 1c winner after resume.")
+        elif track == "birdnet":
+            cand = _collect_tournament_candidate("birdnet", config, metric)
+            if cand:
+                candidates.append(cand)
+
+    global_winner = _pick_global_tournament_winner(candidates, metric)
+    _print_tournament_final_comparison(config, candidates, metric, global_winner)
+    payload = _save_tournament_results(config, candidates, global_winner)
+    if global_winner:
+        print(f"\n  Tournament results saved → {TOURNAMENT_RESULTS}")
+        print("  Next: pipeline staged_finalize (or tournament.auto_finalize: true)")
+    return payload
 
 
 def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
@@ -3898,8 +4208,13 @@ def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
     return summary
 
 
-def run_stage_1d_final_train(config: dict) -> dict:
+def run_stage_1d_final_train(
+    config: dict,
+    suite: SoundscapeEvalSuite | None = None,
+) -> dict:
     """Stage 1d: full-data retrain with best 1b head + best 1c augmentation."""
+    if suite is None:
+        suite = _soundscape_suite(config)
     cfg = _stage_1d_cfg(config)
     if not cfg.get("enabled", False):
         print("\n  [Stage 1d] Skipped (stage_1d.enabled=false)")
@@ -3953,26 +4268,44 @@ def run_stage_1d_final_train(config: dict) -> dict:
         mem_dir = META_LOGS / "perch" / "final" / "_cache_build"
         code_dir = mem_dir / "codes"
         perch_base = dict(config.get("perch", {}))
-        embed_cap = _embed_max_samples(config)
+        embed_cap = _stage_1d_embed_cap(config, cfg)
+        cap_msg = (
+            f"all train.csv focal clips (no cap)"
+            if embed_cap is None
+            else f"cap={embed_cap} clips"
+        )
+        print(f"  [Stage 1d] Embed budget: {cap_msg}")
+        perch_1d = {
+            **perch_base,
+            "logs_dir": str(META_LOGS / "perch"),
+            "memory_dir": str(mem_dir),
+            "cache_dir": str(final_cache_dir),
+            "code_dir": str(code_dir),
+            "val_cache_path": str(val_cache),
+            "force_rebuild_cache": bool(cfg.get("rebuild_full_train_cache", True)),
+            "skip_final_retrain": True,
+            "max_train_samples": embed_cap,
+            "head_train_max_samples": None,
+        }
         override = {
             "meta_aug_preset": f"{preset}_full",
             "augmentation": aug_dict,
             "train_sample_frac": full_frac,
+            "head_train_max_samples": None,
             "perch_build_cache_only": True,
-            "perch": {
-                **perch_base,
-                "logs_dir": str(META_LOGS / "perch"),
-                "memory_dir": str(mem_dir),
-                "cache_dir": str(final_cache_dir),
-                "code_dir": str(code_dir),
-                "val_cache_path": str(val_cache),
-                "force_rebuild_cache": bool(cfg.get("rebuild_full_train_cache", True)),
-                "skip_final_retrain": True,
-            },
+            "perch": perch_1d,
         }
-        if embed_cap is not None:
-            override["perch"]["max_train_samples"] = embed_cap
         _run_subprocess("perch_agent.py", override, config)
+        meta_path = final_cache_dir / f"train_emb_{preset}_full.meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                print(
+                    f"  [Stage 1d] Full embed done: n_samples={meta.get('n_samples')} "
+                    f"dim={meta.get('embedding_dim')}"
+                )
+            except (json.JSONDecodeError, OSError):
+                pass
         built = final_cache_dir / f"train_emb_{preset}_full.npz"
         if built.exists():
             train_cache = built
@@ -4017,7 +4350,20 @@ def run_stage_1d_final_train(config: dict) -> dict:
     result = executor.run_file(script_path)
 
     ok = result.success and "FINAL_RETRAIN_DONE" in (result.stdout or "")
+    metric = _meta_primary_metric(config)
+    soundscape_score: dict | None = None
     if ok:
+        info_src = Path(refine_winner["memory_dir"]) / "best_model_info.json"
+        if info_src.exists():
+            shutil.copy2(info_src, PERCH_FINAL_DIR / "best_model_info.json")
+        if cfg.get("score_after_retrain", True):
+            try:
+                sc = suite.score_perch(PERCH_FINAL_DIR)
+                if sc:
+                    soundscape_score = sc.to_dict()
+                    _print_soundscape_score("Perch/1d (full train head, live soundscapes)", sc)
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                print(f"  [Stage 1d] Soundscape score skipped: {exc}")
         weights = PERCH_FINAL_DIR / "final_head.weights.h5"
         keras_model = PERCH_FINAL_DIR / "final_head.keras"
         print(f"  Final model → {weights}")
@@ -4063,9 +4409,21 @@ def run_stage_1d_final_train(config: dict) -> dict:
         "train_cache": str(train_cache),
         "output_dir": str(PERCH_FINAL_DIR),
         "success": ok,
+        "primary_metric": metric,
+        "soundscape_score": soundscape_score,
     }
     ARCH_SEARCH_1D_RESULTS.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
+
+
+def run_staged_perch_1d_1e(config: dict, suite: SoundscapeEvalSuite) -> dict:
+    """Perch finalize only: full-data 1d (embed + head + soundscape score) then 1e."""
+    r1d = run_stage_1d_final_train(config, suite)
+    r1e: dict = {}
+    if _stage_1e_cfg(config).get("enabled", True):
+        if not _skip_if_completed(config, ARCH_SEARCH_1E_RESULTS, "Perch 1e"):
+            r1e = run_stage_1e_pseudo_refine(config, suite)
+    return {"stage_1d": r1d, "stage_1e": r1e}
 
 
 def run_stage_1e_pseudo_refine(config: dict, suite: SoundscapeEvalSuite) -> dict:
@@ -4385,6 +4743,36 @@ def main():
         print("=" * 60)
         return
 
+    if pipeline == "staged_perch_1c_only":
+        if meta_cfg.get("run_eda", False):
+            run_phase0_eda(config)
+        run_stage_1c_aug_search(config, suite)
+        print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
+        print("=" * 60)
+        return
+
+    if pipeline == "staged_perch_1d_1e":
+        if meta_cfg.get("run_eda", False):
+            run_phase0_eda(config)
+        run_staged_perch_1d_1e(config, suite)
+        print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
+        print("=" * 60)
+        print(f"  Perch final: {PERCH_FINAL_DIR}")
+        print(f"  Submission: {PROJECT_ROOT / 'submission'}")
+        return
+
+    if pipeline == "staged_tournament_resume":
+        if meta_cfg.get("run_eda", False):
+            run_phase0_eda(config)
+        run_staged_tournament_resume_phase(config, suite)
+        if _should_auto_finalize(config, pipeline):
+            run_staged_finalize_winner(config, suite)
+        print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
+        print("=" * 60)
+        print(f"\n  Tournament results: {TOURNAMENT_RESULTS}")
+        print(f"  Kaggle bundle: {PROJECT_ROOT / 'submission'}")
+        return
+
     if pipeline == "staged_1c_only":
         if meta_cfg.get("run_eda", False):
             run_phase0_eda(config)
@@ -4411,13 +4799,11 @@ def main():
         return
 
     if pipeline == "staged_1e_only":
-        print("\n  Pipeline: staged_1e_only — pseudo-refine only (reuse existing caches)")
+        print("\n  Pipeline: staged_1e_only — pseudo-refine only (requires 1d final head + train cache)")
         if not (PERCH_FINAL_DIR / "final_head.keras").exists() and not (
             PERCH_FINAL_DIR / "final_head.weights.h5"
         ).exists():
             print("  [1e] Missing stage-1d head in logs/meta_agent/perch/final/ — run stage 1d first.")
-        elif not PSEUDO_LABELS_NPZ.exists():
-            print(f"  [1e] Missing {PSEUDO_LABELS_NPZ.name} — run pseudo cache build first.")
         else:
             run_stage_1e_pseudo_refine(config, suite)
         print(f"\n  Total time: {(time.time() - t0) / 60:.1f} min")
