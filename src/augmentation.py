@@ -5,7 +5,7 @@ Each strategy can be individually enabled/disabled via the config dict
 (loaded from agent_config.json -> "augmentation" key).
 
 Meta-agent stage 1a uses three shared baselines (light / medium / high):
-  - ``get_audio_embedding_aug(name)`` — BirdNET & Perch (audio + optional SNR mix)
+  - ``get_audio_embedding_aug(name)`` — Perch (audio + optional SNR mix)
   - ``get_cnn_baseline_aug(name)`` — CNN (soundscape SNR + audio aug before mel, then spec aug)
   - ``get_cnn_spectrogram_aug(name)`` — spectrogram-only knobs (subset of CNN baseline)
 
@@ -51,7 +51,7 @@ def normalize_baseline_aug_name(name: str, *, default: str = "medium") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Embedding-track baselines (BirdNET / Perch) — applied before encoder
+# Embedding-track baselines (Perch) — applied before encoder
 # ---------------------------------------------------------------------------
 
 AUDIO_EMBEDDING_BASELINES: dict[str, dict[str, Any]] = {
@@ -358,7 +358,7 @@ def describe_baseline(name: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# SNR mixing helpers (shared by BirdNET / Perch cache builders)
+# SNR mixing helpers (shared by Perch cache builders)
 # ---------------------------------------------------------------------------
 
 def mix_snr(signal: np.ndarray, noise: np.ndarray, snr_db: float) -> np.ndarray:

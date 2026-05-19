@@ -11,7 +11,7 @@ This repository is structured for **D1 (GitHub repository)** deliverables: sourc
 | Path | Purpose |
 |------|---------|
 | `src/` | Agent source code (`meta_agent.py` is the main entry point) |
-| `configs/` | `agent_config.json` (parameters, stages, iterations) and `prompts.yaml` (legacy prompt templates) |
+| `configs/` | `agent_config.json` (meta-agent pipeline parameters and stages) |
 | `scripts/` | `setup_project.py` — creates `.venv` and installs dependencies |
 | `requirements.txt` | Python dependencies (PyTorch, TensorFlow, Ollama client, audio stack) |
 | `data/` | BirdCLEF dataset (local only; not committed — see [Dataset](#dataset)) |
@@ -124,7 +124,6 @@ All major behaviour is controlled here—no code changes needed for a standard c
 | `max_iterations` | Default planner rounds where applicable |
 | `meta_agent.pipeline` | `staged_tournament` (default): EDA → both tracks through 1c → pick winner → 1d/1e |
 | `meta_agent.track_order` | `["cnn", "perch"]` — two competing approaches |
-| `meta_agent.excluded_tracks` | `["birdnet"]` — BirdNET code exists but is off in the default config |
 | `meta_agent.primary_metric` | `macro_average_precision` on labelled `train_soundscapes` |
 | `meta_agent.cnn_iterations` / `perch_iterations` | Stage 1a planner rounds per track |
 | `meta_agent.arch_search_*_max_samples` | **1500** — cheap search subset size |
@@ -138,8 +137,7 @@ All major behaviour is controlled here—no code changes needed for a standard c
 | `meta_agent.experiment_tracker` | Writes `experiment_timeline.json` and plots |
 | `perch` | ONNX dataset id, Perch sample limits, cache flags |
 
-Prompt text for researchers lives in Python modules (e.g. `src/cnn_staged.py`, `src/perch_agent.py`, `src/aug_researcher.py`). `configs/prompts.yaml` is a legacy template for older agent paths.
-
+Prompt text for researchers lives in Python modules (e.g. `src/cnn_staged.py`, `src/perch_agent.py`, `src/aug_researcher.py`).
 
 ---
 
@@ -208,8 +206,6 @@ Supporting modules (called by meta-agent or track subprocesses, not run directly
 | `augmentation.py`, `aug_researcher.py`, `cnn_aug_researcher.py` | Aug search |
 | `cnn_pseudo.py`, `perch_pseudo.py` | Stage 1e pseudo-labelling |
 | `soundscape_evaluator.py` | Macro AP / AUC on labelled soundscapes |
-
-Legacy single-track agents (`src/agent.py`, `agent_loop.py`) remain for reference; the course pipeline uses **`meta_agent.py`**.
 
 ---
 

@@ -1,36 +1,37 @@
 {
   "use_snr_mixing": true,
-  "mix_prob": 0.55,
-  "snr_min_db": -5.0,
+  "n_mix_views": 2,
+  "mix_prob": 0.5,
+  "snr_min_db": 0.0,
   "snr_max_db": 10.0,
   "audio": {
     "time_stretch": {
-      "enabled": false,
-      "probability": 0.5,
+      "enabled": true,
+      "probability": 0.45,
       "rate_min": 0.9,
       "rate_max": 1.1
     },
     "pitch_shift": {
-      "enabled": false,
-      "probability": 0.5,
+      "enabled": true,
+      "probability": 0.3,
       "steps_min": -2,
       "steps_max": 2
     },
     "noise_injection": {
       "enabled": true,
-      "probability": 0.4,
-      "noise_level": 0.005
+      "probability": 0.5,
+      "noise_level": 0.008
     },
     "time_shift": {
       "enabled": true,
       "probability": 0.5,
-      "shift_max_fraction": 0.4
+      "shift_max_fraction": 0.5
     },
     "gain_jitter": {
       "enabled": true,
-      "probability": 0.4,
-      "min_db": -6.0,
-      "max_db": 6.0
+      "probability": 0.5,
+      "min_db": -8.0,
+      "max_db": 8.0
     }
   }
 }

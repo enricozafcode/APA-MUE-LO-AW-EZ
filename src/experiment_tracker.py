@@ -95,6 +95,8 @@ def _compact_experiment(
         "macro_average_precision": entry.get("macro_average_precision"),
         "median_per_class_auc": entry.get("median_per_class_auc"),
         "macro_roc_auc": entry.get("macro_roc_auc"),
+        "train_loss": entry.get("train_loss"),
+        "val_loss": entry.get("val_loss"),
         "soundscape_macro_ap": entry.get("soundscape_macro_ap"),
         "ranking_metric": ranking_metric,
         "ranking_value": rv,
@@ -249,11 +251,12 @@ def _write_stage_plots(
     if not ok:
         return
 
-    # ── history: every successful point in stage order ───────────────────────
+    # ── history: scores (top) + training losses (bottom) ─────────────────────
     xs = list(range(1, len(experiments) + 1))
     ap_series: list[float | None] = []
     med_series: list[float | None] = []
-    colors: list[str] = []
+    train_loss_series: list[float | None] = []
+    val_loss_series: list[float | None] = []
     for e in experiments:
         ap_series.append(
             float(e["macro_average_precision"])
@@ -265,11 +268,18 @@ def _write_stage_plots(
             if e.get("median_per_class_auc") is not None
             else None
         )
-        colors.append("#2ecc71" if e.get("success") else "#bdc3c7")
+        train_loss_series.append(
+            float(e["train_loss"]) if e.get("train_loss") is not None else None
+        )
+        val_loss_series.append(
+            float(e["val_loss"]) if e.get("val_loss") is not None else None
+        )
 
-    fig, ax1 = plt.subplots(figsize=(9, 4.5), dpi=120)
-    ax1.set_title(f"{stage_label} — metrics over experiments", fontsize=11)
-    ax1.set_xlabel("Experiment # (stage order)")
+    fig, (ax1, ax_loss) = plt.subplots(
+        2, 1, figsize=(9, 6.2), dpi=120, sharex=True, height_ratios=[2, 1]
+    )
+    fig.suptitle(f"{stage_label} — metrics over experiments", fontsize=11)
+
     ax1.set_ylabel("macro AP", color="#2980b9")
     ax1.plot(
         xs,
@@ -297,11 +307,42 @@ def _write_stage_plots(
 
     for i, e in enumerate(experiments):
         if not e.get("success"):
-            ax1.scatter([i + 1], [ap_series[i] if ap_series[i] is not None else 0], c="#95a5a6", s=28, zorder=3)
+            ax1.scatter(
+                [i + 1],
+                [ap_series[i] if ap_series[i] is not None else 0],
+                c="#95a5a6",
+                s=28,
+                zorder=3,
+            )
 
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower right", fontsize=8)
+
+    ax_loss.set_xlabel("Experiment # (stage order)")
+    ax_loss.set_ylabel("loss")
+    if any(v is not None for v in train_loss_series):
+        ax_loss.plot(
+            xs,
+            train_loss_series,
+            color="#8e44ad",
+            marker="o",
+            linewidth=1.4,
+            label="train_loss",
+        )
+    if any(v is not None for v in val_loss_series):
+        ax_loss.plot(
+            xs,
+            val_loss_series,
+            color="#d35400",
+            marker="s",
+            linewidth=1.4,
+            linestyle="--",
+            label="val_loss",
+        )
+    ax_loss.grid(True, alpha=0.25)
+    ax_loss.legend(loc="upper right", fontsize=8)
+
     fig.tight_layout()
     fig.savefig(history_path, bbox_inches="tight")
     plt.close(fig)
@@ -332,18 +373,34 @@ def _write_stage_plots(
         float(e["median_per_class_auc"]) if e.get("median_per_class_auc") is not None else 0.0
         for e in selected
     ]
+    tl_vals = [
+        float(e["train_loss"]) if e.get("train_loss") is not None else 0.0 for e in selected
+    ]
+    vl_vals = [
+        float(e["val_loss"]) if e.get("val_loss") is not None else 0.0 for e in selected
+    ]
 
     x = range(len(selected))
-    width = 0.36
-    fig, ax = plt.subplots(figsize=(max(7, len(selected) * 1.2), 4.5), dpi=120)
-    ax.bar([i - width / 2 for i in x], ap_vals, width=width, color="#2980b9", label="macro AP")
-    ax.bar([i + width / 2 for i in x], med_vals, width=width, color="#c0392b", label="median AUC")
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
-    ax.set_title(f"{stage_label} — latest {live_window} + best", fontsize=11)
-    ax.set_ylabel("score")
-    ax.legend(loc="upper right", fontsize=8)
-    ax.grid(True, axis="y", alpha=0.25)
+    width = 0.18
+    fig, (ax_score, ax_loss) = plt.subplots(
+        2, 1, figsize=(max(7, len(selected) * 1.2), 5.8), dpi=120, height_ratios=[2, 1]
+    )
+    fig.suptitle(f"{stage_label} — latest {live_window} + best", fontsize=11)
+    ax_score.bar([i - width for i in x], ap_vals, width=width, color="#2980b9", label="macro AP")
+    ax_score.bar([i for i in x], med_vals, width=width, color="#c0392b", label="median AUC")
+    ax_score.set_xticks(list(x))
+    ax_score.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
+    ax_score.set_ylabel("score")
+    ax_score.legend(loc="upper right", fontsize=8)
+    ax_score.grid(True, axis="y", alpha=0.25)
+
+    ax_loss.bar([i - width / 2 for i in x], tl_vals, width=width, color="#8e44ad", label="train_loss")
+    ax_loss.bar([i + width / 2 for i in x], vl_vals, width=width, color="#d35400", label="val_loss")
+    ax_loss.set_xticks(list(x))
+    ax_loss.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
+    ax_loss.set_ylabel("loss")
+    ax_loss.legend(loc="upper right", fontsize=8)
+    ax_loss.grid(True, axis="y", alpha=0.25)
     fig.tight_layout()
     fig.savefig(live_path, bbox_inches="tight")
     plt.close(fig)
@@ -371,14 +428,23 @@ def _write_pipeline_plot(all_experiments: list[dict], path: Path) -> None:
         float(e["median_per_class_auc"]) if e.get("median_per_class_auc") is not None else None
         for e in all_experiments
     ]
+    train_loss = [
+        float(e["train_loss"]) if e.get("train_loss") is not None else None
+        for e in all_experiments
+    ]
+    val_loss = [
+        float(e["val_loss"]) if e.get("val_loss") is not None else None
+        for e in all_experiments
+    ]
     stage_keys = [e.get("stage_key", "") for e in all_experiments]
     uniq = sorted({s for s in stage_keys if s})
     cmap = plt.get_cmap("tab10")
     color_map = {s: cmap(i % 10) for i, s in enumerate(uniq)}
 
-    fig, ax1 = plt.subplots(figsize=(10, 4.8), dpi=120)
-    ax1.set_title("Pipeline progress — macro AP & median AUC", fontsize=11)
-    ax1.set_xlabel("Global experiment #")
+    fig, (ax1, ax_loss) = plt.subplots(
+        2, 1, figsize=(10, 6.5), dpi=120, sharex=True, height_ratios=[2, 1]
+    )
+    fig.suptitle("Pipeline progress — macro AP, median AUC, train/val loss", fontsize=11)
     ax1.set_ylabel("macro AP", color="#2980b9")
     ax1.plot(xs, ap, color="#2980b9", linewidth=1.4, alpha=0.85)
     ax2 = ax1.twinx()
@@ -402,6 +468,18 @@ def _write_pipeline_plot(all_experiments: list[dict], path: Path) -> None:
     ]
     if handles:
         ax1.legend(handles=handles, loc="lower right", fontsize=7, ncol=2)
+
+    ax_loss.set_xlabel("Global experiment #")
+    ax_loss.set_ylabel("loss")
+    if any(v is not None for v in train_loss):
+        ax_loss.plot(xs, train_loss, color="#8e44ad", linewidth=1.2, alpha=0.85, label="train_loss")
+    if any(v is not None for v in val_loss):
+        ax_loss.plot(
+            xs, val_loss, color="#d35400", linewidth=1.2, linestyle="--", alpha=0.85, label="val_loss"
+        )
+    ax_loss.legend(loc="upper right", fontsize=8)
+    ax_loss.grid(True, alpha=0.25)
+
     fig.tight_layout()
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)

@@ -234,6 +234,8 @@ class PerchExperimentMemory(ExperimentMemory):
             "ranking_value": self._ranking_value(entry) if entry.get("success") else None,
             "macro_ap": entry.get("macro_average_precision"),
             "macro_auc": entry.get("macro_roc_auc"),
+            "train_loss": entry.get("train_loss"),
+            "val_loss": entry.get("val_loss"),
         }
 
     def _confidence(self, total_tries: int) -> tuple[float, str]:
@@ -460,21 +462,22 @@ class PerchExperimentMemory(ExperimentMemory):
     def _scores_line(self, entry: dict) -> str:
         if not entry.get("success"):
             return "FAILED"
-        ap = entry.get("macro_average_precision")
-        auc = entry.get("macro_roc_auc")
-        med = entry.get("median_per_class_auc")
-        parts = []
-        if ap is not None:
-            parts.append(f"macro_AP={float(ap):.4f}")
-        if auc is not None:
-            parts.append(f"macro_AUC={float(auc):.4f}")
-        if med is not None:
-            parts.append(f"median_AUC={float(med):.4f}")
-        if not parts:
-            rv = self._ranking_value(entry)
-            if rv >= 0:
-                parts.append(f"{self.ranking_metric}={rv:.4f}")
-        return " | ".join(parts) if parts else "ok (no metrics)"
+        from soundscape_evaluator import format_metrics_dict
+
+        m = entry.get("metrics") or {}
+        return format_metrics_dict(
+            {
+                "status": "success",
+                "macro_average_precision": entry.get("macro_average_precision")
+                or m.get("macro_average_precision"),
+                "macro_roc_auc": entry.get("macro_roc_auc") or m.get("macro_roc_auc"),
+                "median_per_class_auc": entry.get("median_per_class_auc")
+                or m.get("median_per_class_auc"),
+                "train_loss": entry.get("train_loss") or m.get("train_loss"),
+                "val_loss": entry.get("val_loss") or m.get("val_loss"),
+            },
+            ranking_metric=self.ranking_metric,
+        )
 
     def _run_researcher_line(self, entry: dict, run_index: int) -> list[str]:
         spec = entry.get("spec") or {}
@@ -573,7 +576,8 @@ class PerchExperimentMemory(ExperimentMemory):
         lines.extend([
             "EXPERIMENT LOG (arch_type + hyperparams + description + results; full jsonl on disk)",
             f"Runs: {total} ({len(ok)} ok, {len(fails)} failed) | "
-            f"optimize: {self.ranking_metric} (also logged: macro_AP, macro_AUC, median_AUC)",
+            f"optimize: {self.ranking_metric} (also logged: macro_AP, macro_AUC, "
+            f"median_AUC, train_loss, val_loss)",
             "",
         ])
 

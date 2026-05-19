@@ -6,6 +6,7 @@ Primary metric for meta-agent model ranking: ``macro_average_precision``.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-# Meta-agent uses this to rank CNN / BirdNET / Perch / ensemble on labeled train_soundscapes.
+# Meta-agent uses this to rank CNN / Perch on labeled train_soundscapes.
 PRIMARY_META_METRIC = "macro_average_precision"
 
 
@@ -112,25 +113,68 @@ def compute_metric_panel(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, fl
     return out
 
 
+def parse_training_losses_from_stdout(stdout: str) -> dict[str, float | None]:
+    """Parse TRAIN_LOSS / best val_loss lines emitted by training harnesses."""
+    out: dict[str, float | None] = {"train_loss": None, "val_loss": None}
+    if not stdout:
+        return out
+    m = re.search(r"TRAIN_LOSS:\s*([\d.eE+-]+)", stdout)
+    if m:
+        try:
+            out["train_loss"] = float(m.group(1))
+        except ValueError:
+            pass
+    m = re.search(
+        r"BEST_EPOCH_BY_VAL_LOSS:.*?val_loss=([\d.eE+-]+)",
+        stdout,
+    )
+    if m:
+        try:
+            out["val_loss"] = float(m.group(1))
+        except ValueError:
+            pass
+    return out
+
+
+def enrich_metrics_with_training_losses(
+    metrics: dict[str, Any] | None,
+    stdout: str = "",
+) -> dict[str, Any] | None:
+    """Merge train/val loss from stdout into a successful metrics dict."""
+    if metrics is None:
+        return None
+    if metrics.get("status") != "success":
+        return metrics
+    merged = dict(metrics)
+    for key, val in parse_training_losses_from_stdout(stdout).items():
+        if val is not None and merged.get(key) is None:
+            merged[key] = val
+    return merged
+
+
 def format_soundscape_metrics_line(
     *,
     macro_ap: float | None = None,
     macro_auc: float | None = None,
     median_auc: float | None = None,
+    train_loss: float | None = None,
+    val_loss: float | None = None,
     ranking_metric: str = PRIMARY_META_METRIC,
     mark_ranking: bool = True,
 ) -> str:
-    """Standard one-line metric display: macro_AP (ranking) | macro_AUC | median_AUC."""
+    """Standard one-line metric display: macro_AP | macro_AUC | median_AUC | train/val loss."""
     parts: list[str] = []
 
-    def _f(v: float | None) -> str | None:
+    def _f(v: float | None, *, loss: bool = False) -> str | None:
         if v is None or (isinstance(v, float) and np.isnan(v)):
             return None
-        return f"{v:.5f}"
+        return f"{v:.6f}" if loss else f"{v:.5f}"
 
     ap_s = _f(macro_ap)
     auc_s = _f(macro_auc)
     med_s = _f(median_auc)
+    tl_s = _f(train_loss, loss=True)
+    vl_s = _f(val_loss, loss=True)
 
     if ap_s is not None:
         tag = " (ranking)" if mark_ranking and ranking_metric == PRIMARY_META_METRIC else ""
@@ -140,6 +184,10 @@ def format_soundscape_metrics_line(
         parts.append(f"macro_AUC={auc_s}{tag}")
     if med_s is not None:
         parts.append(f"median_AUC={med_s}")
+    if tl_s is not None:
+        parts.append(f"train_loss={tl_s}")
+    if vl_s is not None:
+        parts.append(f"val_loss={vl_s}")
     return " | ".join(parts) if parts else "no score"
 
 
@@ -153,10 +201,14 @@ def format_metrics_dict(
     ap = metrics.get("macro_average_precision")
     auc = metrics.get("competition_macro_auc_v2", metrics.get("macro_roc_auc"))
     med = metrics.get("median_per_class_auc")
+    tl = metrics.get("train_loss")
+    vl = metrics.get("val_loss")
     return format_soundscape_metrics_line(
         macro_ap=float(ap) if ap is not None else None,
         macro_auc=float(auc) if auc is not None else None,
         median_auc=float(med) if med is not None else None,
+        train_loss=float(tl) if tl is not None else None,
+        val_loss=float(vl) if vl is not None else None,
         ranking_metric=ranking_metric,
     )
 
@@ -325,83 +377,25 @@ class SoundscapeEvalSuite:
                 row_ids = soundscape_window_row_ids(labels_csv, sort_for_benchmark=False)
 
         if row_ids is not None and len(row_ids) == len(preds):
-            return self.score_birdnet_val_preds(preds, row_ids)
+            return self._score_preds_by_row_ids(preds, row_ids)
 
         if preds.shape == self.y_true.shape:
             return self.score_arrays(preds)
         return None
 
-    def score_birdnet_val_preds(
+    def _score_preds_by_row_ids(
         self,
         preds: np.ndarray,
         row_ids: list[str] | np.ndarray,
     ) -> SoundscapeScore:
-        """Align BirdNET val predictions (row_id order) to benchmark ground truth."""
+        """Align cached-val predictions (row_id order) to benchmark ground truth."""
         from submission_benchmark import align_predictions
 
         row_ids = [str(r) for r in row_ids]
         pred_df = pd.DataFrame(preds, columns=self.species_cols)
         pred_df.insert(0, "row_id", row_ids)
-        yt, yp, _ = align_predictions(self.y_true_df, pred_df)
-        return self.score_arrays(yp)
-
-    def score_birdnet_mem_dir(
-        self,
-        archive_dir: Path,
-        *,
-        val_cache: Path | None = None,
-    ) -> SoundscapeScore | None:
-        """Score staged BirdNET head from ``best_val_preds.npy`` (macro AP / AUC / median AUC)."""
-        archive_dir = Path(archive_dir)
-        preds_path = archive_dir / "best_val_preds.npy"
-        if not preds_path.exists():
-            return None
-        preds = np.load(preds_path).astype(np.float32)
-        row_ids: list[str] | None = None
-        if val_cache is not None and Path(val_cache).exists():
-            try:
-                d = np.load(str(val_cache), allow_pickle=True)
-                if "row_ids" in d.files:
-                    row_ids = [str(r) for r in d["row_ids"].tolist()]
-            except (OSError, ValueError):
-                pass
-        if row_ids is not None and len(row_ids) == len(preds):
-            return self.score_birdnet_val_preds(preds, row_ids)
-        if preds.shape == self.y_true.shape:
-            return self.score_arrays(preds)
-        return None
-
-    def score_birdnet_artifacts(
-        self,
-        logs_dir: Path,
-        val_npz: Path,
-    ) -> SoundscapeScore | None:
-        sc = self.score_birdnet_mem_dir(logs_dir, val_cache=val_npz)
-        if sc is not None:
-            return sc
-        aligned = self.aligned_birdnet_preds(logs_dir, val_npz)
-        if aligned is None:
-            return None
-        return self.score_arrays(aligned)
-
-    def aligned_birdnet_preds(
-        self,
-        logs_dir: Path,
-        val_npz: Path,
-    ) -> np.ndarray | None:
-        """BirdNET scores aligned to ``y_true_df`` row order (for ensembling)."""
-        preds_path = Path(logs_dir) / "best_val_preds.npy"
-        if not preds_path.exists() or not Path(val_npz).exists():
-            return None
-        d = np.load(str(val_npz), allow_pickle=True)
-        preds = np.load(str(preds_path)).astype(np.float32)
-        row_ids = d["row_ids"]
-        from submission_benchmark import align_predictions
-
-        pred_df = pd.DataFrame(preds, columns=self.species_cols)
-        pred_df.insert(0, "row_id", [str(r) for r in row_ids])
         _, yp, _ = align_predictions(self.y_true_df, pred_df)
-        return yp
+        return self.score_arrays(yp)
 
     def aligned_perch_preds(self, archive_dir: Path, **kwargs: Any) -> np.ndarray:
         from submission_benchmark import align_predictions, predict_perch_on_labeled_rows

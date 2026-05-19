@@ -102,7 +102,7 @@ def print_pipeline_roadmap(config: dict, pipeline: str) -> None:
             f"{', '.join(t.upper() for t in tracks)}"
         )
     else:
-        steps.append("Legacy pipeline: CNN → BirdNET → Perch → Ensemble")
+        steps.append("Legacy pipeline: CNN → Perch")
 
     steps.append("Artifacts: logs/meta_agent/, submission/, tournament_results.json")
 

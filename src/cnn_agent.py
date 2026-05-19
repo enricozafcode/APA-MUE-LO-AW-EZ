@@ -1240,6 +1240,9 @@ def run_experiment_until_success(
             focal_cache_dir=focal_cache_dir,
         )
         if metrics and metrics.get("status") == "success":
+            from soundscape_evaluator import enrich_metrics_with_training_losses
+
+            metrics = enrich_metrics_with_training_losses(metrics, result.stdout or "")
             best_epoch = _extract_best_epoch(result.stdout or "")
             if best_epoch is not None:
                 metrics = dict(metrics)

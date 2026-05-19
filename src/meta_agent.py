@@ -3,8 +3,7 @@ Meta Agent — BirdCLEF 2026
 ===========================
 Legacy pipeline (``meta_agent.pipeline``: ``legacy``):
   Phase 0: EDA
-  Phase 1–3: CNN / BirdNET / Perch single-pass agents
-  Phase 4: Ensemble
+  Phase 1–2: CNN and Perch single-pass agents
 
 Staged pipeline — **sequential tracks** (``meta_agent.track_order``):
 
@@ -76,17 +75,13 @@ from soundscape_evaluator import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR     = PROJECT_ROOT / "data"
-CACHE_DIR    = PROJECT_ROOT / "notebooks" / "birdnet_cache"
 PERCH_MEMORY = PROJECT_ROOT / "logs" / "perch_memory"
-BIRDNET_LOGS = PROJECT_ROOT / "logs" / "birdnet_agent"
 CNN_SUBMISSION = PROJECT_ROOT / "submission" / "model.keras"
 META_LOGS    = PROJECT_ROOT / "logs" / "meta_agent"
 
 SOUNDSCAPE_LABELS = DATA_DIR / "train_soundscapes_labels.csv"
 TRAIN_SOUNDSCAPES = DATA_DIR / "train_soundscapes"
 
-BIRDNET_VAL_CACHE = CACHE_DIR / "val_emb1024.npz"
-META_VAL_CACHE    = META_LOGS / "common_val.npz"
 SOUNDSCAPE_LEADERBOARD = META_LOGS / "soundscape_leaderboard.json"
 ARCH_SEARCH_1A_RESULTS = META_LOGS / "arch_search_1a_results.json"
 ARCH_SEARCH_1B_RESULTS = META_LOGS / "arch_search_1b_results.json"
@@ -101,13 +96,6 @@ CNN_ARCH_1C_RESULTS = META_LOGS / "cnn_arch_search_1c_results.json"
 CNN_ARCH_1D_RESULTS = META_LOGS / "cnn_arch_search_1d_results.json"
 CNN_ARCH_1E_RESULTS = META_LOGS / "cnn_arch_search_1e_results.json"
 CNN_PSEUDO_LABELS_NPZ = META_LOGS / "cnn_cache" / "pseudo_labels.npz"
-BIRDNET_SHARED_VAL_CACHE = META_LOGS / "birdnet_cache" / "val_emb.npz"
-BIRDNET_FINAL_DIR = META_LOGS / "birdnet" / "final"
-BIRDNET_ARCH_1B_RESULTS = META_LOGS / "birdnet_arch_search_1b_results.json"
-BIRDNET_ARCH_1C_RESULTS = META_LOGS / "birdnet_arch_search_1c_results.json"
-BIRDNET_ARCH_1D_RESULTS = META_LOGS / "birdnet_arch_search_1d_results.json"
-BIRDNET_ARCH_1E_RESULTS = META_LOGS / "birdnet_arch_search_1e_results.json"
-BIRDNET_PSEUDO_LABELS_NPZ = META_LOGS / "birdnet_cache" / "pseudo_labels.npz"
 TOURNAMENT_RESULTS = META_LOGS / "tournament_results.json"
 ARCH_SEARCH_1D_RESULTS = META_LOGS / "arch_search_1d_results.json"
 ARCH_SEARCH_1E_RESULTS = META_LOGS / "arch_search_1e_results.json"
@@ -420,7 +408,7 @@ def _stage_1d_embed_cap(config: dict, cfg: dict) -> int | None:
 
 
 def _embed_max_samples(config: dict) -> int | None:
-    """Cap audio→embedding cache builds (Perch/BirdNET) during meta-agent search."""
+    """Cap audio→embedding cache builds (Perch) during meta-agent search."""
     v = _meta_cfg(config).get("arch_search_embed_max_samples")
     if v is None:
         v = config.get("perch", {}).get("max_train_samples")
@@ -441,13 +429,8 @@ def _track_order(config: dict) -> list[str]:
     """Order in which full track pipelines run (one track finished before the next starts)."""
     meta = _meta_cfg(config)
     raw = meta.get("track_order", ["cnn", "perch"])
-    valid = {"cnn", "birdnet", "perch"}
-    excluded = {str(t).lower() for t in (meta.get("excluded_tracks") or [])}
-    order = [
-        str(t).lower()
-        for t in raw
-        if str(t).lower() in valid and str(t).lower() not in excluded
-    ]
+    valid = {"cnn", "perch"}
+    order = [str(t).lower() for t in raw if str(t).lower() in valid]
     return order or ["cnn", "perch"]
 
 
@@ -455,7 +438,6 @@ def _track_iterations(config: dict, track: str) -> int:
     meta = _meta_cfg(config)
     keys = {
         "cnn": "cnn_iterations",
-        "birdnet": "birdnet_iterations",
         "perch": "perch_iterations",
     }
     return int(meta.get(keys[track], 0))
@@ -520,14 +502,6 @@ def _track_active(config: dict, track: str, pipeline: str) -> bool:
             }[stage](config).get("enabled", False)
             for stage in ("1b", "1c", "1d", "1e")
         )
-    if track == "birdnet":
-        if _track_iterations(config, track) > 0:
-            return True
-        return any(
-            _pipeline_includes_stage(pipeline, stage)
-            and _birdnet_stage_cfg(config, f"birdnet_stage_{stage}").get("enabled", False)
-            for stage in ("1b", "1c", "1d", "1e")
-        )
     return False
 
 
@@ -536,7 +510,7 @@ def run_stage_1a_for_track(
     config: dict,
     suite: SoundscapeEvalSuite,
 ) -> dict | None:
-    """Stage 1a architecture search for a single track (CNN / birdnet / perch)."""
+    """Stage 1a architecture search for a single track (CNN or Perch)."""
     track = track.lower()
     iters = _track_iterations(config, track)
     if iters <= 0:
@@ -559,8 +533,6 @@ def run_stage_1a_for_track(
 
     if track == "cnn":
         runs = [_run_cnn_baseline_1a(config, b, per, cnn_max, suite) for b in baselines]
-    elif track == "birdnet":
-        runs = [_run_birdnet_baseline_1a(config, b, per, embed_frac, suite) for b in baselines]
     elif track == "perch":
         runs = [
             _run_perch_baseline_1a(config, b, per, embed_frac, embed_max, suite)
@@ -576,11 +548,6 @@ def run_stage_1a_for_track(
         if track == "cnn":
             print(
                 f"\n  ★ CNN 1a winner: aug={winner.get('aug_baseline')}  "
-                f"{format_soundscape_metrics_line(macro_ap=sc.get('macro_average_precision'), macro_auc=sc.get('competition_macro_auc'), median_auc=sc.get('median_per_class_auc'), ranking_metric=metric)}"
-            )
-        elif track == "birdnet":
-            print(
-                f"\n  ★ BirdNET 1a winner: aug={winner.get('aug_baseline')}  "
                 f"{format_soundscape_metrics_line(macro_ap=sc.get('macro_average_precision'), macro_auc=sc.get('competition_macro_auc'), median_auc=sc.get('median_per_class_auc'), ranking_metric=metric)}"
             )
         else:
@@ -670,41 +637,6 @@ def _run_perch_track_post_1a(
             )
 
 
-def _birdnet_stage_cfg(config: dict, key: str) -> dict:
-    return dict(_meta_cfg(config).get(key) or {})
-
-
-def _run_birdnet_track_post_1a(
-    config: dict, suite: SoundscapeEvalSuite, max_stage: str
-) -> None:
-    if _stage_included(max_stage, "1b") and _birdnet_stage_cfg(config, "birdnet_stage_1b").get(
-        "enabled", False
-    ):
-        from meta_birdnet_stages import run_stage_1b_birdnet_refine
-
-        run_stage_1b_birdnet_refine(config, suite)
-    if _stage_included(max_stage, "1c") and _birdnet_stage_cfg(config, "birdnet_stage_1c").get(
-        "enabled", False
-    ):
-        from meta_birdnet_stages import run_stage_1c_birdnet_aug_search
-
-        run_stage_1c_birdnet_aug_search(config, suite)
-    if _stage_included(max_stage, "1d") and _birdnet_stage_cfg(config, "birdnet_stage_1d").get(
-        "enabled", False
-    ):
-        if not _skip_if_completed(config, BIRDNET_ARCH_1D_RESULTS, "BirdNET 1d"):
-            from meta_birdnet_stages import run_stage_1d_birdnet_final_train
-
-            run_stage_1d_birdnet_final_train(config)
-    if _stage_included(max_stage, "1e") and _birdnet_stage_cfg(config, "birdnet_stage_1e").get(
-        "enabled", False
-    ):
-        if not _skip_if_completed(config, BIRDNET_ARCH_1E_RESULTS, "BirdNET 1e"):
-            from meta_birdnet_stages import run_stage_1e_birdnet_pseudo_refine
-
-            run_stage_1e_birdnet_pseudo_refine(config, suite)
-
-
 def _run_track_post_1a(
     track: str,
     config: dict,
@@ -713,14 +645,12 @@ def _run_track_post_1a(
 ) -> None:
     if track == "cnn":
         _run_cnn_track_post_1a(config, suite, max_stage)
-    elif track == "birdnet":
-        _run_birdnet_track_post_1a(config, suite, max_stage)
     elif track == "perch":
         _run_perch_track_post_1a(config, suite, max_stage)
 
 
 def _collect_tournament_candidate(track: str, config: dict, metric: str) -> dict | None:
-    """Best sample metric for a track after aug search (1c; BirdNET falls back to 1a)."""
+    """Best sample metric for a track after aug search (stage 1c)."""
     track = track.lower()
     checkpoint = "1c"
     winner: dict | None = None
@@ -762,31 +692,35 @@ def _collect_tournament_candidate(track: str, config: dict, metric: str) -> dict
                 if p.exists():
                     locked_arch_path = str(p)
                     break
-    elif track == "birdnet":
-        checkpoint = "1c"
-        results_path = BIRDNET_ARCH_1C_RESULTS
-        if not results_path.exists():
-            checkpoint = "1a"
-            if not ARCH_SEARCH_1A_RESULTS.exists():
-                return None
-            try:
-                summary = json.loads(ARCH_SEARCH_1A_RESULTS.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                return None
-            winner = (summary.get("tracks") or {}).get("birdnet", {}).get("winner")
-        else:
-            try:
-                summary = json.loads(results_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                return None
-            winner = summary.get("winner")
-            locked = summary.get("locked_head_code")
-            if locked:
-                locked_arch_path = str(locked)
-            elif winner:
-                p = Path(winner.get("memory_dir", "")) / "best_head_code.py"
-                if p.exists():
-                    locked_arch_path = str(p)
+        if not winner:
+            tcfg = _meta_cfg(config).get("tournament") or {}
+            if tcfg.get("fallback_to_1b_on_1c_miss", True):
+                rw = summary.get("refine_winner_1b") or {}
+                mem_dir = rw.get("memory_dir")
+                primary_1b = rw.get("ranking_value")
+                if primary_1b is None:
+                    sc1b = rw.get("score") or {}
+                    primary_1b = _primary_value_from_score(sc1b, metric)
+                if mem_dir and primary_1b is not None:
+                    winner = {
+                        **rw,
+                        "memory_dir": mem_dir,
+                        "aug_baseline": rw.get("aug_baseline"),
+                        "aug_preset": rw.get("aug_baseline"),
+                        "score": rw.get("score"),
+                        "checkpoint_fallback": "1b",
+                    }
+                    if locked_arch_path is None:
+                        locked_head = summary.get("locked_head_code")
+                        if locked_head:
+                            locked_arch_path = str(locked_head)
+                        else:
+                            for name in ("best_head_code.py", "best_model_slot.py"):
+                                p = Path(mem_dir) / name
+                                if p.exists():
+                                    locked_arch_path = str(p)
+                                    break
+                    checkpoint = "1b"
     else:
         return None
 
@@ -804,13 +738,6 @@ def _collect_tournament_candidate(track: str, config: dict, metric: str) -> dict
                 score = sc.to_dict()
         elif mem_dir and track == "perch":
             sc = _soundscape_suite(config).score_perch(Path(mem_dir))
-            if sc:
-                primary = sc.primary_value
-                score = sc.to_dict()
-        elif mem_dir and track == "birdnet":
-            sc = _soundscape_suite(config).score_birdnet_mem_dir(
-                Path(mem_dir), val_cache=BIRDNET_SHARED_VAL_CACHE
-            )
             if sc:
                 primary = sc.primary_value
                 score = sc.to_dict()
@@ -842,6 +769,10 @@ def _collect_tournament_candidate(track: str, config: dict, metric: str) -> dict
                     score["competition_macro_auc"] = info.get("macro_roc_auc")
                 if score.get("median_per_class_auc") is None:
                     score["median_per_class_auc"] = info.get("median_per_class_auc")
+                if score.get("train_loss") is None:
+                    score["train_loss"] = info.get("train_loss")
+                if score.get("val_loss") is None:
+                    score["val_loss"] = info.get("val_loss")
             except (json.JSONDecodeError, OSError):
                 pass
 
@@ -858,6 +789,8 @@ def _collect_tournament_candidate(track: str, config: dict, metric: str) -> dict
         "macro_roc_auc": macro_auc,
         "competition_macro_auc": macro_auc,
         "median_per_class_auc": median_auc,
+        "train_loss": score.get("train_loss") or winner.get("train_loss"),
+        "val_loss": score.get("val_loss") or winner.get("val_loss"),
         "aug_preset": winner.get("aug_preset") or winner.get("aug_baseline"),
         "aug_baseline": winner.get("aug_baseline"),
         "trial_id": trial_id,
@@ -878,14 +811,18 @@ def _pick_global_tournament_winner(
 
 
 def _tournament_metrics_line(row: dict, metric: str) -> str:
-    """Same display as stage 1b/1c model selection: macro_AP | macro_AUC | median_AUC."""
+    """Same display as stage 1b/1c: macro_AP | macro_AUC | median_AUC | train/val loss."""
     ap = row.get("macro_average_precision")
     auc = row.get("competition_macro_auc") or row.get("macro_roc_auc")
     med = row.get("median_per_class_auc")
+    tl = row.get("train_loss")
+    vl = row.get("val_loss")
     return format_soundscape_metrics_line(
         macro_ap=float(ap) if ap is not None else None,
         macro_auc=float(auc) if auc is not None else None,
         median_auc=float(med) if med is not None else None,
+        train_loss=float(tl) if tl is not None else None,
+        val_loss=float(vl) if vl is not None else None,
         ranking_metric=metric,
         mark_ranking=True,
     )
@@ -897,7 +834,7 @@ def _print_tournament_final_comparison(
     metric: str,
     global_winner: dict | None = None,
 ) -> None:
-    """Print each track's best model (CNN / BirdNET / Perch) with full soundscape metrics."""
+    """Print each track's best model (CNN / Perch) with full soundscape metrics."""
     order = _track_order(config)
     by_track = {str(c.get("track", "")).lower(): c for c in candidates}
     ranked = sorted(
@@ -1120,19 +1057,6 @@ def run_staged_finalize_winner(
         if _stage_1e_cfg(config).get("enabled", True):
             if not _skip_if_completed(config, ARCH_SEARCH_1E_RESULTS, "Perch 1e finalize"):
                 run_stage_1e_pseudo_refine(config, suite)
-    elif track == "birdnet":
-        if _birdnet_stage_cfg(config, "birdnet_stage_1d").get("enabled", True):
-            if not _skip_if_completed(config, BIRDNET_ARCH_1D_RESULTS, "BirdNET 1d"):
-                from meta_birdnet_stages import run_stage_1d_birdnet_final_train
-
-                r = run_stage_1d_birdnet_final_train(config)
-                ok = ok and bool(r.get("success"))
-        if _birdnet_stage_cfg(config, "birdnet_stage_1e").get("enabled", True):
-            if not _skip_if_completed(config, BIRDNET_ARCH_1E_RESULTS, "BirdNET 1e"):
-                from meta_birdnet_stages import run_stage_1e_birdnet_pseudo_refine
-
-                r = run_stage_1e_birdnet_pseudo_refine(config, suite)
-                ok = ok and bool(r.get("success"))
     else:
         print(f"\n  [Finalize] Unknown track: {track}")
         ok = False
@@ -1541,29 +1465,6 @@ def run_phase1_cnn(config: dict, n_iterations: int, suite: SoundscapeEvalSuite) 
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Phase 2 — BirdNET
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_phase1_birdnet(config: dict, n_iterations: int, suite: SoundscapeEvalSuite) -> SoundscapeScore | None:
-    if n_iterations <= 0:
-        print("\n  [Phase 2] BirdNET skipped (birdnet_iterations=0)")
-        return None
-
-    print("\n" + "=" * 60)
-    print(f"  PHASE 2 — BirdNET  ({n_iterations} iterations)")
-    print("=" * 60)
-
-    rc = _run_subprocess("birdnet_agent.py", {"max_iterations": n_iterations}, config)
-    if rc != 0:
-        print("  [Phase 2] BirdNET agent finished with errors.")
-
-    print("  [Phase 2] Soundscape eval on best BirdNET val predictions …")
-    score = suite.score_birdnet_artifacts(BIRDNET_LOGS, BIRDNET_VAL_CACHE)
-    _print_soundscape_score("BirdNET", score)
-    return score
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Phase 2 — Perch
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1591,226 +1492,6 @@ def run_phase2_perch(config: dict, n_iterations: int, suite: SoundscapeEvalSuite
     score = suite.score_perch(PERCH_MEMORY)
     _print_soundscape_score("Perch", score)
     return score
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 3 — Build common val + ensemble search
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _load_perch_onnx(config: dict):
-    import onnxruntime as ort
-    import kagglehub
-    slug      = config.get("perch", {}).get("onnx_dataset", "rishikeshjani/perch-onnx-for-birdclef-2026")
-    onnx_dir  = Path(kagglehub.dataset_download(slug))
-    onnx_path = next(onnx_dir.rglob("*.onnx"))
-    so        = ort.SessionOptions()
-    so.intra_op_num_threads = 4
-    sess      = ort.InferenceSession(str(onnx_path), sess_options=so,
-                                     providers=["CPUExecutionProvider"])
-    inp_name  = sess.get_inputs()[0].name
-    dummy     = np.zeros((1, CLIP_SAMPLES), dtype=np.float32)
-    outs      = sess.run(None, {inp_name: dummy})
-    emb_idx   = next(i for i, o in enumerate(outs) if o.ndim == 2 and o.shape[-1] == PERCH_DIM)
-    return sess, inp_name, emb_idx
-
-
-def _build_perch_head(spec: dict, emb_dim: int, n_classes: int):
-    import tensorflow as tf
-    n_blocks   = int(spec.get("n_blocks",      2))
-    hidden_dim = int(spec.get("hidden_dim",    512))
-    proj_dim   = int(spec.get("proj_dim",      256))
-    drop_block = float(spec.get("dropout_block", 0.3))
-    drop_final = float(spec.get("dropout_final", 0.4))
-    inp = tf.keras.layers.Input(shape=(emb_dim,))
-    x   = tf.keras.layers.BatchNormalization()(inp)
-    x   = tf.keras.layers.Dense(hidden_dim)(x)
-    x   = tf.keras.layers.LayerNormalization()(x)
-    for _ in range(n_blocks):
-        h = tf.keras.layers.Dense(hidden_dim)(x)
-        h = tf.keras.layers.LayerNormalization()(h)
-        h = tf.keras.layers.Activation("gelu")(h)
-        h = tf.keras.layers.Dropout(drop_block)(h)
-        h = tf.keras.layers.Dense(hidden_dim)(h)
-        x = tf.keras.layers.Add()([x, h])
-        x = tf.keras.layers.LayerNormalization()(x)
-    x   = tf.keras.layers.Dense(proj_dim, activation="gelu")(x)
-    x   = tf.keras.layers.Dropout(drop_final)(x)
-    out = tf.keras.layers.Dense(n_classes, activation="sigmoid")(x)
-    return tf.keras.Model(inp, out)
-
-
-def build_common_val(config: dict) -> bool:
-    """
-    Embed the BirdNET soundscape val set with Perch ONNX as well,
-    so both models can be evaluated on the exact same samples.
-    Saves: META_VAL_CACHE with keys X_perch, X_birdnet, y_val.
-    """
-    if META_VAL_CACHE.exists():
-        print(f"  [Common val] Already built: {META_VAL_CACHE}")
-        return True
-
-    if not BIRDNET_VAL_CACHE.exists():
-        print("  [Common val] BirdNET val cache not found — skipping ensemble phase.")
-        return False
-
-    print("  [Common val] Embedding soundscapes with Perch ONNX...")
-    import librosa
-
-    bn        = np.load(str(BIRDNET_VAL_CACHE), allow_pickle=True)
-    X_bn      = bn["X_val"].astype(np.float32)
-    y_val     = bn["y_val"].astype(np.float32)
-    row_ids   = bn["row_ids"].tolist()
-    rid2idx   = {rid: i for i, rid in enumerate(row_ids)}
-
-    sess, inp_name, emb_idx = _load_perch_onnx(config)
-
-    def _hms(t: str) -> int:
-        h, m, s = str(t).split(":")
-        return int(h) * 3600 + int(m) * 60 + int(s)
-
-    lab = pd.read_csv(SOUNDSCAPE_LABELS)
-    grp = (
-        lab.groupby(["filename", "start", "end"], sort=False)["primary_label"]
-        .agg(lambda s: set().union(*[
-            {v.strip() for v in str(x).split(";") if x and str(x) != "nan"} for x in s
-        ]))
-        .reset_index()
-    )
-
-    X_perch_out, X_bn_out, y_out = [], [], []
-    for row in grp.itertuples(index=False):
-        stem    = Path(row.filename).stem
-        end_sec = _hms(row.end)
-        row_id  = f"{stem}_{end_sec}"
-        if row_id not in rid2idx:
-            continue
-        fp = TRAIN_SOUNDSCAPES / row.filename
-        if not fp.exists():
-            continue
-        start_sec = _hms(row.start)
-        duration  = end_sec - start_sec
-        try:
-            wav, _ = librosa.load(str(fp), sr=SR, mono=True,
-                                  offset=start_sec, duration=float(duration))
-        except Exception:
-            continue
-        n   = int(duration * SR)
-        wav = wav[:n] if len(wav) > n else np.pad(wav, (0, n - len(wav)))
-        # Central 5-second clip
-        if len(wav) >= CLIP_SAMPLES:
-            s   = (len(wav) - CLIP_SAMPLES) // 2
-            clip = wav[s: s + CLIP_SAMPLES]
-        else:
-            clip = np.pad(wav, (0, CLIP_SAMPLES - len(wav)))
-        clip = clip.astype(np.float32)
-
-        outs = sess.run(None, {inp_name: clip[np.newaxis, :]})
-        X_perch_out.append(outs[emb_idx][0])
-        X_bn_out.append(X_bn[rid2idx[row_id]])
-        y_out.append(y_val[rid2idx[row_id]])
-
-    if not X_perch_out:
-        print("  [Common val] No aligned samples found.")
-        return False
-
-    META_LOGS.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(str(META_VAL_CACHE),
-                        X_perch   = np.stack(X_perch_out).astype(np.float32),
-                        X_birdnet = np.stack(X_bn_out).astype(np.float32),
-                        y_val     = np.stack(y_out).astype(np.float32))
-    print(f"  [Common val] {len(X_perch_out)} aligned samples saved → {META_VAL_CACHE}")
-    return True
-
-
-def run_phase3_ensemble(
-    config: dict,
-    n_iterations: int,
-    suite: SoundscapeEvalSuite,
-    perch_score: SoundscapeScore | None,
-    birdnet_score: SoundscapeScore | None,
-) -> dict:
-    if n_iterations <= 0:
-        print("\n  [Phase 4] Ensemble skipped (ensemble_iterations=0)")
-        return {}
-
-    metric = suite.primary_metric
-    print("\n" + "=" * 60)
-    print(f"  PHASE 4 — Ensemble  ({n_iterations} blend weights)")
-    p_val = perch_score.primary_value if perch_score else 0.0
-    b_val = birdnet_score.primary_value if birdnet_score else 0.0
-    print(f"  Perch {metric}={p_val:.5f}  BirdNET {metric}={b_val:.5f}")
-    print("=" * 60)
-
-    META_LOGS.mkdir(parents=True, exist_ok=True)
-
-    print("  Building aligned soundscape predictions for blend search …")
-    y_true = suite.y_true
-    perch_preds = suite.aligned_perch_preds(PERCH_MEMORY)
-    birdnet_preds = suite.aligned_birdnet_preds(BIRDNET_LOGS, BIRDNET_VAL_CACHE)
-    if birdnet_preds is None:
-        print("  [Phase 4] BirdNET val preds missing — skipping ensemble.")
-        return {}
-
-    perch_self = suite.score_arrays(perch_preds)
-    bn_self = suite.score_arrays(birdnet_preds)
-    print(f"  Perch alone:   {format_soundscape_score(perch_self)}")
-    print(f"  BirdNET alone: {format_soundscape_score(bn_self)}")
-
-    total = perch_self.primary_value + bn_self.primary_value
-    w_start = (
-        round(perch_self.primary_value / total, 2) if total > 0 else 0.5
-    )
-
-    n_blend = max(1, int(n_iterations))
-    grid_n = max(n_blend, 9)
-    candidates = sorted({round(float(w), 4) for w in np.linspace(0.01, 0.99, grid_n)})
-    candidates = sorted(candidates, key=lambda w: abs(w - w_start))[:n_blend]
-
-    results: list[dict] = []
-    for i, w in enumerate(candidates, 1):
-        blended = w * perch_preds + (1.0 - w) * birdnet_preds
-        ap, n_scored = macro_average_precision(y_true, blended)
-        auc, _ = competition_macro_auc(y_true, blended)
-        med, _ = median_per_class_auc(y_true, blended)
-        primary = primary_score(y_true, blended, metric)
-        print(
-            f"  [{i}/{len(candidates)}] perch_weight={w:.2f}  "
-            f"{format_soundscape_metrics_line(macro_ap=ap, macro_auc=auc, median_auc=med, ranking_metric=metric)}"
-        )
-        results.append({
-            "perch_weight": w,
-            "primary_metric": metric,
-            "primary_value": primary,
-            "macro_average_precision": ap,
-            "competition_macro_auc": auc,
-            "median_per_class_auc": med,
-            "n_scored": n_scored,
-        })
-
-    best = max(results, key=lambda r: r["primary_value"])
-    best_weight = best["perch_weight"]
-    best_primary = best["primary_value"]
-    print(
-        f"\n  [Phase 4] Best blend: perch_weight={best_weight:.2f}  "
-        f"{format_soundscape_metrics_line(macro_ap=best['macro_average_precision'], macro_auc=best['competition_macro_auc'], median_auc=best['median_per_class_auc'], ranking_metric=metric)}"
-    )
-
-    ensemble_cfg = {
-        "primary_metric": metric,
-        "perch_weight": best_weight,
-        "birdnet_weight": round(1.0 - best_weight, 4),
-        "perch_soundscape": perch_self.to_dict(),
-        "birdnet_soundscape": bn_self.to_dict(),
-        "best_ensemble_primary": best_primary,
-        "best_ensemble_macro_ap": best["macro_average_precision"],
-        "best_ensemble_macro_auc": best["competition_macro_auc"],
-        "best_ensemble_median_auc": best["median_per_class_auc"],
-        "all_results": results,
-    }
-    out = META_LOGS / "ensemble_config.json"
-    out.write_text(json.dumps(ensemble_cfg, indent=2), encoding="utf-8")
-    print(f"  Ensemble config saved → {out}")
-    return ensemble_cfg
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2593,67 +2274,6 @@ def run_stage_1e_cnn_pseudo_refine(config: dict, suite: SoundscapeEvalSuite) -> 
     return summary
 
 
-def _run_birdnet_baseline_1a(
-    config: dict,
-    baseline: str,
-    n_iters: int,
-    embed_frac: float,
-    suite: SoundscapeEvalSuite,
-) -> dict:
-    mem_dir = META_LOGS / "birdnet" / baseline
-    cache_dir = META_LOGS / "birdnet_cache" / baseline
-    code_dir = mem_dir / "codes"
-    for d in (mem_dir, cache_dir, code_dir):
-        d.mkdir(parents=True, exist_ok=True)
-    head_train_cap = _meta_cfg(config).get("arch_search_head_train_max_samples")
-    embed_max = _embed_max_samples(config)
-    override = {
-        "meta_aug_preset": baseline,
-        "augmentation": get_audio_embedding_aug(baseline),
-        "birdnet_staged": True,
-        "train_sample_frac": embed_frac,
-        "max_iterations": n_iters,
-        "head_train_max_samples": head_train_cap,
-        "force_rebuild_cache": _meta_cfg(config).get("force_rebuild_embed_cache", False),
-        "birdnet": {
-            "memory_dir": str(mem_dir),
-            "cache_dir": str(cache_dir),
-            "code_dir": str(code_dir),
-            "val_cache_path": str(BIRDNET_SHARED_VAL_CACHE),
-        },
-    }
-    if embed_max is not None:
-        override["max_train_samples"] = embed_max
-    cap_note = f"  |  embed_cap={embed_max}" if embed_max is not None else ""
-    print(f"\n  [BirdNET staged 1a / {baseline}] {describe_baseline(baseline)}")
-    print(
-        f"  memory → {mem_dir}  |  planner rounds={n_iters}  |  embed_frac={embed_frac}{cap_note}"
-    )
-    rc = _run_subprocess("birdnet_agent.py", override, config)
-    score = suite.score_birdnet_mem_dir(mem_dir, val_cache=BIRDNET_SHARED_VAL_CACHE)
-    if score is None:
-        score = suite.score_birdnet_artifacts(mem_dir, BIRDNET_VAL_CACHE)
-    _print_soundscape_score(f"BirdNET/{baseline}", score)
-    arch_type = "unknown"
-    info_path = mem_dir / "best_model_info.json"
-    if info_path.exists():
-        try:
-            arch_type = json.loads(info_path.read_text(encoding="utf-8")).get("spec", {}).get(
-                "arch_type", arch_type
-            )
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {
-        "track": "birdnet",
-        "aug_baseline": baseline,
-        "memory_dir": str(mem_dir),
-        "cache_dir": str(cache_dir),
-        "arch_type": arch_type,
-        "subprocess_rc": rc,
-        "score": score.to_dict() if score else None,
-    }
-
-
 def _run_perch_baseline_1a(
     config: dict,
     baseline: str,
@@ -2868,6 +2488,8 @@ def _load_perch_baseline_champion(aug_baseline: str, mem_dir: Path, metric: str)
                         "spec": spec_info,
                         "macro_average_precision": info.get("macro_average_precision"),
                         "macro_roc_auc": info.get("macro_roc_auc"),
+                        "train_loss": info.get("train_loss"),
+                        "val_loss": info.get("val_loss"),
                         "metrics": info,
                     }
         except (json.JSONDecodeError, TypeError, ValueError):
@@ -2902,6 +2524,8 @@ def _load_perch_baseline_champion(aug_baseline: str, mem_dir: Path, metric: str)
         "macro_average_precision": best_entry.get("macro_average_precision"),
         "macro_roc_auc": best_entry.get("macro_roc_auc"),
         "median_per_class_auc": best_entry.get("median_per_class_auc"),
+        "train_loss": best_entry.get("train_loss"),
+        "val_loss": best_entry.get("val_loss"),
     }
 
 
@@ -3015,10 +2639,14 @@ def _print_stage_1c_locked_head(winner: dict, ranking_metric: str) -> None:
     ap = winner.get("macro_average_precision")
     auc = winner.get("macro_roc_auc")
     med = winner.get("median_per_class_auc")
+    tl = winner.get("train_loss")
+    vl = winner.get("val_loss")
     metrics_line = format_soundscape_metrics_line(
         macro_ap=float(ap) if ap is not None else None,
         macro_auc=float(auc) if auc is not None else None,
         median_auc=float(med) if med is not None else None,
+        train_loss=float(tl) if tl is not None else None,
+        val_loss=float(vl) if vl is not None else None,
         ranking_metric=ranking_metric,
         mark_ranking=True,
     )
@@ -3048,10 +2676,14 @@ def _print_stage_1b_champions(candidates: list[dict], ranking_metric: str) -> No
         ap = c.get("macro_average_precision")
         auc = c.get("macro_roc_auc")
         med = c.get("median_per_class_auc")
+        tl = c.get("train_loss")
+        vl = c.get("val_loss")
         metrics_line = format_soundscape_metrics_line(
             macro_ap=float(ap) if ap is not None else None,
             macro_auc=float(auc) if auc is not None else None,
             median_auc=float(med) if med is not None else None,
+            train_loss=float(tl) if tl is not None else None,
+            val_loss=float(vl) if vl is not None else None,
             ranking_metric=ranking_metric,
             mark_ranking=True,
         )
@@ -3386,6 +3018,68 @@ def _ensure_head_train_clips(
     )
 
 
+def _train_cache_n_rows(train_cache: Path) -> int | None:
+    try:
+        return int(np.load(str(train_cache))["X"].shape[0])
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def _head_train_indices_valid_for_cache(indices_path: Path, train_cache: Path) -> bool:
+    """True when every index is in range for the given train embedding cache."""
+    n_rows = _train_cache_n_rows(train_cache)
+    if n_rows is None or not indices_path.exists():
+        return False
+    try:
+        idx = np.load(str(indices_path))
+    except OSError:
+        return False
+    if idx.size == 0:
+        return False
+    return int(idx.max()) < n_rows and int(idx.min()) >= 0
+
+
+def _resolve_1c_head_train_indices_path(
+    indices_path: Path | None,
+    train_cache: Path | None,
+    *,
+    clip_subset_path: Path | None,
+    embed_subset_only: bool,
+) -> Path | None:
+    """
+    Return fixed row indices for head training only when they can be applied safely.
+
+    - Clip-subset embed: cache rows already match the fixed clip list (no index file).
+    - Full-embed trials: never reuse a global index file (row counts differ per aug).
+    - Legacy full-cache + indices: only when indices match this trial's cache shape.
+    """
+    if clip_subset_path is not None:
+        return None
+    if not embed_subset_only or indices_path is None:
+        return None
+    if train_cache is None or not train_cache.exists():
+        return indices_path
+    if _head_train_indices_valid_for_cache(indices_path, train_cache):
+        return indices_path
+    return None
+
+
+def _1c_trial_indices_path(
+    config: dict,
+    indices_path: Path | None,
+    train_cache: Path,
+    *,
+    clip_subset_path: Path | None,
+) -> Path | None:
+    cfg = _stage_1c_cfg(config)
+    return _resolve_1c_head_train_indices_path(
+        indices_path,
+        train_cache,
+        clip_subset_path=clip_subset_path,
+        embed_subset_only=bool(cfg.get("embed_subset_only", True)),
+    )
+
+
 def _ensure_head_train_indices(
     config: dict,
     source_train_cache: Path,
@@ -3393,11 +3087,24 @@ def _ensure_head_train_indices(
     cap: int | None = None,
     seed: int = 42,
 ) -> Path:
-    """Compute once and reuse the same 2000 head-train row indices across aug search."""
+    """Compute once and reuse the same head-train row indices across aug search."""
     if HEAD_TRAIN_INDICES.exists():
         idx = np.load(HEAD_TRAIN_INDICES)
-        print(f"  [1c] Reusing head-train indices ({len(idx)} rows) → {HEAD_TRAIN_INDICES}")
-        return HEAD_TRAIN_INDICES
+        n_src = _train_cache_n_rows(source_train_cache)
+        if n_src is not None and (
+            int(idx.max()) >= n_src
+            or int(idx.min()) < 0
+            or not _head_train_indices_valid_for_cache(HEAD_TRAIN_INDICES, source_train_cache)
+        ):
+            print(
+                f"  [1c] Stale head-train indices ({len(idx)} rows, max={int(idx.max())}) "
+                f"do not match source cache ({n_src} rows) — recomputing",
+                flush=True,
+            )
+            HEAD_TRAIN_INDICES.unlink(missing_ok=True)
+        else:
+            print(f"  [1c] Reusing head-train indices ({len(idx)} rows) → {HEAD_TRAIN_INDICES}")
+            return HEAD_TRAIN_INDICES
 
     if cap is None:
         cap = _meta_cfg(config).get("arch_search_head_train_max_samples")
@@ -3598,7 +3305,9 @@ def _retry_incomplete_perch_1c_head_trains(
             aug_dict=aug_dict,
             head_code_path=head_code_path,
             head_spec={**head_spec, "aug_preset": preset, "aug_phase": "aug"},
-            indices_path=indices_path if clip_subset_path is None else None,
+            indices_path=_1c_trial_indices_path(
+                config, indices_path, train_cache, clip_subset_path=clip_subset_path
+            ),
             train_cache=train_cache,
             force_rebuild_train=False,
         )
@@ -3937,7 +3646,7 @@ def _run_stage_1c_preset_grid(
         force_rebuild = _need_rebuild_1c_train_cache(
             train_cache,
             clip_subset_path=clip_subset_path,
-            indices_path=indices_path if clip_subset_path is None else indices_path,
+            indices_path=indices_path,
         )
         trials.append(
             _build_1c_trial_payload(
@@ -3945,7 +3654,9 @@ def _run_stage_1c_preset_grid(
                 aug_dict=aug_dict,
                 head_code_path=head_code_path,
                 head_spec=head_spec,
-                indices_path=indices_path if clip_subset_path is None else None,
+                indices_path=_1c_trial_indices_path(
+                    config, indices_path, train_cache, clip_subset_path=clip_subset_path
+                ),
                 train_cache=train_cache,
                 force_rebuild_train=force_rebuild,
             )
@@ -4041,7 +3752,9 @@ def _run_one_llm_aug_trial(
         head_code_path=head_code_path,
         train_cache=train_cache,
         val_cache=val_cache,
-        indices_path=indices_path if clip_subset_path is None else None,
+        indices_path=_1c_trial_indices_path(
+            config, indices_path, train_cache, clip_subset_path=clip_subset_path
+        ),
         mapping_src=winner_mem,
         spec={**head_spec, "aug_preset": preset, "aug_phase": phase},
         aug_dict=aug_dict_from_logged_spec(spec),
@@ -4281,7 +3994,7 @@ def _run_stage_1c_llm_search(
             force_rebuild = _need_rebuild_1c_train_cache(
                 train_cache,
                 clip_subset_path=clip_subset_path,
-                indices_path=indices_path if clip_subset_path is None else indices_path,
+                indices_path=indices_path,
             )
             if bool(_stage_1c_cfg(config).get("force_rebuild_embed_cache", False)):
                 force_rebuild = True
@@ -4291,7 +4004,9 @@ def _run_stage_1c_llm_search(
                     aug_dict=aug_dict,
                     head_code_path=head_code_path,
                     head_spec={**head_spec, "aug_preset": preset, "aug_phase": "aug"},
-                    indices_path=indices_path if clip_subset_path is None else None,
+                    indices_path=_1c_trial_indices_path(
+                        config, indices_path, train_cache, clip_subset_path=clip_subset_path
+                    ),
                     train_cache=train_cache,
                     force_rebuild_train=force_rebuild,
                 )
@@ -4416,11 +4131,6 @@ def run_staged_tournament_resume_phase(
                 )
             else:
                 print("\n  [Tournament resume] Perch — no valid 1c winner after resume.")
-        elif track == "birdnet":
-            cand = _collect_tournament_candidate("birdnet", config, metric)
-            if cand:
-                candidates.append(cand)
-
     global_winner = _pick_global_tournament_winner(candidates, metric)
     _print_tournament_final_comparison(config, candidates, metric, global_winner)
     payload = _save_tournament_results(config, candidates, global_winner)
@@ -5117,7 +4827,7 @@ def save_soundscape_leaderboard(
             "macro_average_precision": ensemble_cfg.get("best_ensemble_macro_ap"),
             "competition_macro_auc": ensemble_cfg.get("best_ensemble_macro_auc"),
             "perch_weight": ensemble_cfg.get("perch_weight"),
-            "birdnet_weight": ensemble_cfg.get("birdnet_weight"),
+            "cnn_weight": ensemble_cfg.get("cnn_weight"),
         })
     rows.sort(key=lambda r: float(r.get("primary_value") or -1.0), reverse=True)
     payload = {
@@ -5154,9 +4864,7 @@ def main():
     meta_cfg        = _meta_cfg(config)
     pipeline        = str(args.pipeline or meta_cfg.get("pipeline", "legacy")).lower()
     cnn_iters       = int(meta_cfg.get("cnn_iterations",        5))
-    birdnet_iters   = int(meta_cfg.get("birdnet_iterations",   10))
     perch_iters     = int(meta_cfg.get("perch_iterations",     10))
-    ensemble_iters  = int(meta_cfg.get("ensemble_iterations",   5))
 
     t0 = time.time()
 
@@ -5281,15 +4989,11 @@ def main():
         print("\n  [Phase 0] EDA skipped (meta_agent.run_eda=false)")
 
     cnn_score = run_phase1_cnn(config, cnn_iters, suite)
-    birdnet_score = run_phase1_birdnet(config, birdnet_iters, suite)
     perch_score = run_phase2_perch(config, perch_iters, suite)
-    ensemble = run_phase3_ensemble(
-        config, ensemble_iters, suite, perch_score, birdnet_score
-    )
 
     save_soundscape_leaderboard(
-        {"cnn": cnn_score, "birdnet": birdnet_score, "perch": perch_score},
-        ensemble,
+        {"cnn": cnn_score, "perch": perch_score},
+        {},
         config,
     )
 
@@ -5303,16 +5007,10 @@ def main():
     print("  META AGENT COMPLETE")
     print(
         f"  Model ranking uses macro_AP on labeled train_soundscapes; "
-        f"also reports macro_AUC and median_AUC (v2 benchmark)"
+        f"also reports macro_AUC, median_AUC, train_loss, val_loss (v2 benchmark)"
     )
     _line(cnn_score, "CNN")
-    _line(birdnet_score, "BirdNET")
     _line(perch_score, "Perch")
-    if ensemble:
-        print(
-            f"  Ensemble: {format_soundscape_metrics_line(macro_ap=ensemble.get('best_ensemble_macro_ap'), macro_auc=ensemble.get('best_ensemble_macro_auc'), median_auc=ensemble.get('best_ensemble_median_auc'), ranking_metric=metric)}  "
-            f"(perch={ensemble['perch_weight']:.2f} / birdnet={ensemble['birdnet_weight']:.2f})"
-        )
     print(f"  Total time: {(time.time()-t0)/60:.1f} min")
     print("=" * 60)
 

@@ -515,6 +515,8 @@ def _promote_cnn_best(
         "macro_average_precision": ap,
         "macro_roc_auc": auc,
         "median_per_class_auc": med,
+        "train_loss": (metrics or {}).get("train_loss"),
+        "val_loss": (metrics or {}).get("val_loss"),
         "iteration": iteration,
         "slot": slot_label,
         "run_id": run_id,

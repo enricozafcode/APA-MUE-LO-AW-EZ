@@ -74,6 +74,16 @@ class ExperimentMemory:
             if success and metrics.get("median_per_class_auc") is not None
             else None
         )
+        train_loss = (
+            float(metrics["train_loss"])
+            if success and metrics.get("train_loss") is not None
+            else None
+        )
+        val_loss = (
+            float(metrics["val_loss"])
+            if success and metrics.get("val_loss") is not None
+            else None
+        )
         soundscape_ap = (
             float(metrics["soundscape_macro_ap"])
             if success and metrics and metrics.get("soundscape_macro_ap") is not None
@@ -86,6 +96,8 @@ class ExperimentMemory:
             "macro_roc_auc": auc,
             "macro_average_precision": ap,
             "median_per_class_auc": med,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
             "soundscape_macro_ap": soundscape_ap,
             "ranking_metric": self.ranking_metric,
             "metrics": metrics or {},
@@ -153,6 +165,8 @@ class ExperimentMemory:
                 "macro_average_precision": r.get("macro_average_precision"),
                 "macro_roc_auc": r.get("macro_roc_auc"),
                 "median_per_class_auc": r.get("median_per_class_auc"),
+                "train_loss": r.get("train_loss"),
+                "val_loss": r.get("val_loss"),
             },
             ranking_metric=self.ranking_metric,
         )
@@ -176,7 +190,8 @@ class ExperimentMemory:
         lines = [
             f"EXPERIMENT HISTORY: {total} runs | {len(ok)} succeeded | {len(fails)} failed",
             f"RANKING METRIC (optimize this): {self.ranking_metric} "
-            f"(also log macro_AUC and median_AUC each run; AP tracks Kaggle LB best)",
+            f"(also log macro_AUC, median_AUC, train_loss, val_loss each run; "
+            f"AP tracks Kaggle LB best)",
             "",
         ]
 

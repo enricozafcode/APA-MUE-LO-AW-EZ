@@ -44,7 +44,11 @@ from evaluator import Evaluator
 from llm_client import LLMClient, llm_response_failed as _llm_response_failed
 from memory import ExperimentMemory
 from perch_memory import PerchExperimentMemory
-from soundscape_evaluator import PRIMARY_META_METRIC, format_metrics_dict
+from soundscape_evaluator import (
+    PRIMARY_META_METRIC,
+    enrich_metrics_with_training_losses,
+    format_metrics_dict,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2331,7 +2335,7 @@ def main():
             patience=max(2, patience // 2), min_lr=1e-6, verbose=0
         ),
     ]
-    head.fit(
+    history = head.fit(
         X_tr, y_tr,
         validation_data=(X_vl, y_vl),
         epochs=epochs,
@@ -2339,6 +2343,17 @@ def main():
         callbacks=callbacks,
         verbose=1,
     )
+    _tl = history.history.get("loss")
+    train_loss = float(_tl[-1]) if _tl else None
+    _vl = history.history.get("val_loss")
+    if _vl:
+        best_i = int(np.argmin(_vl))
+        val_loss = float(_vl[best_i])
+        print(f"BEST_EPOCH_BY_VAL_LOSS: epoch={{best_i + 1}}/{{epochs}} val_loss={{val_loss:.6f}}")
+    else:
+        print("BEST_EPOCH_BY_VAL_LOSS: unavailable (no validation metrics).")
+    if train_loss is not None:
+        print(f"TRAIN_LOSS: {{train_loss:.6f}}")
 
     # Predict on soundscape validation
     head_probs  = head.predict(X_val, batch_size=batch_size, verbose=0)
@@ -2826,7 +2841,7 @@ def run_fixed_head_train(
     if result.success and "EVAL_ARTIFACTS_SAVED" in (result.stdout or ""):
         if y_true_path.exists() and y_pred_path.exists():
             summary = evaluator.evaluate_from_files(y_true_path, y_pred_path)
-            metrics = summary.metrics
+            metrics = enrich_metrics_with_training_losses(summary.metrics, result.stdout or "")
 
     rank_val = _ranking_value_from_metrics(metrics)
     if not quiet:
@@ -2938,6 +2953,8 @@ def _promote_best_head(
                 "macro_average_precision": ap,
                 "macro_roc_auc": auc,
                 "median_per_class_auc": med,
+                "train_loss": metrics.get("train_loss") if metrics else None,
+                "val_loss": metrics.get("val_loss") if metrics else None,
                 "auc": auc,
                 "iteration": iteration,
                 "spec": spec,
@@ -3001,7 +3018,9 @@ def _execute_perch_iteration(
         if result.success and "EVAL_ARTIFACTS_SAVED" in (result.stdout or ""):
             if y_true_path.exists() and y_pred_path.exists():
                 summary = evaluator.evaluate_from_files(y_true_path, y_pred_path)
-                metrics = summary.metrics
+                metrics = enrich_metrics_with_training_losses(
+                    summary.metrics, result.stdout or ""
+                )
             break
 
         error_msg = (result.stderr or "")[-1500:]
@@ -3062,6 +3081,8 @@ def _promote_if_best(
                 "macro_average_precision": ap,
                 "macro_roc_auc": auc,
                 "median_per_class_auc": med,
+                "train_loss": metrics.get("train_loss") if metrics else None,
+                "val_loss": metrics.get("val_loss") if metrics else None,
                 "auc": auc,
                 "iteration": iteration,
                 "slot": slot_label,
@@ -3605,7 +3626,7 @@ def run(config: dict) -> None:
         )
     print(
         f"  Ranking metric   : {ranking_metric} "
-        f"(each run logs macro_AP, macro_AUC, median_AUC)"
+        f"(each run logs macro_AP, macro_AUC, median_AUC, train_loss, val_loss)"
     )
     prior = memory.total()
     if prior:
@@ -3686,7 +3707,9 @@ def run(config: dict) -> None:
         if _bl_result.success and "EVAL_ARTIFACTS_SAVED" in (_bl_result.stdout or ""):
             if y_true_path.exists() and y_pred_path.exists():
                 _bl_summary  = evaluator.evaluate_from_files(y_true_path, y_pred_path)
-                _bl_metrics  = _bl_summary.metrics
+                _bl_metrics = enrich_metrics_with_training_losses(
+                    _bl_summary.metrics, _bl_result.stdout or ""
+                )
         print(f"  [Baseline] {_format_iteration_metrics(_bl_metrics)}")
         if not _bl_result.success and _bl_result.stderr:
             print(f"  [Baseline error] {_bl_result.stderr[-400:]}")
