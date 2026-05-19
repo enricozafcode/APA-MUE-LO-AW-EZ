@@ -1,0 +1,2986 @@
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  BirdCLEF Meta-Agent — Run Roadmap                         ║
+  ║                                                            ║
+  ║  pipeline: staged_tournament                               ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  1. Phase 0 — EDA (dataset brief for researchers)
+  2. Phase A — Tournament on sample data: CNN → PERCH (1a arch search → 1b refine → 1c aug); metric: macro_average_precision
+  3. Phase B — Finalize global winner (1d full train → 1e pseudo-label)
+  4. Artifacts: logs/meta_agent/, submission/, tournament_results.json
+
+
+  Ranking metric: macro_average_precision on labeled train_soundscapes
+
+============================================================
+  TOURNAMENT PHASE A — stop after best aug on sample (stage 1c)
+  Track order: cnn → perch
+============================================================
+
+============================================================
+  PHASE 0 — Autonomous EDA
+============================================================
+  EDA timeouts: script=600s per run  |  LLM=600s  |  codegen wall=7200s
+
+============================================================
+  PHASE EDA: DATA EXPLORATION
+============================================================
+  [EDA] Iterative exploration: 10 iteration(s), 5 fix(es) each  |  train.csv rows=35549
+  [EDA] Running hardcoded base script (sections 1–4) …
+  [EDA base] Finished in 0.4s  (exit=0, stdout=1671 chars)
+
+  [EDA] Exploration 1/10 — SECTION 5 — MULTI-LABEL …
+  [EDA iter-1] Fix attempt 1/5 — asking LLM …
+  [EDA iter-1] Run finished in 0.2s  (exit=0, stdout=66 chars)
+  [EDA iter-1] Success.
+
+  [EDA] Exploration 2/10 — SECTION 6 — TAXONOMY …
+  [EDA iter-2] Fix attempt 1/5 — asking LLM …
+  [EDA iter-2] Run finished in 0.2s  (exit=0, stdout=207 chars)
+  [EDA iter-2] Success.
+
+  [EDA] Exploration 3/10 — SECTION 7 — SOUNDSCAPES …
+  [EDA iter-3] Fix attempt 1/5 — asking LLM …
+  [EDA iter-3] Run finished in 0.3s  (exit=0, stdout=119 chars)
+  [EDA iter-3] Success.
+
+  [EDA] Exploration 4/10 — SECTION 8 — FOCAL COVERAGE GAP …
+  [EDA iter-4] Fix attempt 1/5 — asking LLM …
+  [EDA iter-4] Run finished in 0.0s  (exit=1, stdout=0 chars)
+  [EDA iter-4] Failed — feeding stderr back …
+  [EDA iter-4] Fix attempt 2/5 — asking LLM …
+  [EDA iter-4] Run finished in 0.2s  (exit=0, stdout=423 chars)
+  [EDA iter-4] Success.
+
+  [EDA] Exploration 5/10 — SECTION 9 — AUDIO SAMPLES …
+  [EDA iter-5] Fix attempt 1/5 — asking LLM …
+  [EDA iter-5] Run finished in 0.1s  (exit=0, stdout=2734 chars)
+  [EDA iter-5] Success.
+
+  [EDA] Exploration 6/10 — SECTION 10 — LONG-TAIL …
+  [EDA iter-6] Fix attempt 1/5 — asking LLM …
+  [EDA iter-6] Run finished in 0.1s  (exit=0, stdout=276 chars)
+  [EDA iter-6] Success.
+
+  [EDA] Exploration 7/10 — SECTION 11 — COLLECTION × RATING …
+  [EDA iter-7] Fix attempt 1/5 — asking LLM …
+  [EDA iter-7] Run finished in 0.0s  (exit=1, stdout=33 chars)
+  [EDA iter-7] Failed — feeding stderr back …
+  [EDA iter-7] Fix attempt 2/5 — asking LLM …
+  [EDA iter-7] Run finished in 0.1s  (exit=0, stdout=76 chars)
+  [EDA iter-7] Success.
+
+  [EDA] Exploration 8/10 — SECTION 12 — SOUNDSCAPE DENSITY …
+  [EDA iter-8] Fix attempt 1/5 — asking LLM …
+  [EDA iter-8] Run finished in 0.1s  (exit=0, stdout=492 chars)
+  [EDA iter-8] Success.
+
+  [EDA] Exploration 9/10 — SECTION 13 — LAT/LON …
+  [EDA iter-9] Fix attempt 1/5 — asking LLM …
+  [EDA iter-9] Run finished in 0.1s  (exit=1, stdout=0 chars)
+  [EDA iter-9] Failed — feeding stderr back …
+  [EDA iter-9] Fix attempt 2/5 — asking LLM …
+  [EDA iter-9] Run finished in 0.2s  (exit=0, stdout=131 chars)
+  [EDA iter-9] Success.
+
+  [EDA] Exploration 10/10 — SECTION 14 — FOLLOW-UP …
+  [EDA iter-10] Fix attempt 1/5 — asking LLM …
+  [EDA iter-10] Run finished in 4.6s  (exit=0, stdout=45333 chars)
+  [EDA iter-10] Success.
+
+  [EDA] Iterative exploration done: base OK, 10/10 LLM section(s) succeeded.
+  Raw EDA output saved → eda_raw_output.txt
+  Asking LLM to summarise EDA findings …
+  EDA summary saved → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/eda/eda_summary.txt
+  Asking LLM to write 2-sentence EDA brief from summary …
+  EDA brief saved → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/eda/eda_brief.txt
+============================================================
+  [Phase 0] EDA brief ready (363 chars, cap 600) → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/eda/eda_brief.txt
+
+  ▼ SECTION SUMMARY — Phase 0 — EDA
+  ──────────────────────────────────────────────────────────────
+    · Brief length: 363 chars
+    · Logs: /Users/enricozafiris/Desktop/NIGHT
+    · 18051905/logs/eda
+  ──────────────────────────────────────────────────────────────
+
+  [CNN] Soundscape mel cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache (64x128)
+  [soundscape cache] 10/66 files
+  [soundscape cache] 20/66 files
+  [soundscape cache] 30/66 files
+  [soundscape cache] 40/66 files
+  [soundscape cache] 50/66 files
+  [soundscape cache] 60/66 files
+  [soundscape cache] saved soundscape_mels_64x128_sr32000_hop512.npz windows=739 shape=(64, 128, 1)
+  [CNN] Focal train cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache preset=high max_samples=1500 (64x128) clip_seed=42
+  [focal manifest] locked 1500 clips (seed=42 max_samples=1500 species=206) → focal_train_clip_manifest_1500_sr32000_seed42.jsonl
+  [focal cache] loaded 1000/1500 clips...
+  [focal cache] loaded 1500/1500 clips...
+  [focal cache] saved focal_train_high_1500_64x128_sr32000.npz clips=1173 species=206 shape=(64, 128, 1)
+  [CNN] Experiment subprocess timeout=1800s  coder LLM timeout=600s
+============================================================
+  CNN STAGED — Explore (1a) | preset=high | rounds=1
+  2 coder runs per researcher call
+============================================================
+
+  ITERATION 0 — Safe CNN baseline
+  → iter_000_baseline_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=1.2 elapsed_s=1.2 eta_s=2.4 loss=0.428263
+  ♥ train: epoch=2/3 epoch_time_s=0.6 elapsed_s=1.8 eta_s=0.9 loss=0.052738
+  ♥ train: epoch=3/3 epoch_time_s=0.6 elapsed_s=2.5 eta_s=0.0 loss=0.038699
+  [Best] NEW BEST macro_AP=0.08376 (ranking) | macro_AUC=0.62679 | median_AUC=0.66615 | train_loss=0.038699 (slot=baseline)
+
+────────────────────────────────────────────────────────────
+  PLANNER ROUND 1/1
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning 2 experiment(s) (1 in memory)...
+
+  ◆ RESEARCHER PLAN [CNN] — explore 1/1
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploring different structural families of CNNs to
+  │  discover diverse architectures for BirdCLEF. The first
+  │  experiment will explore a residual CNN architecture with
+  │  multiple scales and attention pooling, while the second
+  │  experiment will tweak the shallow CNN by adding more
+  │  convolutional layers and changing the filter pattern.
+
+  ┌─ Experiment 1/2  slot=explore  kind=residual_cnn  strategy=explore
+  │reasoning:
+  │  Residual CNNs are known to be effective for learning
+  │  hierarchical features and handling noisy data, which is
+  │  relevant for BirdCLEF.
+  │hypothesis:
+  │  This architecture will improve the model's ability to
+  │  learn complex patterns in noisy jungle audio and detect
+  │  rare species with higher precision.
+  │  arch_type: residual_cnn
+  │  arch_description: A residual CNN with three blocks, each containing a convolutional layer followed by batch normalization and ReLU activation. The first block has 64 filters, the second block has 128 filters, and th…
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 32
+  │  epochs: 15
+  │  dropout: 0.3
+  │  optimizer: adam
+  │  slot: explore
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=tweak  kind=shallow_cnn  strategy=tweak
+  │reasoning:
+  │  Adding more convolutional layers can help the model
+  │  learn more complex features, which may be beneficial for
+  │  detecting rare species in noisy audio.
+  │hypothesis:
+  │  This architecture will improve the model's ability to
+  │  detect rare species with higher precision compared to
+  │  the initial shallow CNN baseline.
+  │  arch_type: shallow_cnn
+  │  arch_description: A shallow CNN with four blocks, each containing a convolutional layer followed by batch normalization and ReLU activation. The first block has 32 filters, the second block has 64 filters, the third…
+  │  strategy: tweak
+  │  learning_rate: 0.001
+  │  batch_size: 32
+  │  epochs: 15
+  │  dropout: 0.3
+  │  optimizer: adam
+  │  slot: tweak
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Code validated.
+  [CNN] Enforced get_training_config(): max_samples=1500 epochs=3 n_mels=None n_frames=None aug_preset=high aug_prob=1.0 aug_noise_std=0.012 aug_time_mask=24 aug_freq_mask=12
+  → iter_001_explore_a1  (training + soundscape eval…)
+  [iter_001_explore_a1] Traceback (most recent call last):
+  [iter_001_explore_a1]   File "/Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn/high/codes/iter_001_explore_a1.py", line 518, in <module>
+  [iter_001_explore_a1]     main()
+  [iter_001_explore_a1]   File "/Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn/high/codes/iter_001_explore_a1.py", line 415, in main
+  [iter_001_explore_a1]     model = build_model(X_train.shape[1:], len(species_cols))
+  [iter_001_explore_a1]             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  [iter_001_explore_a1]   File "/Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn/high/codes/iter_001_explore_a1.py", line 118, in build_model
+  [iter_001_explore_a1]     if get_training_config()['batch_norm']:
+  [iter_001_explore_a1]        ~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  [iter_001_explore_a1] KeyError: 'batch_norm'
+    Attempt 1 failed — requesting LLM fix (coder timeout=600s)…
+    (no TRAIN_* lines in log — failure likely before/during setup)
+    [LLM fix] done in 30.8s
+  → iter_001_explore_a2  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=1217.8 elapsed_s=1217.9 eta_s=2435.7 loss=0.265688
+  [iter_001_explore_a2] 37/37 - 1218s - 33s/step - loss: 0.2657
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  BirdCLEF Meta-Agent — Run Roadmap                         ║
+  ║                                                            ║
+  ║  pipeline: staged_tournament                               ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  1. Phase 0 — EDA (dataset brief for researchers)
+  2. Phase A — Tournament on sample data: CNN → PERCH (1a arch search → 1b refine → 1c aug); metric: macro_average_precision
+  3. Phase B — Finalize global winner (1d full train → 1e pseudo-label)
+  4. Artifacts: logs/meta_agent/, submission/, tournament_results.json
+
+
+  Ranking metric: macro_average_precision on labeled train_soundscapes
+
+============================================================
+  TOURNAMENT PHASE A — stop after best aug on sample (stage 1c)
+  Track order: cnn → perch
+============================================================
+
+============================================================
+  PHASE 0 — Autonomous EDA
+============================================================
+  EDA timeouts: script=600s per run  |  LLM=600s  |  codegen wall=7200s
+
+============================================================
+  PHASE EDA: DATA EXPLORATION
+============================================================
+  EDA summary already exists → eda_summary.txt
+  EDA brief already exists — loading from cache.
+============================================================
+  [Phase 0] EDA brief ready (363 chars, cap 600) → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/eda/eda_brief.txt
+
+  ▼ SECTION SUMMARY — Phase 0 — EDA
+  ──────────────────────────────────────────────────────────────
+    · Brief length: 363 chars
+    · Logs: /Users/enricozafiris/Desktop/NIGHT
+    · 18051905/logs/eda
+  ──────────────────────────────────────────────────────────────
+
+  [CNN] Soundscape mel cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache (64x128)
+  [CNN] Focal train cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache preset=high max_samples=1500 (64x128) clip_seed=42
+  [CNN] Experiment subprocess timeout=1800s  coder LLM timeout=600s
+  [Memory] [CNN 1a] Loaded 1 prior run(s) from experiment_memory.jsonl (planner will see full history up to cap)
+============================================================
+  CNN STAGED — Explore (1a) | preset=high | rounds=1
+  2 coder runs per researcher call
+============================================================
+
+────────────────────────────────────────────────────────────
+  PLANNER ROUND 1/1
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning 2 experiment(s) (1 in memory)...
+
+  ◆ RESEARCHER PLAN [CNN] — explore 1/1
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploring different structural families to discover
+  │  diverse CNN topologies for BirdCLEF. The first
+  │  experiment will explore a residual CNN architecture with
+  │  multi-scale branches to capture both local and global
+  │  features effectively. The second experiment will exploit
+  │  the shallow_cnn family by tweaking the number of filters
+  │  and adding batch normalization to potentially improve
+  │  performance.
+
+  ┌─ Experiment 1/2  slot=explore  kind=residual_cnn  strategy=explore
+  │reasoning:
+  │  Residual blocks help in learning identity mappings,
+  │  which can be beneficial for capturing complex features
+  │  in noisy jungle audio.
+  │hypothesis:
+  │  This architecture will improve performance by leveraging
+  │  residual connections and multi-scale branches to better
+  │  capture both local and global features.
+  │  arch_type: residual_cnn
+  │  arch_description: Residual CNN with multi-scale branches. Two Conv2D blocks (32→64 filters) followed by a residual block with two paths (one for downsampling and one for identity connection). Each path includes a Ma…
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 32
+  │  epochs: 10
+  │  dropout: 0.3
+  │  optimizer: adam
+  │  slot: explore
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=tweak  kind=shallow_cnn  strategy=exploit
+  │reasoning:
+  │  Adding batch normalization can help stabilize the
+  │  learning process and potentially improve convergence.
+  │hypothesis:
+  │  Batch normalization will enhance the training stability,
+  │  leading to better performance on labeled
+  │  train_soundscapes.
+  │  arch_type: shallow_cnn
+  │  arch_description: Shallow CNN with batch normalization. Three Conv2D blocks (32→64→128 filters) followed by MaxPooling2D after each block. GlobalAveragePooling before the classifier head.
+  │  strategy: exploit
+  │  learning_rate: 0.001
+  │  batch_size: 32
+  │  epochs: 10
+  │  dropout: 0.3
+  │  optimizer: adam
+  │  slot: tweak
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Issues: ['Need at least 2 Pooling2D layers before global pool (found 0). Use MaxPooling2D(2,2) between conv blocks.', "build_model dry-run failed: 'dropout'"]
+  [Coder] Attempt 2/5...
+  [Coder] Issues: ['build_model dry-run failed: Inputs have incompatible shapes. Received shapes (8, 16, 64) and (16, 32, 64)']
+  [Coder] Attempt 3/5...
+  [Coder] Issues: ['build_model dry-run failed: Inputs have incompatible shapes. Received shapes (16, 32, 64) and (8, 16, 64)']
+  [Coder] Attempt 4/5...
+  [Coder] Issues: ['build_model dry-run failed: Inputs have incompatible shapes. Received shapes (16, 32, 64) and (8, 16, 64)']
+  [Coder] Attempt 5/5...
+  [Coder] Issues: ['build_model dry-run failed: Inputs have incompatible shapes. Received shapes (16, 32, 64) and (8, 16, 64)']
+
+  ◇ explore: FAILED
+  [Coder] Attempt 1/5...
+  [Coder] Issues: ['Conv2D filter count 128 exceeds search cap 64. Use at most 64 filters per block.']
+  [Coder] Attempt 2/5...
+  [Coder] Code validated.
+  [CNN] Enforced get_training_config(): max_samples=1500 epochs=3 n_mels=64 n_frames=128 aug_preset=high aug_prob=1.0 aug_noise_std=0.012 aug_time_mask=24 aug_freq_mask=12
+  → iter_001_tweak_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=3.3 elapsed_s=3.3 eta_s=6.6 loss=0.406855
+  ♥ train: epoch=2/3 epoch_time_s=2.1 elapsed_s=5.5 eta_s=2.7 loss=0.059788
+  ♥ train: epoch=3/3 epoch_time_s=2.2 elapsed_s=7.7 eta_s=0.0 loss=0.037156
+
+  ◇ tweak:  ✓  macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | train_loss=0.037156
+  [Best] NEW BEST macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | train_loss=0.037156 (slot=tweak)
+  [Best so far] macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | train_loss=0.037156
+
+  ▼ SECTION SUMMARY — CNN Stage 1a — Explore
+  ──────────────────────────────────────────────────────────────
+    · Completed 1 planner round(s), preset=high
+    · Best: macro_AP=0.08670 (ranking) | macro_AUC=0.55469 |
+    · median_AUC=0.61768 | train_loss=0.037156
+    · Artifacts: /Users/enricozafiris/Desktop/NIGHT
+    · 18051905/logs/meta_agent/cnn/high
+  ──────────────────────────────────────────────────────────────
+
+
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  Final architecture — CNN                                  ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  arch_type     : shallow_cnn
+  description   : Shallow CNN with batch normalization. Three Conv2D blocks
+  description   : (32→64→128 filters) followed by MaxPooling2D after each
+  description   : block. GlobalAveragePooling before the classifier head.
+  aug_preset    : high
+  learning_rate : 0.001
+  batch_size    : 32
+  epochs        : 3
+  dropout       : 0.3
+  memory_dir    : /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn/high
+
+
+============================================================
+  CNN explore done → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn/high
+============================================================
+============================================================
+
+############################################################
+  TRACK: CNN
+############################################################
+
+============================================================
+  STAGE 1a — CNN architecture search
+  Baselines: high  |  planner rounds/baseline: 1
+  Ranking metric: macro_average_precision
+============================================================
+
+  [CNN staged 1a / high] high: embed[SNR, views=2] | CNN[SNR+spec, prob=1.0, tm=24, fm=12]
+  logs → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn/high  |  planner_rounds=1  |  3 coder runs/round  |  max_samples=1500
+  [CNN/high] macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | n_windows=739 n_classes=75
+
+  ★ CNN 1a winner: aug=high  macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ CNN Stage 1b — Architecture refine                         │
+  └────────────────────────────────────────────────────────────┘
+  [CNN] Experiment subprocess timeout=1800s  coder LLM timeout=600s
+============================================================
+  CNN STAGED — Refine (1b) | locked=shallow_cnn | budget 3+1≤5
+============================================================
+  [CNN] Soundscape mel cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache (64x128)
+  [CNN] Focal train cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache preset=high max_samples=1500 (64x128) clip_seed=42
+
+────────────────────────────────────────────────────────────
+  REFINE ROUND 1 — initial (1/3)
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning 2 experiment(s) (0 in memory)...
+
+  ◆ RESEARCHER PLAN [CNN] — refine 1 (initial (1/3))
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  In this round, we will explore different learning rates
+  │  and batch sizes to see how they affect the model's
+  │  performance. We expect that varying these
+  │  hyperparameters will help us discover more effective
+  │  configurations.
+
+  ┌─ Experiment 1/2  slot=tweak  kind=shallow_cnn  strategy=exploit
+  │reasoning:
+  │  The champion seed spec uses a learning rate of 0.001 and
+  │  a batch size of 32. We will try a lower learning rate
+  │  (0.0005) to see if it helps in converging faster or more
+  │  stably, while keeping the batch size unchanged.
+  │hypothesis:
+  │  Reducing the learning rate might help in achieving
+  │  better convergence without increasing the batch size.
+  │  proposed: epochs=10 (champion 3);
+  │  classifier_hidden_units=256 (champion 128)
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=tweak  kind=shallow_cnn  strategy=exploit
+  │reasoning:
+  │  The champion seed spec uses a learning rate of 0.001 and
+  │  a batch size of 32. We will try a larger batch size (64)
+  │  to see if it improves the model's ability to generalize,
+  │  while keeping the learning rate unchanged.
+  │hypothesis:
+  │  Increasing the batch size might help in better utilizing
+  │  the available data for training.
+  │  proposed: epochs=10 (champion 3);
+  │  classifier_hidden_units=256 (champion 128)
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Issues: ['Conv2D filter count 128 exceeds search cap 64. Use at most 64 filters per block.']
+  [Coder] Attempt 2/5...
+  [Coder] Code validated.
+  [CNN] Enforced get_training_config(): max_samples=1500 epochs=3 n_mels=64 n_frames=128 aug_preset=high aug_prob=1.0 aug_noise_std=0.012 aug_time_mask=24 aug_freq_mask=12
+  → iter_001_tweak_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=3.4 elapsed_s=3.4 eta_s=6.8 loss=0.406855
+  ♥ train: epoch=2/3 epoch_time_s=2.4 elapsed_s=5.8 eta_s=2.9 loss=0.059788
+  ♥ train: epoch=3/3 epoch_time_s=2.5 elapsed_s=8.2 eta_s=0.0 loss=0.037156
+
+  ◇ tweak:  → tied  macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | train_loss=0.037156
+  [Coder] Attempt 1/5...
+  [Coder] Issues: ['Conv2D filter count 128 exceeds search cap 64. Use at most 64 filters per block.']
+  [Coder] Attempt 2/5...
+  [Coder] Code validated.
+  [CNN] Enforced get_training_config(): max_samples=1500 epochs=3 n_mels=64 n_frames=128 aug_preset=high aug_prob=1.0 aug_noise_std=0.012 aug_time_mask=24 aug_freq_mask=12
+  → iter_001_tweak_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=3.1 elapsed_s=3.1 eta_s=6.3 loss=0.406855
+  ♥ train: epoch=2/3 epoch_time_s=2.1 elapsed_s=5.3 eta_s=2.6 loss=0.059788
+  ♥ train: epoch=3/3 epoch_time_s=2.2 elapsed_s=7.4 eta_s=0.0 loss=0.037156
+
+  ◇ tweak:  → tied  macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | train_loss=0.037156
+
+────────────────────────────────────────────────────────────
+  REFINE ROUND 2 — initial (3/3)
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning 2 experiment(s) (2 in memory)...
+
+  ◆ RESEARCHER PLAN [CNN] — refine 2 (initial (3/3))
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  In this round, we will explore different learning rates
+  │  and batch sizes to find the optimal combination for
+  │  better convergence and generalization.
+
+  ┌─ Experiment 1/2  slot=tweak  kind=shallow_cnn  strategy=exploit
+  │reasoning:
+  │  The champion seed spec uses a learning rate of 0.001 and
+  │  a batch size of 32. We will try a higher learning rate
+  │  (0.005) to see if it accelerates convergence, while
+  │  keeping the batch size unchanged.
+  │hypothesis:
+  │  Increasing the learning rate might help in speeding up
+  │  convergence without compromising on generalization.
+  │  proposed: epochs=10 (champion 3);
+  │  classifier_hidden_units=256 (champion 128)
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=tweak  kind=shallow_cnn  strategy=exploit
+  │reasoning:
+  │  The champion seed spec uses a learning rate of 0.001 and
+  │  a batch size of 32. We will try a smaller batch size
+  │  (16) to see if it improves generalization, while keeping
+  │  the learning rate unchanged.
+  │hypothesis:
+  │  Reducing the batch size might help in better utilizing
+  │  the available data for training and potentially
+  │  improving generalization.
+  │  proposed: epochs=10 (champion 3);
+  │  classifier_hidden_units=256 (champion 128)
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Issues: ['Conv2D filter count 128 exceeds search cap 64. Use at most 64 filters per block.']
+  [Coder] Attempt 2/5...
+  [Coder] Code validated.
+  [CNN] Enforced get_training_config(): max_samples=1500 epochs=3 n_mels=64 n_frames=128 aug_preset=high aug_prob=1.0 aug_noise_std=0.012 aug_time_mask=24 aug_freq_mask=12
+  → iter_002_tweak_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=3.2 elapsed_s=3.2 eta_s=6.4 loss=0.406855
+  ♥ train: epoch=2/3 epoch_time_s=2.2 elapsed_s=5.4 eta_s=2.7 loss=0.059788
+  ♥ train: epoch=3/3 epoch_time_s=2.2 elapsed_s=7.6 eta_s=0.0 loss=0.037156
+
+  ◇ tweak:  → tied  macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | train_loss=0.037156
+  [Coder] Attempt 1/5...
+  [Coder] Issues: ['Conv2D filter count 128 exceeds search cap 64. Use at most 64 filters per block.']
+  [Coder] Attempt 2/5...
+  [Coder] Code validated.
+  [CNN] Enforced get_training_config(): max_samples=1500 epochs=3 n_mels=64 n_frames=128 aug_preset=high aug_prob=1.0 aug_noise_std=0.012 aug_time_mask=24 aug_freq_mask=12
+  → iter_002_tweak_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=3.2 elapsed_s=3.2 eta_s=6.4 loss=0.406855
+  ♥ train: epoch=2/3 epoch_time_s=2.2 elapsed_s=5.4 eta_s=2.7 loss=0.059788
+  ♥ train: epoch=3/3 epoch_time_s=2.2 elapsed_s=7.6 eta_s=0.0 loss=0.037156
+
+  ◇ tweak:  → tied  macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | train_loss=0.037156
+  [Refine] No improvement this round — stopping bonus phase.
+
+  ▼ SECTION SUMMARY — CNN Stage 1b — Refine
+  ──────────────────────────────────────────────────────────────
+    · Locked arch: shallow_cnn
+    · Training rounds used: 4/5
+    · Best score: 0.08670
+    · Best run: macro_AP=0.08670 (ranking) | macro_AUC=0.55469
+    · | median_AUC=0.61768 | train_loss=0.037156
+    · Artifacts: .../rank1_high_shallow_cnn
+  ──────────────────────────────────────────────────────────────
+
+
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  Final architecture — CNN                                  ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  arch_type     : shallow_cnn
+  changes       : proposed: classifier_hidden_units=256 (champion 128)
+  description   : shallow_cnn: structure unchanged vs champion;
+  description   : training/regularization tweak only.
+  aug_preset    : high
+  learning_rate : 0.001
+  batch_size    : 32
+  epochs        : 3
+  dropout       : 0.3
+  memory_dir    : /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn/refine/rank1_high_shallow_cnn
+
+
+============================================================
+  CNN refine done | best=0.08670
+============================================================
+
+============================================================
+  CNN STAGED — Step 1b: Refine top-1 from 1a
+============================================================
+
+  [CNN refine 1b / rank 1] aug=high arch=shallow_cnn
+
+  ▼ SECTION SUMMARY — CNN 1b
+  ──────────────────────────────────────────────────────────────
+    · Stage: 1b_cnn_refine
+    · Metric: macro_average_precision
+  ──────────────────────────────────────────────────────────────
+
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ CNN Stage 1c — Augmentation search (sample)                │
+  └────────────────────────────────────────────────────────────┘
+  [CNN] Soundscape mel cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache (64x128)
+  [CNN] Focal train cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache preset=high max_samples=1500 (64x128) clip_seed=42
+  [CNN] Experiment subprocess timeout=1800s  coder LLM timeout=600s
+  → preset_high_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=3.4 elapsed_s=3.4 eta_s=6.9 loss=0.406855
+  ♥ train: epoch=2/3 epoch_time_s=2.2 elapsed_s=5.6 eta_s=2.8 loss=0.059788
+  ♥ train: epoch=3/3 epoch_time_s=2.2 elapsed_s=7.8 eta_s=0.0 loss=0.037156
+  [Best] NEW BEST macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | train_loss=0.037156 (slot=preset_high)
+
+============================================================
+  CNN STAGED — Step 1c: Augmentation search (locked architecture)
+  mode=both  presets=['high']
+============================================================
+  [CNN/1c/champion_1b (high from 1b)] macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | n_windows=739 n_classes=75
+  [CNN/1c/high] macro_AP=0.08670 (ranking) | macro_AUC=0.55469 | median_AUC=0.61768 | n_windows=739 n_classes=75
+
+  [CNN 1c LLM] 3 round(s) × 1 configs / round
+
+  ── CNN 1c LLM round 1/3 ──
+
+  [CnnAugResearcher] Planning 1 config(s) (0 in memory)...
+  [CnnAugResearcher] Parsed preset=llm_a1
+
+  ◆ RESEARCHER PLAN [CNN] — 1c aug round 1
+  ──────────────────────────────────────────────────────────────
+  ┌─ Experiment 1/1  slot=exp-1  kind=llm_a1  strategy=—
+  │  reasoning: —
+  │  hypothesis: —
+  │  preset_name: llm_a1
+  │  audio_anchor: light
+  │  mix_prob: 0.5
+  │  aug_prob: 0.5
+  └──────────────────────────────────────────────────────────
+
+  [CNN] Soundscape mel cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache (64x128)
+  [CNN] Focal train cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache preset=medium max_samples=1500 (64x128) clip_seed=42
+  [focal cache] loaded 500/1500 clips...
+  [focal cache] loaded 1000/1500 clips...
+  [focal cache] loaded 1500/1500 clips...
+  [focal cache] saved focal_train_medium_1500_64x128_sr32000.npz clips=1500 species=206 shape=(64, 128, 1)
+  [CNN] Experiment subprocess timeout=1800s  coder LLM timeout=600s
+  → aug_r01_1_llm_a1_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=4.2 elapsed_s=4.2 eta_s=8.4 loss=0.340948
+  ♥ train: epoch=2/3 epoch_time_s=3.5 elapsed_s=7.6 eta_s=3.8 loss=0.044394
+  ♥ train: epoch=3/3 epoch_time_s=2.9 elapsed_s=10.6 eta_s=0.0 loss=0.035060
+  [Best] NEW BEST macro_AP=0.07348 (ranking) | macro_AUC=0.53288 | median_AUC=0.54680 | train_loss=0.035060 (slot=aug_r01_1_llm_a1)
+  [CNN/1c/llm_a1] macro_AP=0.07348 (ranking) | macro_AUC=0.53288 | median_AUC=0.54680 | n_windows=739 n_classes=75
+
+  ── CNN 1c LLM round 2/3 ──
+
+  [CnnAugResearcher] Planning 1 config(s) (1 in memory)...
+  [CnnAugResearcher] Parse failed — using fallback.
+
+  ◆ RESEARCHER PLAN [CNN] — 1c aug round 2
+  ──────────────────────────────────────────────────────────────
+  ┌─ Experiment 1/1  slot=a1  kind=fallback_r02_medium_a1  strategy=explore
+  │  reasoning: —
+  │hypothesis:
+  │  Use medium audio + perturbed spec baseline (seed=16).
+  │  strategy: explore
+  │  preset_name: fallback_r02_medium_a1
+  │  audio_anchor: medium
+  │  mix_prob: 0.35
+  │  aug_prob: 0.7
+  │  slot: a1
+  └──────────────────────────────────────────────────────────
+
+  [CNN] Soundscape mel cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache (64x128)
+  [CNN] Focal train cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache preset=medium max_samples=1500 (64x128) clip_seed=42
+  [CNN] Experiment subprocess timeout=1800s  coder LLM timeout=600s
+  → aug_r02_1_fallback_r02_medium_a1_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=4.0 elapsed_s=4.1 eta_s=8.1 loss=0.347128
+  ♥ train: epoch=2/3 epoch_time_s=3.1 elapsed_s=7.2 eta_s=3.6 loss=0.047692
+  ♥ train: epoch=3/3 epoch_time_s=2.8 elapsed_s=10.0 eta_s=0.0 loss=0.035130
+  [Best] NEW BEST macro_AP=0.08698 (ranking) | macro_AUC=0.57284 | median_AUC=0.59498 | train_loss=0.035130 (slot=aug_r02_1_fallback_r02_medium_a1)
+  [CNN/1c/fallback_r02_medium_a1] macro_AP=0.08698 (ranking) | macro_AUC=0.57284 | median_AUC=0.59498 | n_windows=739 n_classes=75
+
+  ── CNN 1c LLM round 3/3 ──
+
+  [CnnAugResearcher] Planning 1 config(s) (2 in memory)...
+  [CnnAugResearcher] Parsed preset=llm_a1
+
+  ◆ RESEARCHER PLAN [CNN] — 1c aug round 3
+  ──────────────────────────────────────────────────────────────
+  ┌─ Experiment 1/1  slot=exp-1  kind=llm_a1  strategy=—
+  │  reasoning: —
+  │  hypothesis: —
+  │  preset_name: llm_a1
+  │  audio_anchor: medium
+  │  mix_prob: 0.35
+  │  aug_prob: 0.7
+  └──────────────────────────────────────────────────────────
+
+  [CNN] Soundscape mel cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache (64x128)
+  [CNN] Focal train cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn_cache preset=medium max_samples=1500 (64x128) clip_seed=42
+  [CNN] Experiment subprocess timeout=1800s  coder LLM timeout=600s
+  → aug_r03_1_llm_a1_a1  (training + soundscape eval…)
+  ♥ train: epoch=1/3 epoch_time_s=4.0 elapsed_s=4.1 eta_s=8.1 loss=0.348160
+  ♥ train: epoch=2/3 epoch_time_s=2.8 elapsed_s=6.9 eta_s=3.4 loss=0.045018
+  ♥ train: epoch=3/3 epoch_time_s=2.9 elapsed_s=9.7 eta_s=0.0 loss=0.033492
+  [Best] NEW BEST macro_AP=0.07607 (ranking) | macro_AUC=0.50343 | median_AUC=0.47181 | train_loss=0.033492 (slot=aug_r03_1_llm_a1)
+  [CNN/1c/llm_a1] macro_AP=0.07607 (ranking) | macro_AUC=0.50343 | median_AUC=0.47181 | n_windows=739 n_classes=75
+
+  ★ CNN aug winner: fallback_r02_medium_a1
+
+  ▼ SECTION SUMMARY — CNN 1c
+  ──────────────────────────────────────────────────────────────
+    · Stage: 1c_cnn_aug_search
+    · Metric: macro_average_precision
+    · Winner aug: fallback_r02_medium_a1
+    · Winner arch: —
+    · Score: 0.08698
+    · memory: /Users/enricozafiris/Desktop/NIGHT 18051905/logs
+    · /meta_agent/cnn/aug_search/aug_r02_1_fallback_r02_medium
+    · _a1
+  ──────────────────────────────────────────────────────────────
+
+
+  [Tournament] cnn qualified: macro_average_precision=0.08698
+
+  ▼ SECTION SUMMARY — CNN — tournament sample score
+  ──────────────────────────────────────────────────────────────
+    · macro_average_precision=0.08698
+    · aug=fallback_r02_medium_a1
+    · arch=shallow_cnn
+  ──────────────────────────────────────────────────────────────
+
+  Meta aug baseline: high
+============================================================
+  BirdCLEF Perch Agent — Researcher / Coder Architecture
+============================================================
+  EDA brief injected into Perch prompts (363 chars)
+  [Setup] Locating ONNX model (rishikeshjani/perch-onnx-for-birdclef-2026)...
+  [Setup] ONNX model: /Users/enricozafiris/.cache/kagglehub/datasets/rishikeshjani/perch-onnx-for-birdclef-2026/versions/2/perch_v2.onnx
+  [Setup] Locating Perch labels (google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu)...
+  [Setup] Labels CSV: /Users/enricozafiris/.cache/kagglehub/models/google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu/1/assets/labels.csv
+  [Perch] Loading ONNX session (once per process)...
+  [Perch] ONNX ready — embedding idx=0, logits idx=3
+  [Mapping] Direct: 203/234 | Genus proxy: 4/31 unmapped
+
+  [Setup] Building training embedding cache (runs once, ~30-60 min)...
+  [Cache] Building train cache: 1500 clips (100% stratified per species, cap=1500) → train_emb_high.npz
+    1000/1500 files processed...
+    1500/1500 files processed...
+  [Cache] Saved: X=(1160, 1536)  S=(1160, 234)  y=(1160, 234)
+
+  [Setup] Building validation embedding cache...
+  [Cache] Building val cache: 739 soundscape windows → val_emb.npz
+  [Cache] Saved val: X=(739, 1536)  S=(739, 234)  y=(739, 234)
+
+  Researcher model : qwen2.5-coder:7b
+  Researcher timeout: 600s (then safe-default spec for that iter)
+  Coder model      : qwen2.5-coder:7b
+  Planner rounds   : 5
+  Experiments/round: 2 (~10 coder+train runs, slots: tweak, explore)
+  Head train cap   : 1500 embeddings per iteration (full cache on disk unchanged)
+  Ranking metric   : macro_average_precision (each run logs macro_AP, macro_AUC, median_AUC, train_loss, val_loss)
+  Memory           : fresh start
+============================================================
+  Search training caps: epochs=3 patience=3 (locked during 1a/1b/1c)
+
+────────────────────────────────────────────────────────────
+  ITERATION 0 — Linear probe baseline (single Dense layer)
+────────────────────────────────────────────────────────────
+  [Baseline] macro_AP=0.15306 (ranking) | macro_AUC=0.62386 | median_AUC=0.61597
+
+────────────────────────────────────────────────────────────
+  PLANNER ROUND 1/5
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning next 2 experiments (1 in memory, best macro_AP=0.15306 (ranking) | macro_AUC=0.62386 | median_AUC=0.61597, batch=2, timeout 600s)...
+
+  ◆ RESEARCHER PLAN [PERCH] — PLANNER ROUND 1/5
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploring different structural families to understand
+  │  their performance on this task.
+
+  ┌─ Experiment 1/2  slot=tweak  kind=residual_mlp  strategy=explore
+  │reasoning:
+  │  Residual MLPs are a solid baseline and have shown
+  │  promise in similar tasks.
+  │hypothesis:
+  │  Residual blocks help capture feature dependencies and
+  │  improve performance.
+  │  arch_type: residual_mlp
+  │  arch_description: Dense(1024) stem. Two residual blocks with skip connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout 0.3, Dense(n_classes, sigmoid).
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 30
+  │  dropout: 0.3
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 2
+  │  optimizer: adam
+  │  slot: tweak
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=explore  kind=attention_mlp  strategy=explore
+  │reasoning:
+  │  Attention mechanisms can capture long-range dependencies
+  │  and are useful in noisy environments.
+  │hypothesis:
+  │  Self-attention helps identify rare species by capturing
+  │  context across the audio clip.
+  │  arch_type: attention_mlp
+  │  arch_description: Dense(1024) stem. Multi-head self-attention on projected features (hidden_dim=512). FFN after MHA, residual Add, LayerNorm. Dropout 0.3, Dense(n_classes, sigmoid).
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 30
+  │  dropout: 0.3
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 1
+  │  optimizer: adam
+  │  slot: explore
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+  [Executor] Attempt 1/5 — iter_001_tweak_a1.py ...
+
+  ◇ tweak:  ✓  macro_AP=0.24712 (ranking) | macro_AUC=0.66171 | median_AUC=0.76298
+  [Best] NEW BEST macro_AP=0.24712 (ranking) | macro_AUC=0.66171 | median_AUC=0.76298 (slot=tweak) — head saved to best_head.keras
+  [Coder] Attempt 1/5...
+  [Coder] Issues: ['build_head shape error: ValueError: Inputs have incompatible shapes. Received shapes (1024,) and (512,)']
+  [Coder] Attempt 2/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+  [Executor] Attempt 1/5 — iter_001_explore_a1.py ...
+
+  ◇ explore:  ✓  macro_AP=0.16197 (ranking) | macro_AUC=0.60732 | median_AUC=0.62070
+  [Best so far] macro_AP=0.24712 (ranking) | macro_AUC=0.66171 | median_AUC=0.76298
+
+────────────────────────────────────────────────────────────
+  PLANNER ROUND 2/5
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning next 2 experiments (3 in memory, best macro_AP=0.24712 (ranking) | macro_AUC=0.66171 | median_AUC=0.76298, batch=2, timeout 600s)...
+
+  ◆ RESEARCHER PLAN [PERCH] — PLANNER ROUND 2/5
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Continue exploring different architectural families to
+  │  identify what works best for this task.
+
+  ┌─ Experiment 1/2  slot=tweak  kind=gated_mlp  strategy=explore
+  │reasoning:
+  │  Gated MLPs can help capture feature dependencies and
+  │  improve performance by selectively passing information.
+  │hypothesis:
+  │  Gated MLP routing helps identify rare species in noisy
+  │  soundscapes.
+  │  arch_type: gated_mlp
+  │  arch_description: Dense(1024) stem. Two parallel Dense(hidden_dim) — one linear (value), one sigmoid (gate) — multiplied element-wise, then residual Add. Dropout 0.3, Dense(n_classes, sigmoid).
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.3
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 2
+  │  optimizer: adam
+  │  slot: tweak
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=explore  kind=residual_mlp  strategy=tweak
+  │reasoning:
+  │  Increasing the number of residual blocks can help
+  │  capture more complex feature dependencies.
+  │hypothesis:
+  │  More residual blocks improve performance by capturing
+  │  deeper feature hierarchies.
+  │  arch_type: residual_mlp
+  │  arch_description: Dense(1024) stem. Three residual blocks with skip connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout 0.3, Dense(n_classes, sigmoid).
+  │  strategy: tweak
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.3
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 3
+  │  optimizer: adam
+  │  slot: explore
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+Python(6972) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  [Executor] Attempt 1/5 — iter_002_tweak_a1.py ...
+
+  ◇ tweak:  ✓  macro_AP=0.15704 (ranking) | macro_AUC=0.55798 | median_AUC=0.59048
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+Python(6985) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  [Executor] Attempt 1/5 — iter_002_explore_a1.py ...
+
+  ◇ explore:  ✓  macro_AP=0.26401 (ranking) | macro_AUC=0.65714 | median_AUC=0.78470
+  [Best] NEW BEST macro_AP=0.26401 (ranking) | macro_AUC=0.65714 | median_AUC=0.78470 (slot=explore) — head saved to best_head.keras
+  [Best so far] macro_AP=0.26401 (ranking) | macro_AUC=0.65714 | median_AUC=0.78470
+
+────────────────────────────────────────────────────────────
+  PLANNER ROUND 3/5
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning next 2 experiments (5 in memory, best macro_AP=0.26401 (ranking) | macro_AUC=0.65714 | median_AUC=0.78470, batch=2, timeout 600s)...
+
+  ◆ RESEARCHER PLAN [PERCH] — PLANNER ROUND 3/5
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Continue exploring different architectural families to
+  │  identify promising directions.
+
+  ┌─ Experiment 1/2  slot=tweak  kind=transformer_block  strategy=explore
+  │reasoning:
+  │  Transformers are powerful for capturing long-range
+  │  dependencies and can handle complex data.
+  │hypothesis:
+  │  Transformer-based models will outperform current
+  │  architectures by leveraging self-attention mechanisms.
+  │  arch_type: transformer_block
+  │  arch_description: Dense(1024) stem. Multi-head self-attention on projected features (hidden_dim=512). FFN after MHA, residual Add, LayerNorm. Dropout 0.3, Dense(n_classes, sigmoid).
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.3
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 2
+  │  optimizer: adamw
+  │  slot: tweak
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=explore  kind=residual_mlp  strategy=explore
+  │reasoning:
+  │  Increasing the number of residual blocks can help
+  │  capture more complex feature dependencies.
+  │hypothesis:
+  │  Four residual blocks will improve performance by
+  │  capturing deeper feature hierarchies.
+  │  arch_type: residual_mlp
+  │  arch_description: Dense(1024) stem. Four residual blocks with skip connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout 0.3, Dense(n_classes, sigmoid).
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.3
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 4
+  │  optimizer: adamw
+  │  slot: explore
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Issues: ['build_head shape error: ValueError: Inputs have incompatible shapes. Received shapes (1024,) and (512,)']
+  [Coder] Attempt 2/5...
+  [Coder] Issues: ["build_head shape error: NameError: name 'n_layers' is not defined"]
+  [Coder] Attempt 3/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+Python(7061) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  [Executor] Attempt 1/5 — iter_003_tweak_a1.py ...
+
+  ◇ tweak:  ✓  macro_AP=0.24764 (ranking) | macro_AUC=0.65880 | median_AUC=0.75860
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+Python(7106) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  [Executor] Attempt 1/5 — iter_003_explore_a1.py ...
+
+  ◇ explore:  ✓  macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028
+  [Best] NEW BEST macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028 (slot=explore) — head saved to best_head.keras
+  [Best so far] macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028
+
+────────────────────────────────────────────────────────────
+  PLANNER ROUND 4/5
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning next 2 experiments (7 in memory, best macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028, batch=2, timeout 600s)...
+
+  ◆ RESEARCHER PLAN [PERCH] — PLANNER ROUND 4/5
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploring different architectures and configurations to
+  │  map the performance landscape.
+
+  ┌─ Experiment 1/2  slot=tweak  kind=transformer_block  strategy=explore
+  │reasoning:
+  │  Exploring different architectures and configurations to
+  │  map the performance landscape.
+  │  hypothesis: —
+  │  arch_type: transformer_block
+  │  arch_description: Dense(1024) stem from emb_dim. Reshape (1, 1024), one MultiHeadAttention + FFN + layer_norm, residual, Dropout(0.2), Dense(num_classes, sigmoid).
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.2
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 3
+  │  optimizer: adamw
+  │  slot: tweak
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=explore  kind=mixture_of_experts  strategy=explore
+  │reasoning:
+  │  Exploring different architectures and configurations to
+  │  map the performance landscape.
+  │  hypothesis: —
+  │  arch_type: mixture_of_experts
+  │  arch_description: Dense(1024) stem. 2 expert Dense(1024) branches, Concatenate, Dense(1024) compress, residual Add, layer_norm, Dropout(0.3), Dense(num_classes, sigmoid).
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.3
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 2
+  │  optimizer: adamw
+  │  slot: explore
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+Python(7138) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  [Executor] Attempt 1/5 — iter_004_tweak_a1.py ...
+
+  ◇ tweak:  ✓  macro_AP=0.21842 (ranking) | macro_AUC=0.62683 | median_AUC=0.69713
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+Python(7154) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  [Executor] Attempt 1/5 — iter_004_explore_a1.py ...
+
+  ◇ explore:  ✓  macro_AP=0.22877 (ranking) | macro_AUC=0.62260 | median_AUC=0.67182
+  [Best so far] macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028
+
+────────────────────────────────────────────────────────────
+  PLANNER ROUND 5/5
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning next 2 experiments (9 in memory, best macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028, batch=2, timeout 600s)...
+
+  ◆ RESEARCHER PLAN [PERCH] — PLANNER ROUND 5/5
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploring different architectures and configurations to
+  │  map the performance landscape.
+
+  ┌─ Experiment 1/2  slot=tweak  kind=residual_mlp  strategy=explore
+  │reasoning:
+  │  Exploring different architectures and configurations to
+  │  map the performance landscape.
+  │  hypothesis: —
+  │  arch_type: residual_mlp
+  │  arch_description: residual_mlp: Dense(1024) stem from emb_dim. 3 blocks with gelu, layer_norm, Dropout(0.3), Dense(num_classes, sigmoid). Follow standard shape-safe residual/gated patterns for this family.
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.3
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 3
+  │  optimizer: adamw
+  │  slot: tweak
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=explore  kind=transformer_block  strategy=explore
+  │reasoning:
+  │  Exploring different architectures and configurations to
+  │  map the performance landscape.
+  │  hypothesis: —
+  │  arch_type: transformer_block
+  │  arch_description: Dense(1024) stem from emb_dim. Reshape (1, 1024), one MultiHeadAttention + FFN + layer_norm, residual, Dropout(0.2), Dense(num_classes, sigmoid).
+  │  strategy: explore
+  │  learning_rate: 0.001
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.2
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 2
+  │  optimizer: adamw
+  │  slot: explore
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+Python(7180) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  [Executor] Attempt 1/5 — iter_005_tweak_a1.py ...
+
+  ◇ tweak:  ✓  macro_AP=0.26608 (ranking) | macro_AUC=0.66239 | median_AUC=0.77748
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+Python(7197) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  [Executor] Attempt 1/5 — iter_005_explore_a1.py ...
+
+  ◇ explore: FAILED
+  [Best so far] macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028
+
+============================================================
+  DONE
+  #1 macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028 | Increasing the number of residual blocks can help capture more complex feature d
+  #2 macro_AP=0.26608 (ranking) | macro_AUC=0.66239 | median_AUC=0.77748 | Exploring different architectures and configurations to map the performance land
+  #3 macro_AP=0.26401 (ranking) | macro_AUC=0.65714 | median_AUC=0.78470 | Increasing the number of residual blocks can help capture more complex feature d
+============================================================
+
+  ▼ SECTION SUMMARY — Perch Stage 1a — Explore
+  ──────────────────────────────────────────────────────────────
+    · Best: macro_AP=0.27711 (ranking) | macro_AUC=0.67293 |
+    · median_AUC=0.80028
+    · Artifacts: /Users/enricozafiris/Desktop/NIGHT
+    · 18051905/logs/meta_agent/perch/high
+  ──────────────────────────────────────────────────────────────
+
+
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  Final architecture — PERCH                                ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  arch_type     : residual_mlp
+  description   : Dense(1024) stem. Four residual blocks with skip
+  description   : connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout
+  description   : 0.3, Dense(n_classes, sigmoid).
+  learning_rate : 0.001
+  batch_size    : 256
+  epochs        : 40
+  dropout       : 0.3
+  memory_dir    : /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/high
+
+
+  Final retrain skipped (perch.skip_final_retrain=true).
+  Use logs/perch_memory/best_head.weights.h5 from the search loop.
+
+############################################################
+  TRACK: PERCH
+############################################################
+
+============================================================
+  STAGE 1a — PERCH architecture search
+  Baselines: high  |  planner rounds/baseline: 5
+  Ranking metric: macro_average_precision
+============================================================
+
+  [Perch / high] high: embed[SNR, views=2] | CNN[SNR+spec, prob=1.0, tm=24, fm=12]
+  memory → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/high  |  cache → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch_cache/high  |  embed_frac=1.0 (stratified per species)  |  head_train_cap=1500
+  Perch ONNX: /Users/enricozafiris/.cache/kagglehub/datasets/rishikeshjani/perch-onnx-for-birdclef-2026/versions/2/perch_v2.onnx
+  [Perch] Loading ONNX session (once per process)...
+  [Perch] ONNX ready — embedding idx=0, logits idx=3
+  Loading Perch head: best_head.keras
+  Perch inference: 739 labeled window(s) (embed batch=16)
+Python(7388) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+Python(7389) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  … window 1/739
+  … window 100/739
+  … window 200/739
+  … window 300/739
+  … window 400/739
+  … window 500/739
+  … window 600/739
+  … window 700/739
+  … window 739/739
+  [Perch/high] macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028 | n_windows=739 n_classes=75
+
+  ★ PERCH 1a winner: aug=high
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ Perch Stage 1b — Head refine                               │
+  └────────────────────────────────────────────────────────────┘
+Python(7423) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  Meta aug baseline: high
+============================================================
+  BirdCLEF Perch Agent — Researcher / Coder Architecture
+============================================================
+  EDA brief injected into Perch prompts (363 chars)
+  [Setup] Locating ONNX model (rishikeshjani/perch-onnx-for-birdclef-2026)...
+  [Setup] ONNX model: /Users/enricozafiris/.cache/kagglehub/datasets/rishikeshjani/perch-onnx-for-birdclef-2026/versions/2/perch_v2.onnx
+  [Setup] Locating Perch labels (google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu)...
+  [Setup] Labels CSV: /Users/enricozafiris/.cache/kagglehub/models/google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu/1/assets/labels.csv
+  [Perch] Loading ONNX session (once per process)...
+  [Perch] ONNX ready — embedding idx=0, logits idx=3
+  [Mapping] Direct: 203/234 | Genus proxy: 4/31 unmapped
+  [Cache] Reusing existing train embeddings → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch_cache/high/train_emb_high.npz
+  [Cache]   preset=high  sample_frac=1.0  n=1160
+  [Cache] Train cache loaded: X=(1160, 1536)  y=(1160, 234)
+  [Cache] Reusing existing val embeddings → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch_cache/val_emb.npz
+  [Cache] Val cache loaded: X=(739, 1536)  y=(739, 234)
+
+  Researcher model : qwen2.5-coder:7b
+  Researcher timeout: 600s (then safe-default spec for that iter)
+  Coder model      : qwen2.5-coder:7b
+  Mode             : REFINE (stage 1b — locked arch, batch planner, adaptive budget)
+  Refine budget    : 5 initial training tries, +2 on improve, max 7
+  Experiments/round: 2 (labels: r1, r2)
+  Head train cap   : 1500 embeddings per iteration (full cache on disk unchanged)
+  Ranking metric   : macro_average_precision (each run logs macro_AP, macro_AUC, median_AUC, train_loss, val_loss)
+  Memory           : fresh start
+============================================================
+  Search training caps: epochs=3 patience=3 (locked during 1a/1b/1c)
+  [Refine] Champion from stage_1a_handoff: macro_average_precision=0.27711 (residual_mlp)
+
+  REFINE CAMPAIGN — locked arch_type: residual_mlp
+  Aug baseline: high
+  Champion to beat: macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028
+  Budget: 5 initial training tries, 2 experiments per planner call, +2 on each improvement, max 7 total training runs
+  Champion spec → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/refine/rank1_high_residual_mlp/refine_champion_spec.json
+
+────────────────────────────────────────────────────────────
+  REFINE PLANNER ROUND 1  (training runs 0/7, queue 5)
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning next 2 experiments (0 in memory, best none, batch=2, timeout 600s)...
+
+  ◆ RESEARCHER PLAN [PERCH] — refine planner 1
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploiting residual_mlp by tweaking hidden_dim, dropout,
+  │  and learning_rate.
+
+  ┌─ Experiment 1/2  slot=r1  kind=residual_mlp  strategy=exploit
+  │reasoning:
+  │  Increased hidden_dim and dropout to better capture
+  │  feature interactions and reduce overfitting.
+  │hypothesis:
+  │  Higher capacity helps with rare species detection in
+  │  noisy soundscapes.
+  │  arch_type: residual_mlp
+  │  arch_description: Dense(1280) stem. Four residual blocks with skip connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout 0.4, Dense(n_classes, sigmoid).
+  │  strategy: exploit
+  │  learning_rate: 0.0005
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.4
+  │  hidden_dim: 1280
+  │  proj_dim: 512
+  │  n_layers: 4
+  │  optimizer: adamw
+  │  slot: r1
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=r2  kind=residual_mlp  strategy=exploit
+  │reasoning:
+  │  Reduced hidden_dim and increased learning_rate to
+  │  balance model capacity and convergence.
+  │hypothesis:
+  │  Balanced architecture improves generalization on rare
+  │  species.
+  │  arch_type: residual_mlp
+  │  arch_description: Dense(768) stem. Three residual blocks with skip connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout 0.2, Dense(n_classes, sigmoid).
+  │  strategy: exploit
+  │  learning_rate: 0.01
+  │  batch_size: 512
+  │  epochs: 60
+  │  dropout: 0.2
+  │  hidden_dim: 768
+  │  proj_dim: 512
+  │  n_layers: 3
+  │  optimizer: sgd_momentum
+  │  slot: r2
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+  [Executor] Attempt 1/5 — iter_001_r1_a1.py ...
+
+  ◇ r1:  ✓  macro_AP=0.24516 (ranking) | macro_AUC=0.66102 | median_AUC=0.77124
+  [Refine] No improvement (best macro_average_precision=0.27711)
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+  [Executor] Attempt 1/5 — iter_002_r2_a1.py ...
+
+  ◇ r2:  ✓  macro_AP=0.22773 (ranking) | macro_AUC=0.68290 | median_AUC=0.70692
+  [Refine] No improvement (best macro_average_precision=0.27711)
+  [Best so far] macro_AP=0.24516 (ranking) | macro_AUC=0.66102 | median_AUC=0.77124
+
+────────────────────────────────────────────────────────────
+  REFINE PLANNER ROUND 2  (training runs 2/7, queue 3)
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning next 2 experiments (2 in memory, best macro_AP=0.24516 (ranking) | macro_AUC=0.66102 | median_AUC=0.77124, batch=2, timeout 600s)...
+
+  ◆ RESEARCHER PLAN [PERCH] — refine planner 2
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploiting residual_mlp by tweaking hidden_dim, dropout,
+  │  and learning_rate.
+
+  ┌─ Experiment 1/2  slot=r1  kind=residual_mlp  strategy=exploit
+  │reasoning:
+  │  Increased hidden_dim to better capture feature
+  │  interactions and adjusted dropout for regularization.
+  │hypothesis:
+  │  Higher capacity with balanced dropout improves
+  │  performance on rare species.
+  │  arch_type: residual_mlp
+  │  arch_description: Dense(1536) stem. Four residual blocks with skip connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout 0.4, Dense(n_classes, sigmoid).
+  │  strategy: exploit
+  │  learning_rate: 0.0008
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.4
+  │  hidden_dim: 1536
+  │  proj_dim: 512
+  │  n_layers: 4
+  │  optimizer: adamw
+  │  slot: r1
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=r2  kind=residual_mlp  strategy=exploit
+  │reasoning:
+  │  Reduced hidden_dim and increased learning_rate for
+  │  faster convergence.
+  │hypothesis:
+  │  Balanced architecture with higher learning_rate improves
+  │  generalization.
+  │  arch_type: residual_mlp
+  │  arch_description: Dense(768) stem. Three residual blocks with skip connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout 0.3, Dense(n_classes, sigmoid).
+  │  strategy: exploit
+  │  learning_rate: 0.001
+  │  batch_size: 512
+  │  epochs: 60
+  │  dropout: 0.3
+  │  hidden_dim: 768
+  │  proj_dim: 512
+  │  n_layers: 3
+  │  optimizer: sgd_momentum
+  │  slot: r2
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+  [Executor] Attempt 1/5 — iter_003_r1_a1.py ...
+
+  ◇ r1:  ✓  macro_AP=0.27359 (ranking) | macro_AUC=0.66710 | median_AUC=0.77961
+  [Refine] No improvement (best macro_average_precision=0.27711)
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+  [Executor] Attempt 1/5 — iter_004_r2_a1.py ...
+
+  ◇ r2:  ✓  macro_AP=0.22686 (ranking) | macro_AUC=0.67903 | median_AUC=0.70449
+  [Refine] No improvement (best macro_average_precision=0.27711)
+  [Best so far] macro_AP=0.27359 (ranking) | macro_AUC=0.66710 | median_AUC=0.77961
+
+────────────────────────────────────────────────────────────
+  REFINE PLANNER ROUND 3  (training runs 4/7, queue 1)
+────────────────────────────────────────────────────────────
+
+  [Researcher] Planning next 2 experiments (4 in memory, best macro_AP=0.27359 (ranking) | macro_AUC=0.66710 | median_AUC=0.77961, batch=2, timeout 600s)...
+
+  ◆ RESEARCHER PLAN [PERCH] — refine planner 3
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Optimizing residual_mlp further by tweaking hidden_dim,
+  │  dropout, and learning_rate.
+
+  ┌─ Experiment 1/2  slot=r1  kind=residual_mlp  strategy=exploit
+  │reasoning:
+  │  Balanced architecture with moderate hidden_dim and
+  │  dropout for better generalization.
+  │hypothesis:
+  │  Fine-tuned hyperparameters improve performance on rare
+  │  species.
+  │  arch_type: residual_mlp
+  │  arch_description: residual_mlp: Dense(1024) stem from emb_dim. 3 blocks with gelu, layer_norm, Dropout(0.3), Dense(num_classes, sigmoid). Follow standard shape-safe residual/gated patterns for this family.
+  │  strategy: exploit
+  │  learning_rate: 0.0008
+  │  batch_size: 256
+  │  epochs: 40
+  │  dropout: 0.3
+  │  hidden_dim: 1024
+  │  proj_dim: 512
+  │  n_layers: 3
+  │  optimizer: adamw
+  │  slot: r1
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=r2  kind=residual_mlp  strategy=exploit
+  │reasoning:
+  │  Increased capacity with higher dropout for better
+  │  feature capture.
+  │hypothesis:
+  │  Higher model complexity improves performance on rare
+  │  species.
+  │  arch_type: residual_mlp
+  │  arch_description: residual_mlp: Dense(2048) stem from emb_dim. 4 blocks with relu, batch_norm, Dropout(0.4), Dense(num_classes, sigmoid). Follow standard shape-safe residual/gated patterns for this family.
+  │  strategy: exploit
+  │  learning_rate: 0.0005
+  │  batch_size: 128
+  │  epochs: 60
+  │  dropout: 0.4
+  │  hidden_dim: 2048
+  │  proj_dim: 1024
+  │  n_layers: 4
+  │  optimizer: sgd_momentum
+  │  slot: r2
+  └──────────────────────────────────────────────────────────
+
+  [Coder] Attempt 1/5...
+  [Coder] Code valid (shape check passed).
+  [Perch] Enforced get_training_config(): epochs=3 patience=3
+  [Executor] Attempt 1/5 — iter_005_r1_a1.py ...
+
+  ◇ r1:  ✓  macro_AP=0.26523 (ranking) | macro_AUC=0.66582 | median_AUC=0.78251
+  [Refine] No improvement (best macro_average_precision=0.27711)
+  [Best so far] macro_AP=0.27359 (ranking) | macro_AUC=0.66710 | median_AUC=0.77961
+
+  [Refine] Finished: 5 training runs, best macro_average_precision=0.27711
+
+============================================================
+  DONE (refine campaign)
+  #1 macro_AP=0.27359 (ranking) | macro_AUC=0.66710 | median_AUC=0.77961 | Increased hidden_dim to better capture feature interactions and adjusted dropout
+  #2 macro_AP=0.26523 (ranking) | macro_AUC=0.66582 | median_AUC=0.78251 | Balanced architecture with moderate hidden_dim and dropout for better generaliza
+  #3 macro_AP=0.24516 (ranking) | macro_AUC=0.66102 | median_AUC=0.77124 | Increased hidden_dim and dropout to better capture feature interactions and redu
+============================================================
+
+  ▼ SECTION SUMMARY — Perch Stage 1b — Refine
+  ──────────────────────────────────────────────────────────────
+    · Best: macro_AP=0.27359 (ranking) | macro_AUC=0.66710 |
+    · median_AUC=0.77961
+    · Artifacts: /Users/enricozafiris/Desktop/NIGHT 18051905/l
+    · ogs/meta_agent/perch/refine/rank1_high_residual_mlp
+  ──────────────────────────────────────────────────────────────
+
+
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  Final architecture — PERCH                                ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  arch_type     : residual_mlp
+  description   : Dense(1536) stem. Four residual blocks with skip
+  description   : connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout
+  description   : 0.4, Dense(n_classes, sigmoid).
+  learning_rate : 0.0008
+  batch_size    : 256
+  epochs        : 40
+  dropout       : 0.4
+  memory_dir    : /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/refine/rank1_high_residual_mlp
+
+
+  Final retrain skipped (perch.skip_final_retrain=true).
+
+============================================================
+  STAGED PIPELINE — Step 1b: Refine top-1 Perch models from 1a
+  Budget per model: 5 initial, +2 on improve, max 7
+============================================================
+
+  STAGE 1B — TOP 1 CHAMPIONS FROM STAGE 1A (soundscape val)
+  ────────────────────────────────────────────────────────────────────────
+  Winner #1: arch_type = residual_mlp
+            aug baseline = high
+            macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028
+  ────────────────────────────────────────────────────────────────────────
+  Ranking metric for refine: macro_average_precision (must beat seed macro_AP to earn bonus tries)
+
+
+  [Perch refine 1b / rank 1] aug=high arch=residual_mlp
+  seed macro_average_precision=0.27711  → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/refine/rank1_high_residual_mlp
+  Perch ONNX: /Users/enricozafiris/.cache/kagglehub/datasets/rishikeshjani/perch-onnx-for-birdclef-2026/versions/2/perch_v2.onnx
+  Loading Perch head: best_head.keras
+  Perch inference: 739 labeled window(s) (embed batch=16)
+  … window 1/739
+  … window 100/739
+  … window 200/739
+  … window 300/739
+  … window 400/739
+  … window 500/739
+  … window 600/739
+  … window 700/739
+  … window 739/739
+  [Perch/refine/residual_mlp] macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028 | n_windows=739 n_classes=75
+
+  Step 1b summary → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/arch_search_1b_results.json
+
+  ★ Perch refine winner: aug=high arch=residual_mlp  macro_average_precision=0.27711
+
+  ▼ SECTION SUMMARY — Perch 1b
+  ──────────────────────────────────────────────────────────────
+    · Stage: 1b_perch_refine
+    · Metric: macro_average_precision
+    · Winner aug: high
+    · Winner arch: residual_mlp
+    · Score: 0.27711
+    · memory: /Users/enricozafiris/Desktop/NIGHT 18051905/logs
+    · /meta_agent/perch/refine/rank1_high_residual_mlp
+  ──────────────────────────────────────────────────────────────
+
+
+  ┌────────────────────────────────────────────────────────────┐
+  │ Perch Stage 1c — Augmentation search (sample)              │
+  └────────────────────────────────────────────────────────────┘
+
+  STAGE 1C — LOCKED HEAD (current best before augmentation search)
+  ────────────────────────────────────────────────────────────────────────
+  Memory dir     : rank1_high_residual_mlp
+  arch_type      : residual_mlp
+  aug baseline   : high
+  macro_AP=0.27711 (ranking) | macro_AUC=0.67293 | median_AUC=0.80028
+  Locked head macro_average_precision: 0.27711 (aug search tries to beat this on soundscape val)
+  ────────────────────────────────────────────────────────────────────────
+  Architecture is fixed in 1c — only augmentation configs change.
+
+  [1c] Shared val cache ready: val_emb.npz (X=(739, 1536))
+  [Indices] Saved 1160 head-train indices → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/head_train_indices_2000.npy (from 1160 cached rows, seed=42)
+  [Clips] Head-train subset: 1160 clips → head_train_clips_2000.jsonl (for fast stage-1c embedding)
+
+============================================================
+  STAGE 1c — AUGMENTATION SEARCH (both)
+============================================================
+  Metric: macro_average_precision on labeled train_soundscapes
+  Fast embed: 1500 clips/trial (locked head from 1b)
+
+  Preset baselines (1)
+  [1c] Running 1 preset trial(s) in one Perch session (ONNX loaded once)…
+Python(7615) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+   1/7  high                            soundscape_AP=0.27711  macro_AUC=0.67293  subset_AP=0.27711
+  ▸ 1c leader: high (high)  soundscape_AP=0.27711
+
+  LLM custom configs (6 new trial(s): 3 round(s) × 2 on top of 0 resumed + 1 preset(s))
+
+  [1c LLM] 3 planner round(s) × 2 config(s) = 6 new trial(s) on top of index 1 (progress cap 7)
+
+  Round 1/3 — LLM planner (2 configs)…
+
+  ◆ RESEARCHER PLAN [PERCH] — aug planner
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploring high SNR with varied audio strategies to
+  │  maximize embeddings.
+
+  ┌─ Experiment 1/2  slot=exp-1  kind=High SNR Time Stretch  strategy=exploit
+  │reasoning:
+  │  Higher SNR with time stretch to enhance feature
+  │  extraction.
+  │hypothesis:
+  │  Time stretching will improve embedding quality at
+  │  medium-to-high SNR.
+  │  strategy: exploit
+  │  preset_name: High SNR Time Stretch
+  │  mix_prob: 0.5
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=exp-2  kind=High SNR Pitch Shift and Gain Jitter  strategy=exploit
+  │reasoning:
+  │  Combining pitch shift and gain jitter with high SNR for
+  │  robust embeddings.
+  │hypothesis:
+  │  Pitch shift and gain jitter will improve embedding
+  │  quality at medium-to-high SNR.
+  │  strategy: exploit
+  │  preset_name: High SNR Pitch Shift and Gain Jitter
+  │  mix_prob: 0.5
+  └──────────────────────────────────────────────────────────
+
+    → High SNR Time Stretch, High SNR Pitch Shift and Gain Jitter
+  [1c] Running 2 LLM trial(s) in one Perch session (ONNX loaded once)…
+Python(7654) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+   2/7  High SNR Time Stretch           soundscape_AP=0.28526  macro_AUC=0.67522  subset_AP=0.28526
+  ▸ 1c leader: High SNR Time Stretch (aug_r02_a1_high_snr_time_stretch)  soundscape_AP=0.28526  (was high 0.27711)
+   3/7  High SNR Pitch Shift and Gain Ji  soundscape_AP=0.25927  macro_AUC=0.66363  subset_AP=0.25927
+
+  Round 2/3 — LLM planner (2 configs)…
+
+  ◆ RESEARCHER PLAN [PERCH] — aug planner
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploiting high SNR with multiple strategies to enhance
+  │  embedding quality.
+
+  ┌─ Experiment 1/2  slot=exp-1  kind=High SNR Time Stretch and Noise Injection  strategy=explore
+  │reasoning:
+  │  Combining time stretch with high SNR noise injection for
+  │  robust embeddings.
+  │hypothesis:
+  │  Time stretching and noise injection will improve
+  │  embedding quality at medium-to-high SNR.
+  │  strategy: explore
+  │  preset_name: High SNR Time Stretch and Noise Injection
+  │  mix_prob: 0.5
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=exp-2  kind=High SNR Pitch Shift and Time Shift  strategy=exploit
+  │reasoning:
+  │  Combining pitch shift with high SNR time shift for
+  │  enhanced feature extraction.
+  │hypothesis:
+  │  Pitch shift and time shifting will improve embedding
+  │  quality at medium-to-high SNR.
+  │  strategy: exploit
+  │  preset_name: High SNR Pitch Shift and Time Shift
+  │  mix_prob: 0.5
+  └──────────────────────────────────────────────────────────
+
+    → High SNR Time Stretch and Noise Injection, High SNR Pitch Shift and Time Shift
+  [1c] Running 2 LLM trial(s) in one Perch session (ONNX loaded once)…
+Python(7748) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+   4/7  High SNR Time Stretch and Noise   soundscape_AP=0.27651  macro_AUC=0.66593  subset_AP=0.27651
+   5/7  High SNR Pitch Shift and Time Sh  soundscape_AP=0.27729  macro_AUC=0.66828  subset_AP=0.27729
+
+  Round 3/3 — LLM planner (2 configs)…
+
+  ◆ RESEARCHER PLAN [PERCH] — aug planner
+  ──────────────────────────────────────────────────────────────
+  ◆ LLM planner note (batch rationale)
+  │planner_note:
+  │  Exploiting high SNR with time stretch and pitch shift to
+  │  enhance embedding quality.
+
+  ┌─ Experiment 1/2  slot=exp-1  kind=High SNR Time Stretch and Pitch Shift  strategy={'time_stretch': {'enabled': True, 'probability': 0.6}, 'pitch_shift': {'enabled': True, 'probability': 0.7}, 'noise_injection': {'enabled': False, 'probability': 0}, 'time_shift': {'enabled': True, 'probability': 0.4}, 'gain_jitter': {'enabled': True, 'probability': 0.5}}
+  │reasoning:
+  │  Combining time stretch and pitch shift with high SNR for
+  │  robust embeddings.
+  │hypothesis:
+  │  Time stretching and pitch shifting will improve
+  │  embedding quality at medium-to-high SNR.
+  │  strategy: {'time_stretch': {'enabled': True, 'probability': 0.6}, 'pitch_shift': {'enabled': True, 'probability': 0.7}, 'noise_injection': {'enabled': False, 'probability': 0}, 'time_shift': {'enabled': True…
+  │  preset_name: High SNR Time Stretch and Pitch Shift
+  │  mix_prob: 0.5
+  └──────────────────────────────────────────────────────────
+  ┌─ Experiment 2/2  slot=exp-2  kind=High SNR Time Stretch and Gain Jitter  strategy={'time_stretch': {'enabled': True, 'probability': 0.6}, 'pitch_shift': {'enabled': False, 'probability': 0}, 'noise_injection': {'enabled': False, 'probability': 0}, 'time_shift': {'enabled': True, 'probability': 0.4}, 'gain_jitter': {'enabled': True, 'probability': 0.7}}
+  │reasoning:
+  │  Combining time stretch with high SNR gain jitter for
+  │  enhanced feature extraction.
+  │hypothesis:
+  │  Time stretching and gain jitter will improve embedding
+  │  quality at medium-to-high SNR.
+  │  strategy: {'time_stretch': {'enabled': True, 'probability': 0.6}, 'pitch_shift': {'enabled': False, 'probability': 0}, 'noise_injection': {'enabled': False, 'probability': 0}, 'time_shift': {'enabled': True,…
+  │  preset_name: High SNR Time Stretch and Gain Jitter
+  │  mix_prob: 0.5
+  └──────────────────────────────────────────────────────────
+
+    → High SNR Time Stretch and Pitch Shift, High SNR Time Stretch and Gain Jitter
+  [1c] Running 2 LLM trial(s) in one Perch session (ONNX loaded once)…
+Python(7932) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+   6/7  High SNR Time Stretch and Pitch   soundscape_AP=0.27925  macro_AUC=0.66949  subset_AP=0.27925
+   7/7  High SNR Time Stretch and Gain J  soundscape_AP=0.27088  macro_AUC=0.66870  subset_AP=0.27088
+
+  ★ 1c winner → High SNR Time Stretch (aug_r02_a1_high_snr_time_stretch)  soundscape_AP=0.28526  mix_prob=0.5  use_snr=True
+
+  Results saved → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/arch_search_1c_results.json
+
+  ▼ SECTION SUMMARY — Perch 1c
+  ──────────────────────────────────────────────────────────────
+    · Stage: 1c_aug_search
+    · Metric: macro_average_precision
+    · Winner aug: aug_r02_a1_high_snr_time_stretch
+    · Winner arch: —
+    · Score: 0.28526
+    · memory: /Users/enricozafiris/Desktop/NIGHT 18051905/logs
+    · /meta_agent/perch/aug_search/aug_r02_a1_high_snr_time_st
+    · retch
+  ──────────────────────────────────────────────────────────────
+
+
+  [Tournament] perch qualified: macro_average_precision=0.28526
+
+  ▼ SECTION SUMMARY — PERCH — tournament sample score
+  ──────────────────────────────────────────────────────────────
+    · macro_average_precision=0.28526
+    · aug=aug_r02_a1_high_snr_time_stretch
+    · arch=residual_mlp
+  ──────────────────────────────────────────────────────────────
+
+
+========================================================================
+  TOURNAMENT — FINAL COMPARISON (best model per architecture, sample eval)
+  Ranking metric: macro_average_precision on labeled train_soundscapes
+  ────────────────────────────────────────────────────────────────────────
+
+  Rank #2  CNN
+    arch_type      : shallow_cnn
+    aug (best)     : fallback_r02_medium_a1
+    stage reached  : 1c (sample train / embed)
+    trial_id       : aug_r02_1_fallback_r02_medium_a1
+    artifacts      : aug_r02_1_fallback_r02_medium_a1
+    macro_AP=0.08698 (ranking) | macro_AUC=0.57284 | median_AUC=0.59498 | train_loss=0.035130
+    primary_value  : 0.08698  (macro_average_precision)
+
+  Rank #1  PERCH  ← GLOBAL WINNER
+    arch_type      : residual_mlp
+    aug (best)     : aug_r02_a1_high_snr_time_stretch
+    stage reached  : 1c (sample train / embed)
+    artifacts      : aug_r02_a1_high_snr_time_stretch
+    macro_AP=0.28526 (ranking) | macro_AUC=0.67522 | median_AUC=0.80028
+    primary_value  : 0.28526  (macro_average_precision)
+
+  ────────────────────────────────────────────────────────────────────────
+  Selected for finalize (1d+1e): PERCH  |  macro_AP=0.28526 (ranking) | macro_AUC=0.67522 | median_AUC=0.80028
+========================================================================
+
+  Tournament results saved → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/tournament_results.json
+  Next: pipeline staged_finalize (or tournament.auto_finalize: true)
+
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  Final architecture — PERCH                                ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  arch_type     : residual_mlp
+  description   : Dense(1024) stem. Four residual blocks with skip
+  description   : connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout
+  description   : 0.3, Dense(n_classes, sigmoid).
+  aug_preset    : aug_r02_a1_high_snr_time_stretch
+  learning_rate : 0.001
+  batch_size    : 256
+  epochs        : 40
+  dropout       : 0.3
+  memory_dir    : /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/aug_search/aug_r02_a1_high_snr_time_stretch
+  Tournament macro_average_precision: 0.28526
+  aug_preset: aug_r02_a1_high_snr_time_stretch
+
+
+  ▼ SECTION SUMMARY — Tournament Phase A
+  ──────────────────────────────────────────────────────────────
+    · Stage: tournament
+    · Metric: macro_average_precision
+    · Winner aug: aug_r02_a1_high_snr_time_stretch
+    · Winner arch: residual_mlp
+    · Score: 0.28526
+    · memory: /Users/enricozafiris/Desktop/NIGHT 18051905/logs
+    · /meta_agent/perch/aug_search/aug_r02_a1_high_snr_time_st
+    · retch
+    · Global winner track: perch
+    · aug: aug_r02_a1_high_snr_time_stretch
+    · score: 0.28526
+    · arch: residual_mlp
+  ──────────────────────────────────────────────────────────────
+
+Python(8006) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  Meta aug baseline: aug_r02_a1_high_snr_time_stretch_full
+============================================================
+  BirdCLEF Perch Agent — Researcher / Coder Architecture
+============================================================
+  EDA brief injected into Perch prompts (363 chars)
+  [Setup] Locating ONNX model (rishikeshjani/perch-onnx-for-birdclef-2026)...
+  [Setup] ONNX model: /Users/enricozafiris/.cache/kagglehub/datasets/rishikeshjani/perch-onnx-for-birdclef-2026/versions/2/perch_v2.onnx
+  [Setup] Locating Perch labels (google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu)...
+  [Setup] Labels CSV: /Users/enricozafiris/.cache/kagglehub/models/google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu/1/assets/labels.csv
+  [Perch] Loading ONNX session (once per process)...
+  [Perch] ONNX ready — embedding idx=0, logits idx=3
+  [Mapping] Direct: 203/234 | Genus proxy: 4/31 unmapped
+
+  [Setup] Building training embedding cache (runs once, ~30-60 min)...
+  [Cache] Building train cache: 35549 clips (100% stratified per species) → train_emb_aug_r02_a1_high_snr_time_stretch_full.npz
+    1000/35549 files processed...
+    2000/35549 files processed...
+    6000/35549 files processed...
+    7000/35549 files processed...
+    8000/35549 files processed...
+    9000/35549 files processed...
+    12000/35549 files processed...
+    13000/35549 files processed...
+    14000/35549 files processed...
+    15000/35549 files processed...
+    16000/35549 files processed...
+    17000/35549 files processed...
+    23000/35549 files processed...
+    24000/35549 files processed...
+    26000/35549 files processed...
+    27000/35549 files processed...
+    34000/35549 files processed...
+    35000/35549 files processed...
+    35549/35549 files processed...
+  [Cache] Saved: X=(20327, 1536)  S=(20327, 234)  y=(20327, 234)
+  [Cache] Reusing existing val embeddings → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch_cache/val_emb.npz
+  [Cache] Val cache loaded: X=(739, 1536)  y=(739, 234)
+
+  [Cache-only] Train embedding cache ready — exiting (no head training).
+Python(13110) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+
+============================================================
+  TOURNAMENT PHASE B — finalize global winner only
+  Track: PERCH  |  aug=aug_r02_a1_high_snr_time_stretch
+  macro_AP=0.28526 (ranking) | macro_AUC=0.67522 | median_AUC=0.80028
+============================================================
+
+  [Stage 1d] Building FULL train embeddings (sample_frac=1.0, aug=aug_r02_a1_high_snr_time_stretch) — for Kaggle submission
+  [Stage 1d] Embed budget: all train.csv focal clips (no cap)
+  [Stage 1d] Full embed done: n_samples=20327 dim=1536
+
+============================================================
+  STAGED PIPELINE — Step 1d: Final full-data retrain
+  Head: best_head_code.py  |  Aug: aug_r02_a1_high_snr_time_stretch
+============================================================
+  Perch ONNX: /Users/enricozafiris/.cache/kagglehub/datasets/rishikeshjani/perch-onnx-for-birdclef-2026/versions/2/perch_v2.onnx
+  Loading Perch head: final_head.keras
+  Perch inference: 739 labeled window(s) (embed batch=16)
+  … window 1/739
+  … window 100/739
+  … window 200/739
+  … window 300/739
+  … window 400/739
+  … window 500/739
+  … window 600/739
+  … window 700/739
+  … window 739/739
+  [Perch/1d (full train head, live soundscapes)] macro_AP=0.91962 (ranking) | macro_AUC=0.99603 | median_AUC=0.99954 | n_windows=739 n_classes=75
+  Final model → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/final/final_head.weights.h5
+  Kaggle-ready artifacts → /Users/enricozafiris/Desktop/NIGHT 18051905/submission
+
+============================================================
+  STAGED PIPELINE — Step 1e: Pseudo-label refine
+  Thresholds: top1≥0.55  runner-up<0.35  soft_label×0.8
+  Supervised cache: train_emb_aug_r02_a1_high_snr_time_stretch_full.npz  (focal train, from 1d)
+  Labeled val cache: val_emb.npz  (competition soundscape windows)
+============================================================
+
+  [1e] Pseudo-label pool: 10599 soundscape files (top1≥0.55, runner-up<0.35, soft weight=0.8)
+  [Setup] Locating ONNX model (rishikeshjani/perch-onnx-for-birdclef-2026)...
+  [Setup] ONNX model: /Users/enricozafiris/.cache/kagglehub/datasets/rishikeshjani/perch-onnx-for-birdclef-2026/versions/2/perch_v2.onnx
+  [Setup] Locating Perch labels (google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu)...
+  [Setup] Labels CSV: /Users/enricozafiris/.cache/kagglehub/models/google/bird-vocalization-classifier/tensorFlow2/perch_v2_cpu/1/assets/labels.csv
+  [1e] Step 1: ONNX session (CPU)…
+  [1e] Step 1 done (1.0s)
+  [1e] Step 2: teacher head on CPU (after ONNX — avoids Mac Metal hang)…
+  [1e] Teacher: perch_best_head_code.py + final_head.weights.h5 (CPU)
+  [1e] Step 2 done (0.3s)
+  [1e] Step 3: warmup ONNX + head forward…
+  [1e] Step 3 done (0.1s) — starting per-file pass
+  [1e] [10/10599] kept=12/89 (13.5%) | failed_files=0 | 1.49 f/s | ETA 118.8m | last=1.0s
+  [1e] [20/10599] kept=29/209 (13.9%) | failed_files=0 | 1.27 f/s | ETA 139.2m | last=0.8s
+  [1e] [30/10599] kept=53/329 (16.1%) | failed_files=0 | 1.21 f/s | ETA 145.1m | last=0.9s
+  [1e] [40/10599] kept=72/449 (16.0%) | failed_files=0 | 1.21 f/s | ETA 146.0m | last=0.8s
+  [1e] [50/10599] kept=86/569 (15.1%) | failed_files=0 | 1.20 f/s | ETA 146.4m | last=0.9s
+  [1e] [60/10599] kept=98/689 (14.2%) | failed_files=0 | 1.19 f/s | ETA 147.6m | last=0.8s
+  [1e] [70/10599] kept=116/809 (14.3%) | failed_files=0 | 1.19 f/s | ETA 147.4m | last=0.8s
+  [1e] [80/10599] kept=140/929 (15.1%) | failed_files=0 | 1.19 f/s | ETA 147.8m | last=0.8s
+  [1e] [90/10599] kept=152/1049 (14.5%) | failed_files=0 | 1.18 f/s | ETA 148.3m | last=0.9s
+  [1e] [100/10599] kept=160/1169 (13.7%) | failed_files=0 | 1.18 f/s | ETA 148.3m | last=0.8s
+  [1e] [110/10599] kept=169/1289 (13.1%) | failed_files=0 | 1.18 f/s | ETA 148.8m | last=0.8s
+  [1e] [120/10599] kept=182/1409 (12.9%) | failed_files=0 | 1.18 f/s | ETA 148.5m | last=0.8s
+  [1e] [130/10599] kept=194/1529 (12.7%) | failed_files=0 | 1.17 f/s | ETA 149.4m | last=0.9s
+  [1e] [140/10599] kept=210/1649 (12.7%) | failed_files=0 | 1.16 f/s | ETA 149.9m | last=0.9s
+  [1e] [150/10599] kept=245/1769 (13.8%) | failed_files=0 | 1.16 f/s | ETA 150.0m | last=0.9s
+  [1e] [160/10599] kept=279/1889 (14.8%) | failed_files=0 | 1.16 f/s | ETA 150.4m | last=0.9s
+  [1e] [170/10599] kept=319/2009 (15.9%) | failed_files=0 | 1.16 f/s | ETA 150.4m | last=0.9s
+  [1e] [180/10599] kept=347/2129 (16.3%) | failed_files=0 | 1.15 f/s | ETA 150.5m | last=0.9s
+  [1e] [190/10599] kept=359/2249 (16.0%) | failed_files=0 | 1.15 f/s | ETA 150.6m | last=0.9s
+  [1e] [200/10599] kept=383/2369 (16.2%) | failed_files=0 | 1.15 f/s | ETA 150.5m | last=0.9s
+  [1e] [210/10599] kept=416/2489 (16.7%) | failed_files=0 | 1.15 f/s | ETA 150.5m | last=0.8s
+  [1e] [220/10599] kept=453/2609 (17.4%) | failed_files=0 | 1.15 f/s | ETA 150.4m | last=1.0s
+  [1e] [230/10599] kept=504/2729 (18.5%) | failed_files=0 | 1.15 f/s | ETA 150.2m | last=0.8s
+  [1e] [240/10599] kept=533/2849 (18.7%) | failed_files=0 | 1.15 f/s | ETA 150.0m | last=0.9s
+  [1e] [250/10599] kept=556/2969 (18.7%) | failed_files=0 | 1.15 f/s | ETA 149.8m | last=0.8s
+  [1e] [260/10599] kept=588/3089 (19.0%) | failed_files=0 | 1.15 f/s | ETA 150.0m | last=0.9s
+  [1e] [270/10599] kept=602/3209 (18.8%) | failed_files=0 | 1.15 f/s | ETA 149.8m | last=0.9s
+  [1e] [280/10599] kept=615/3329 (18.5%) | failed_files=0 | 1.15 f/s | ETA 149.8m | last=0.8s
+  [1e] [290/10599] kept=621/3449 (18.0%) | failed_files=0 | 1.15 f/s | ETA 149.7m | last=0.8s
+  [1e] [300/10599] kept=639/3569 (17.9%) | failed_files=0 | 1.15 f/s | ETA 149.5m | last=0.9s
+  [1e] [310/10599] kept=652/3689 (17.7%) | failed_files=0 | 1.15 f/s | ETA 149.6m | last=0.9s
+  [1e] [320/10599] kept=664/3809 (17.4%) | failed_files=0 | 1.15 f/s | ETA 149.3m | last=0.8s
+  [1e] [330/10599] kept=708/3929 (18.0%) | failed_files=0 | 1.15 f/s | ETA 149.0m | last=0.8s
+  [1e] [340/10599] kept=763/4049 (18.8%) | failed_files=0 | 1.15 f/s | ETA 148.8m | last=0.8s
+  [1e] [350/10599] kept=802/4169 (19.2%) | failed_files=0 | 1.15 f/s | ETA 148.7m | last=0.9s
+  [1e] [360/10599] kept=836/4289 (19.5%) | failed_files=0 | 1.15 f/s | ETA 148.5m | last=0.9s
+  [1e] [370/10599] kept=874/4409 (19.8%) | failed_files=0 | 1.15 f/s | ETA 148.4m | last=0.9s
+  [1e] [380/10599] kept=902/4529 (19.9%) | failed_files=0 | 1.15 f/s | ETA 148.2m | last=0.9s
+  [1e] [390/10599] kept=934/4649 (20.1%) | failed_files=0 | 1.15 f/s | ETA 148.0m | last=0.9s
+  [1e] [400/10599] kept=964/4769 (20.2%) | failed_files=0 | 1.15 f/s | ETA 147.8m | last=0.8s
+  [1e] [410/10599] kept=981/4889 (20.1%) | failed_files=0 | 1.15 f/s | ETA 147.8m | last=0.9s
+  [1e] [420/10599] kept=993/5009 (19.8%) | failed_files=0 | 1.15 f/s | ETA 147.5m | last=0.9s
+  [1e] [430/10599] kept=1004/5129 (19.6%) | failed_files=0 | 1.15 f/s | ETA 147.3m | last=0.8s
+  [1e] [440/10599] kept=1035/5249 (19.7%) | failed_files=0 | 1.15 f/s | ETA 147.0m | last=0.8s
+  [1e] [450/10599] kept=1057/5369 (19.7%) | failed_files=0 | 1.15 f/s | ETA 146.7m | last=0.8s
+  [1e] [460/10599] kept=1101/5489 (20.1%) | failed_files=0 | 1.15 f/s | ETA 146.4m | last=0.8s
+  [1e] [470/10599] kept=1114/5609 (19.9%) | failed_files=0 | 1.16 f/s | ETA 146.1m | last=0.8s
+  [1e] [480/10599] kept=1140/5729 (19.9%) | failed_files=0 | 1.16 f/s | ETA 145.8m | last=0.8s
+  [1e] [490/10599] kept=1163/5849 (19.9%) | failed_files=0 | 1.16 f/s | ETA 145.5m | last=0.8s
+  [1e] [500/10599] kept=1186/5969 (19.9%) | failed_files=0 | 1.16 f/s | ETA 145.2m | last=0.8s
+    [partial save: 1186 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [510/10599] kept=1211/6089 (19.9%) | failed_files=0 | 1.16 f/s | ETA 145.1m | last=0.8s
+  [1e] [520/10599] kept=1233/6209 (19.9%) | failed_files=0 | 1.16 f/s | ETA 144.9m | last=0.8s
+  [1e] [530/10599] kept=1243/6329 (19.6%) | failed_files=0 | 1.16 f/s | ETA 144.6m | last=0.8s
+  [1e] [540/10599] kept=1252/6449 (19.4%) | failed_files=0 | 1.16 f/s | ETA 144.3m | last=0.8s
+  [1e] [550/10599] kept=1260/6569 (19.2%) | failed_files=0 | 1.16 f/s | ETA 144.1m | last=0.8s
+  [1e] [560/10599] kept=1264/6689 (18.9%) | failed_files=0 | 1.16 f/s | ETA 143.9m | last=0.8s
+  [1e] [570/10599] kept=1269/6809 (18.6%) | failed_files=0 | 1.16 f/s | ETA 143.6m | last=0.8s
+  [1e] [580/10599] kept=1295/6929 (18.7%) | failed_files=0 | 1.16 f/s | ETA 143.4m | last=0.8s
+  [1e] [590/10599] kept=1297/7049 (18.4%) | failed_files=0 | 1.17 f/s | ETA 143.1m | last=0.8s
+  [1e] [600/10599] kept=1304/7169 (18.2%) | failed_files=0 | 1.17 f/s | ETA 142.9m | last=0.8s
+  [1e] [610/10599] kept=1315/7289 (18.0%) | failed_files=0 | 1.17 f/s | ETA 142.8m | last=0.8s
+  [1e] [620/10599] kept=1320/7409 (17.8%) | failed_files=0 | 1.17 f/s | ETA 142.7m | last=0.9s
+  [1e] [630/10599] kept=1322/7529 (17.6%) | failed_files=0 | 1.17 f/s | ETA 142.5m | last=0.8s
+  [1e] [640/10599] kept=1332/7649 (17.4%) | failed_files=0 | 1.17 f/s | ETA 142.3m | last=0.8s
+  [1e] [650/10599] kept=1342/7769 (17.3%) | failed_files=0 | 1.17 f/s | ETA 142.1m | last=0.8s
+  [1e] [660/10599] kept=1347/7889 (17.1%) | failed_files=0 | 1.17 f/s | ETA 142.0m | last=0.9s
+  [1e] [670/10599] kept=1349/8009 (16.8%) | failed_files=0 | 1.17 f/s | ETA 141.8m | last=0.8s
+  [1e] [680/10599] kept=1360/8129 (16.7%) | failed_files=0 | 1.17 f/s | ETA 141.6m | last=0.8s
+  [1e] [690/10599] kept=1365/8249 (16.5%) | failed_files=0 | 1.17 f/s | ETA 141.5m | last=1.0s
+  [1e] [700/10599] kept=1374/8369 (16.4%) | failed_files=0 | 1.17 f/s | ETA 141.3m | last=0.8s
+  [1e] [710/10599] kept=1385/8489 (16.3%) | failed_files=0 | 1.17 f/s | ETA 141.2m | last=0.9s
+  [1e] [720/10599] kept=1410/8609 (16.4%) | failed_files=0 | 1.17 f/s | ETA 141.0m | last=0.8s
+  [1e] [730/10599] kept=1422/8729 (16.3%) | failed_files=0 | 1.17 f/s | ETA 140.8m | last=0.8s
+  [1e] [740/10599] kept=1433/8849 (16.2%) | failed_files=0 | 1.17 f/s | ETA 140.7m | last=0.9s
+  [1e] [750/10599] kept=1446/8969 (16.1%) | failed_files=0 | 1.17 f/s | ETA 140.5m | last=0.8s
+  [1e] [760/10599] kept=1461/9089 (16.1%) | failed_files=0 | 1.17 f/s | ETA 140.3m | last=0.8s
+  [1e] [770/10599] kept=1463/9209 (15.9%) | failed_files=0 | 1.17 f/s | ETA 140.1m | last=0.8s
+  [1e] [780/10599] kept=1470/9329 (15.8%) | failed_files=0 | 1.17 f/s | ETA 140.0m | last=1.0s
+  [1e] [790/10599] kept=1478/9449 (15.6%) | failed_files=0 | 1.17 f/s | ETA 139.8m | last=0.8s
+  [1e] [800/10599] kept=1483/9569 (15.5%) | failed_files=0 | 1.17 f/s | ETA 139.6m | last=0.8s
+  [1e] [810/10599] kept=1495/9689 (15.4%) | failed_files=0 | 1.17 f/s | ETA 139.5m | last=0.9s
+  [1e] [820/10599] kept=1506/9809 (15.4%) | failed_files=0 | 1.17 f/s | ETA 139.4m | last=0.8s
+  [1e] [830/10599] kept=1517/9929 (15.3%) | failed_files=0 | 1.17 f/s | ETA 139.3m | last=0.9s
+  [1e] [840/10599] kept=1529/10049 (15.2%) | failed_files=0 | 1.17 f/s | ETA 139.2m | last=0.8s
+  [1e] [850/10599] kept=1536/10169 (15.1%) | failed_files=0 | 1.17 f/s | ETA 139.0m | last=0.8s
+  [1e] [860/10599] kept=1537/10289 (14.9%) | failed_files=0 | 1.17 f/s | ETA 138.9m | last=0.9s
+  [1e] [870/10599] kept=1551/10409 (14.9%) | failed_files=0 | 1.17 f/s | ETA 138.7m | last=0.9s
+  [1e] [880/10599] kept=1560/10529 (14.8%) | failed_files=0 | 1.17 f/s | ETA 138.6m | last=0.9s
+  [1e] [890/10599] kept=1579/10649 (14.8%) | failed_files=0 | 1.17 f/s | ETA 138.6m | last=1.0s
+  [1e] [900/10599] kept=1602/10769 (14.9%) | failed_files=0 | 1.17 f/s | ETA 138.4m | last=0.9s
+  [1e] [910/10599] kept=1608/10889 (14.8%) | failed_files=0 | 1.17 f/s | ETA 138.3m | last=0.8s
+  [1e] [920/10599] kept=1621/11009 (14.7%) | failed_files=0 | 1.17 f/s | ETA 138.1m | last=0.8s
+  [1e] [930/10599] kept=1630/11129 (14.6%) | failed_files=0 | 1.17 f/s | ETA 137.9m | last=0.8s
+  [1e] [940/10599] kept=1642/11249 (14.6%) | failed_files=0 | 1.17 f/s | ETA 137.7m | last=0.8s
+  [1e] [950/10599] kept=1643/11369 (14.5%) | failed_files=0 | 1.17 f/s | ETA 137.5m | last=0.8s
+  [1e] [960/10599] kept=1647/11489 (14.3%) | failed_files=0 | 1.17 f/s | ETA 137.3m | last=0.8s
+  [1e] [970/10599] kept=1648/11609 (14.2%) | failed_files=0 | 1.17 f/s | ETA 137.1m | last=0.8s
+  [1e] [980/10599] kept=1651/11729 (14.1%) | failed_files=0 | 1.17 f/s | ETA 136.9m | last=0.8s
+  [1e] [990/10599] kept=1651/11849 (13.9%) | failed_files=0 | 1.17 f/s | ETA 136.7m | last=0.8s
+  [1e] [1000/10599] kept=1657/11969 (13.8%) | failed_files=0 | 1.17 f/s | ETA 136.5m | last=0.8s
+    [partial save: 1657 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [1010/10599] kept=1664/12089 (13.8%) | failed_files=0 | 1.17 f/s | ETA 136.4m | last=0.9s
+  [1e] [1020/10599] kept=1667/12209 (13.7%) | failed_files=0 | 1.17 f/s | ETA 136.3m | last=0.8s
+  [1e] [1030/10599] kept=1670/12329 (13.5%) | failed_files=0 | 1.17 f/s | ETA 136.1m | last=0.8s
+  [1e] [1040/10599] kept=1673/12449 (13.4%) | failed_files=0 | 1.17 f/s | ETA 135.9m | last=0.8s
+  [1e] [1050/10599] kept=1676/12569 (13.3%) | failed_files=0 | 1.17 f/s | ETA 135.7m | last=0.8s
+  [1e] [1060/10599] kept=1684/12689 (13.3%) | failed_files=0 | 1.17 f/s | ETA 135.5m | last=0.8s
+  [1e] [1070/10599] kept=1687/12809 (13.2%) | failed_files=0 | 1.17 f/s | ETA 135.3m | last=0.8s
+  [1e] [1080/10599] kept=1690/12929 (13.1%) | failed_files=0 | 1.17 f/s | ETA 135.2m | last=0.8s
+  [1e] [1090/10599] kept=1696/13049 (13.0%) | failed_files=0 | 1.17 f/s | ETA 135.0m | last=0.8s
+  [1e] [1100/10599] kept=1714/13169 (13.0%) | failed_files=0 | 1.17 f/s | ETA 134.8m | last=0.8s
+  [1e] [1110/10599] kept=1724/13289 (13.0%) | failed_files=0 | 1.17 f/s | ETA 134.6m | last=0.8s
+  [1e] [1120/10599] kept=1737/13409 (13.0%) | failed_files=0 | 1.18 f/s | ETA 134.4m | last=0.8s
+  [1e] [1130/10599] kept=1747/13529 (12.9%) | failed_files=0 | 1.18 f/s | ETA 134.2m | last=0.8s
+  [1e] [1140/10599] kept=1762/13649 (12.9%) | failed_files=0 | 1.18 f/s | ETA 134.1m | last=0.8s
+  [1e] [1150/10599] kept=1772/13769 (12.9%) | failed_files=0 | 1.18 f/s | ETA 133.9m | last=0.8s
+  [1e] [1160/10599] kept=1783/13889 (12.8%) | failed_files=0 | 1.18 f/s | ETA 133.7m | last=0.9s
+  [1e] [1170/10599] kept=1798/14009 (12.8%) | failed_files=0 | 1.18 f/s | ETA 133.6m | last=0.9s
+  [1e] [1180/10599] kept=1815/14129 (12.8%) | failed_files=0 | 1.18 f/s | ETA 133.4m | last=0.8s
+  [1e] [1190/10599] kept=1830/14249 (12.8%) | failed_files=0 | 1.18 f/s | ETA 133.2m | last=0.8s
+  [1e] [1200/10599] kept=1844/14369 (12.8%) | failed_files=0 | 1.18 f/s | ETA 133.0m | last=0.8s
+  [1e] [1210/10599] kept=1850/14489 (12.8%) | failed_files=0 | 1.18 f/s | ETA 132.9m | last=0.8s
+  [1e] [1220/10599] kept=1856/14609 (12.7%) | failed_files=0 | 1.18 f/s | ETA 132.7m | last=0.8s
+  [1e] [1230/10599] kept=1862/14729 (12.6%) | failed_files=0 | 1.18 f/s | ETA 132.5m | last=0.8s
+  [1e] [1240/10599] kept=1871/14849 (12.6%) | failed_files=0 | 1.18 f/s | ETA 132.4m | last=0.8s
+  [1e] [1250/10599] kept=1875/14969 (12.5%) | failed_files=0 | 1.18 f/s | ETA 132.2m | last=0.9s
+  [1e] [1260/10599] kept=1876/15089 (12.4%) | failed_files=0 | 1.18 f/s | ETA 132.0m | last=0.8s
+  [1e] [1270/10599] kept=1876/15209 (12.3%) | failed_files=0 | 1.18 f/s | ETA 131.9m | last=0.8s
+  [1e] [1280/10599] kept=1880/15329 (12.3%) | failed_files=0 | 1.18 f/s | ETA 131.7m | last=0.8s
+  [1e] [1290/10599] kept=1890/15449 (12.2%) | failed_files=0 | 1.18 f/s | ETA 131.6m | last=0.9s
+  [1e] [1300/10599] kept=1900/15569 (12.2%) | failed_files=0 | 1.18 f/s | ETA 131.5m | last=0.9s
+  [1e] [1310/10599] kept=1912/15689 (12.2%) | failed_files=0 | 1.18 f/s | ETA 131.4m | last=0.8s
+  [1e] [1320/10599] kept=1919/15809 (12.1%) | failed_files=0 | 1.18 f/s | ETA 131.2m | last=0.9s
+  [1e] [1330/10599] kept=1924/15929 (12.1%) | failed_files=0 | 1.18 f/s | ETA 131.0m | last=0.8s
+  [1e] [1340/10599] kept=1934/16049 (12.1%) | failed_files=0 | 1.18 f/s | ETA 130.9m | last=0.8s
+  [1e] [1350/10599] kept=1934/16169 (12.0%) | failed_files=0 | 1.18 f/s | ETA 130.7m | last=0.8s
+  [1e] [1360/10599] kept=1934/16289 (11.9%) | failed_files=0 | 1.18 f/s | ETA 130.5m | last=0.8s
+  [1e] [1370/10599] kept=1934/16409 (11.8%) | failed_files=0 | 1.18 f/s | ETA 130.4m | last=0.8s
+  [1e] [1380/10599] kept=1939/16529 (11.7%) | failed_files=0 | 1.18 f/s | ETA 130.2m | last=0.8s
+  [1e] [1390/10599] kept=1949/16649 (11.7%) | failed_files=0 | 1.18 f/s | ETA 130.0m | last=0.8s
+  [1e] [1400/10599] kept=1954/16769 (11.7%) | failed_files=0 | 1.18 f/s | ETA 129.9m | last=0.8s
+  [1e] [1410/10599] kept=1970/16889 (11.7%) | failed_files=0 | 1.18 f/s | ETA 129.7m | last=0.8s
+  [1e] [1420/10599] kept=1972/17009 (11.6%) | failed_files=0 | 1.18 f/s | ETA 129.5m | last=0.8s
+  [1e] [1430/10599] kept=1974/17129 (11.5%) | failed_files=0 | 1.18 f/s | ETA 129.4m | last=0.8s
+  [1e] [1440/10599] kept=1980/17249 (11.5%) | failed_files=0 | 1.18 f/s | ETA 129.2m | last=0.8s
+  [1e] [1450/10599] kept=1983/17369 (11.4%) | failed_files=0 | 1.18 f/s | ETA 129.1m | last=0.8s
+  [1e] [1460/10599] kept=1986/17489 (11.4%) | failed_files=0 | 1.18 f/s | ETA 128.9m | last=0.8s
+  [1e] [1470/10599] kept=1986/17609 (11.3%) | failed_files=0 | 1.18 f/s | ETA 128.7m | last=0.8s
+  [1e] [1480/10599] kept=1992/17729 (11.2%) | failed_files=0 | 1.18 f/s | ETA 128.6m | last=0.8s
+  [1e] [1490/10599] kept=1995/17849 (11.2%) | failed_files=0 | 1.18 f/s | ETA 128.4m | last=0.8s
+  [1e] [1500/10599] kept=1998/17969 (11.1%) | failed_files=0 | 1.18 f/s | ETA 128.2m | last=0.8s
+    [partial save: 1998 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [1510/10599] kept=2031/18089 (11.2%) | failed_files=0 | 1.18 f/s | ETA 128.1m | last=0.8s
+  [1e] [1520/10599] kept=2049/18209 (11.3%) | failed_files=0 | 1.18 f/s | ETA 128.0m | last=0.9s
+  [1e] [1530/10599] kept=2059/18329 (11.2%) | failed_files=0 | 1.18 f/s | ETA 127.8m | last=0.9s
+  [1e] [1540/10599] kept=2070/18449 (11.2%) | failed_files=0 | 1.18 f/s | ETA 127.7m | last=0.9s
+  [1e] [1550/10599] kept=2073/18569 (11.2%) | failed_files=0 | 1.18 f/s | ETA 127.5m | last=0.8s
+  [1e] [1560/10599] kept=2090/18689 (11.2%) | failed_files=0 | 1.18 f/s | ETA 127.4m | last=0.8s
+  [1e] [1570/10599] kept=2094/18809 (11.1%) | failed_files=0 | 1.18 f/s | ETA 127.2m | last=0.8s
+  [1e] [1580/10599] kept=2110/18929 (11.1%) | failed_files=0 | 1.18 f/s | ETA 127.1m | last=0.8s
+  [1e] [1590/10599] kept=2116/19049 (11.1%) | failed_files=0 | 1.18 f/s | ETA 126.9m | last=0.9s
+  [1e] [1600/10599] kept=2118/19169 (11.0%) | failed_files=0 | 1.18 f/s | ETA 126.8m | last=0.8s
+  [1e] [1610/10599] kept=2123/19289 (11.0%) | failed_files=0 | 1.18 f/s | ETA 126.6m | last=0.8s
+  [1e] [1620/10599] kept=2125/19409 (10.9%) | failed_files=0 | 1.18 f/s | ETA 126.4m | last=0.8s
+  [1e] [1630/10599] kept=2126/19529 (10.9%) | failed_files=0 | 1.18 f/s | ETA 126.3m | last=0.8s
+  [1e] [1640/10599] kept=2146/19649 (10.9%) | failed_files=0 | 1.18 f/s | ETA 126.1m | last=0.8s
+  [1e] [1650/10599] kept=2154/19769 (10.9%) | failed_files=0 | 1.18 f/s | ETA 126.0m | last=0.8s
+  [1e] [1660/10599] kept=2167/19889 (10.9%) | failed_files=0 | 1.18 f/s | ETA 125.9m | last=0.9s
+  [1e] [1670/10599] kept=2181/20009 (10.9%) | failed_files=0 | 1.18 f/s | ETA 125.7m | last=0.8s
+  [1e] [1680/10599] kept=2187/20129 (10.9%) | failed_files=0 | 1.18 f/s | ETA 125.6m | last=0.8s
+  [1e] [1690/10599] kept=2200/20249 (10.9%) | failed_files=0 | 1.18 f/s | ETA 125.4m | last=0.9s
+  [1e] [1700/10599] kept=2202/20369 (10.8%) | failed_files=0 | 1.18 f/s | ETA 125.3m | last=0.9s
+  [1e] [1710/10599] kept=2204/20489 (10.8%) | failed_files=0 | 1.18 f/s | ETA 125.2m | last=0.8s
+  [1e] [1720/10599] kept=2204/20609 (10.7%) | failed_files=0 | 1.18 f/s | ETA 125.0m | last=0.8s
+  [1e] [1730/10599] kept=2207/20729 (10.6%) | failed_files=0 | 1.18 f/s | ETA 124.8m | last=0.8s
+  [1e] [1740/10599] kept=2208/20849 (10.6%) | failed_files=0 | 1.18 f/s | ETA 124.7m | last=0.8s
+  [1e] [1750/10599] kept=2217/20969 (10.6%) | failed_files=0 | 1.18 f/s | ETA 124.6m | last=0.9s
+  [1e] [1760/10599] kept=2228/21089 (10.6%) | failed_files=0 | 1.18 f/s | ETA 124.4m | last=0.8s
+  [1e] [1770/10599] kept=2237/21209 (10.5%) | failed_files=0 | 1.18 f/s | ETA 124.2m | last=0.8s
+  [1e] [1780/10599] kept=2244/21329 (10.5%) | failed_files=0 | 1.18 f/s | ETA 124.1m | last=0.8s
+  [1e] [1790/10599] kept=2250/21449 (10.5%) | failed_files=0 | 1.18 f/s | ETA 123.9m | last=0.8s
+  [1e] [1800/10599] kept=2258/21569 (10.5%) | failed_files=0 | 1.18 f/s | ETA 123.8m | last=0.8s
+  [1e] [1810/10599] kept=2271/21689 (10.5%) | failed_files=0 | 1.18 f/s | ETA 123.7m | last=0.8s
+  [1e] [1820/10599] kept=2272/21809 (10.4%) | failed_files=0 | 1.18 f/s | ETA 123.5m | last=0.8s
+  [1e] [1830/10599] kept=2285/21929 (10.4%) | failed_files=0 | 1.18 f/s | ETA 123.4m | last=0.8s
+  [1e] [1840/10599] kept=2298/22049 (10.4%) | failed_files=0 | 1.18 f/s | ETA 123.2m | last=0.8s
+  [1e] [1850/10599] kept=2308/22169 (10.4%) | failed_files=0 | 1.18 f/s | ETA 123.1m | last=0.8s
+  [1e] [1860/10599] kept=2313/22289 (10.4%) | failed_files=0 | 1.19 f/s | ETA 122.9m | last=0.8s
+  [1e] [1870/10599] kept=2336/22409 (10.4%) | failed_files=0 | 1.19 f/s | ETA 122.7m | last=0.8s
+  [1e] [1880/10599] kept=2360/22529 (10.5%) | failed_files=0 | 1.19 f/s | ETA 122.6m | last=0.8s
+  [1e] [1890/10599] kept=2371/22649 (10.5%) | failed_files=0 | 1.19 f/s | ETA 122.4m | last=0.9s
+  [1e] [1900/10599] kept=2395/22769 (10.5%) | failed_files=0 | 1.19 f/s | ETA 122.3m | last=0.8s
+  [1e] [1910/10599] kept=2404/22889 (10.5%) | failed_files=0 | 1.19 f/s | ETA 122.1m | last=0.8s
+  [1e] [1920/10599] kept=2419/23009 (10.5%) | failed_files=0 | 1.19 f/s | ETA 122.0m | last=0.8s
+  [1e] [1930/10599] kept=2447/23129 (10.6%) | failed_files=0 | 1.19 f/s | ETA 121.8m | last=0.8s
+  [1e] [1940/10599] kept=2466/23249 (10.6%) | failed_files=0 | 1.19 f/s | ETA 121.7m | last=0.8s
+  [1e] [1950/10599] kept=2500/23369 (10.7%) | failed_files=0 | 1.19 f/s | ETA 121.5m | last=0.8s
+  [1e] [1960/10599] kept=2516/23489 (10.7%) | failed_files=0 | 1.19 f/s | ETA 121.4m | last=0.8s
+  [1e] [1970/10599] kept=2545/23609 (10.8%) | failed_files=0 | 1.19 f/s | ETA 121.2m | last=0.9s
+  [1e] [1980/10599] kept=2559/23729 (10.8%) | failed_files=0 | 1.19 f/s | ETA 121.1m | last=0.9s
+  [1e] [1990/10599] kept=2563/23849 (10.7%) | failed_files=0 | 1.19 f/s | ETA 120.9m | last=0.8s
+  [1e] [2000/10599] kept=2576/23969 (10.7%) | failed_files=0 | 1.19 f/s | ETA 120.8m | last=0.8s
+    [partial save: 2576 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [2010/10599] kept=2589/24089 (10.7%) | failed_files=0 | 1.19 f/s | ETA 120.7m | last=0.8s
+  [1e] [2020/10599] kept=2605/24209 (10.8%) | failed_files=0 | 1.19 f/s | ETA 120.5m | last=0.8s
+  [1e] [2030/10599] kept=2615/24329 (10.7%) | failed_files=0 | 1.19 f/s | ETA 120.4m | last=0.8s
+  [1e] [2040/10599] kept=2641/24449 (10.8%) | failed_files=0 | 1.19 f/s | ETA 120.2m | last=0.8s
+  [1e] [2050/10599] kept=2659/24569 (10.8%) | failed_files=0 | 1.19 f/s | ETA 120.1m | last=0.8s
+  [1e] [2060/10599] kept=2668/24689 (10.8%) | failed_files=0 | 1.19 f/s | ETA 119.9m | last=0.8s
+  [1e] [2070/10599] kept=2692/24809 (10.9%) | failed_files=0 | 1.19 f/s | ETA 119.8m | last=0.8s
+  [1e] [2080/10599] kept=2711/24929 (10.9%) | failed_files=0 | 1.19 f/s | ETA 119.6m | last=0.8s
+  [1e] [2090/10599] kept=2729/25049 (10.9%) | failed_files=0 | 1.19 f/s | ETA 119.5m | last=0.8s
+  [1e] [2100/10599] kept=2746/25169 (10.9%) | failed_files=0 | 1.19 f/s | ETA 119.3m | last=0.8s
+  [1e] [2110/10599] kept=2749/25289 (10.9%) | failed_files=0 | 1.19 f/s | ETA 119.2m | last=0.8s
+  [1e] [2120/10599] kept=2761/25409 (10.9%) | failed_files=0 | 1.19 f/s | ETA 119.0m | last=0.8s
+  [1e] [2130/10599] kept=2772/25529 (10.9%) | failed_files=0 | 1.19 f/s | ETA 118.9m | last=0.8s
+  [1e] [2140/10599] kept=2777/25649 (10.8%) | failed_files=0 | 1.19 f/s | ETA 118.8m | last=0.8s
+  [1e] [2150/10599] kept=2788/25769 (10.8%) | failed_files=0 | 1.19 f/s | ETA 118.6m | last=0.8s
+  [1e] [2160/10599] kept=2799/25889 (10.8%) | failed_files=0 | 1.19 f/s | ETA 118.4m | last=0.8s
+  [1e] [2170/10599] kept=2819/26009 (10.8%) | failed_files=0 | 1.19 f/s | ETA 118.3m | last=0.8s
+  [1e] [2180/10599] kept=2834/26129 (10.8%) | failed_files=0 | 1.19 f/s | ETA 118.1m | last=0.8s
+  [1e] [2190/10599] kept=2848/26249 (10.8%) | failed_files=0 | 1.19 f/s | ETA 118.0m | last=0.8s
+  [1e] [2200/10599] kept=2861/26369 (10.8%) | failed_files=0 | 1.19 f/s | ETA 117.9m | last=0.8s
+  [1e] [2210/10599] kept=2874/26489 (10.8%) | failed_files=0 | 1.19 f/s | ETA 117.7m | last=0.8s
+  [1e] [2220/10599] kept=2887/26609 (10.8%) | failed_files=0 | 1.19 f/s | ETA 117.5m | last=0.8s
+  [1e] [2230/10599] kept=2905/26729 (10.9%) | failed_files=0 | 1.19 f/s | ETA 117.4m | last=0.8s
+  [1e] [2240/10599] kept=2925/26849 (10.9%) | failed_files=0 | 1.19 f/s | ETA 117.2m | last=0.8s
+  [1e] [2250/10599] kept=2936/26969 (10.9%) | failed_files=0 | 1.19 f/s | ETA 117.1m | last=0.8s
+  [1e] [2260/10599] kept=2948/27089 (10.9%) | failed_files=0 | 1.19 f/s | ETA 116.9m | last=0.8s
+  [1e] [2270/10599] kept=2965/27209 (10.9%) | failed_files=0 | 1.19 f/s | ETA 116.8m | last=0.8s
+  [1e] [2280/10599] kept=2979/27329 (10.9%) | failed_files=0 | 1.19 f/s | ETA 116.6m | last=0.8s
+  [1e] [2290/10599] kept=2997/27449 (10.9%) | failed_files=0 | 1.19 f/s | ETA 116.5m | last=0.8s
+  [1e] [2300/10599] kept=3010/27569 (10.9%) | failed_files=0 | 1.19 f/s | ETA 116.3m | last=0.8s
+  [1e] [2310/10599] kept=3023/27689 (10.9%) | failed_files=0 | 1.19 f/s | ETA 116.2m | last=0.8s
+  [1e] [2320/10599] kept=3045/27809 (10.9%) | failed_files=0 | 1.19 f/s | ETA 116.0m | last=0.8s
+  [1e] [2330/10599] kept=3054/27929 (10.9%) | failed_files=0 | 1.19 f/s | ETA 115.9m | last=0.8s
+  [1e] [2340/10599] kept=3071/28049 (10.9%) | failed_files=0 | 1.19 f/s | ETA 115.7m | last=0.8s
+  [1e] [2350/10599] kept=3077/28169 (10.9%) | failed_files=0 | 1.19 f/s | ETA 115.6m | last=0.8s
+  [1e] [2360/10599] kept=3093/28289 (10.9%) | failed_files=0 | 1.19 f/s | ETA 115.4m | last=0.8s
+  [1e] [2370/10599] kept=3117/28409 (11.0%) | failed_files=0 | 1.19 f/s | ETA 115.3m | last=0.8s
+  [1e] [2380/10599] kept=3128/28529 (11.0%) | failed_files=0 | 1.19 f/s | ETA 115.1m | last=0.8s
+  [1e] [2390/10599] kept=3143/28649 (11.0%) | failed_files=0 | 1.19 f/s | ETA 115.0m | last=0.8s
+  [1e] [2400/10599] kept=3164/28769 (11.0%) | failed_files=0 | 1.19 f/s | ETA 114.8m | last=0.8s
+  [1e] [2410/10599] kept=3184/28889 (11.0%) | failed_files=0 | 1.19 f/s | ETA 114.7m | last=0.8s
+  [1e] [2420/10599] kept=3195/29009 (11.0%) | failed_files=0 | 1.19 f/s | ETA 114.5m | last=0.8s
+  [1e] [2430/10599] kept=3228/29129 (11.1%) | failed_files=0 | 1.19 f/s | ETA 114.4m | last=0.8s
+  [1e] [2440/10599] kept=3248/29249 (11.1%) | failed_files=0 | 1.19 f/s | ETA 114.2m | last=0.8s
+  [1e] [2450/10599] kept=3269/29369 (11.1%) | failed_files=0 | 1.19 f/s | ETA 114.1m | last=0.8s
+  [1e] [2460/10599] kept=3284/29489 (11.1%) | failed_files=0 | 1.19 f/s | ETA 113.9m | last=0.8s
+  [1e] [2470/10599] kept=3294/29609 (11.1%) | failed_files=0 | 1.19 f/s | ETA 113.8m | last=0.8s
+  [1e] [2480/10599] kept=3308/29729 (11.1%) | failed_files=0 | 1.19 f/s | ETA 113.6m | last=0.8s
+  [1e] [2490/10599] kept=3327/29849 (11.1%) | failed_files=0 | 1.19 f/s | ETA 113.5m | last=0.8s
+  [1e] [2500/10599] kept=3351/29969 (11.2%) | failed_files=0 | 1.19 f/s | ETA 113.3m | last=0.8s
+    [partial save: 3351 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [2510/10599] kept=3367/30089 (11.2%) | failed_files=0 | 1.19 f/s | ETA 113.2m | last=0.8s
+  [1e] [2520/10599] kept=3394/30209 (11.2%) | failed_files=0 | 1.19 f/s | ETA 113.1m | last=0.8s
+  [1e] [2530/10599] kept=3419/30329 (11.3%) | failed_files=0 | 1.19 f/s | ETA 112.9m | last=0.8s
+  [1e] [2540/10599] kept=3434/30449 (11.3%) | failed_files=0 | 1.19 f/s | ETA 112.8m | last=0.8s
+  [1e] [2550/10599] kept=3444/30569 (11.3%) | failed_files=0 | 1.19 f/s | ETA 112.6m | last=0.8s
+  [1e] [2560/10599] kept=3455/30689 (11.3%) | failed_files=0 | 1.19 f/s | ETA 112.5m | last=0.8s
+  [1e] [2570/10599] kept=3464/30809 (11.2%) | failed_files=0 | 1.19 f/s | ETA 112.3m | last=0.8s
+  [1e] [2580/10599] kept=3477/30929 (11.2%) | failed_files=0 | 1.19 f/s | ETA 112.2m | last=0.8s
+  [1e] [2590/10599] kept=3484/31049 (11.2%) | failed_files=0 | 1.19 f/s | ETA 112.0m | last=0.8s
+  [1e] [2600/10599] kept=3491/31169 (11.2%) | failed_files=0 | 1.19 f/s | ETA 111.9m | last=0.8s
+  [1e] [2610/10599] kept=3516/31289 (11.2%) | failed_files=0 | 1.19 f/s | ETA 111.7m | last=0.8s
+  [1e] [2620/10599] kept=3524/31409 (11.2%) | failed_files=0 | 1.19 f/s | ETA 111.6m | last=0.8s
+  [1e] [2630/10599] kept=3534/31529 (11.2%) | failed_files=0 | 1.19 f/s | ETA 111.4m | last=0.8s
+  [1e] [2640/10599] kept=3541/31649 (11.2%) | failed_files=0 | 1.19 f/s | ETA 111.3m | last=0.8s
+  [1e] [2650/10599] kept=3551/31769 (11.2%) | failed_files=0 | 1.19 f/s | ETA 111.1m | last=0.8s
+  [1e] [2660/10599] kept=3569/31889 (11.2%) | failed_files=0 | 1.19 f/s | ETA 111.0m | last=0.8s
+  [1e] [2670/10599] kept=3587/32009 (11.2%) | failed_files=0 | 1.19 f/s | ETA 110.9m | last=0.8s
+  [1e] [2680/10599] kept=3596/32129 (11.2%) | failed_files=0 | 1.19 f/s | ETA 110.7m | last=0.8s
+  [1e] [2690/10599] kept=3606/32249 (11.2%) | failed_files=0 | 1.19 f/s | ETA 110.6m | last=0.8s
+  [1e] [2700/10599] kept=3623/32369 (11.2%) | failed_files=0 | 1.19 f/s | ETA 110.4m | last=0.8s
+  [1e] [2710/10599] kept=3635/32489 (11.2%) | failed_files=0 | 1.19 f/s | ETA 110.3m | last=0.8s
+  [1e] [2720/10599] kept=3644/32609 (11.2%) | failed_files=0 | 1.19 f/s | ETA 110.1m | last=0.8s
+  [1e] [2730/10599] kept=3663/32729 (11.2%) | failed_files=0 | 1.19 f/s | ETA 110.0m | last=0.8s
+  [1e] [2740/10599] kept=3669/32849 (11.2%) | failed_files=0 | 1.19 f/s | ETA 109.8m | last=0.8s
+  [1e] [2750/10599] kept=3676/32969 (11.1%) | failed_files=0 | 1.19 f/s | ETA 109.7m | last=0.8s
+  [1e] [2760/10599] kept=3696/33089 (11.2%) | failed_files=0 | 1.19 f/s | ETA 109.5m | last=0.8s
+  [1e] [2770/10599] kept=3705/33209 (11.2%) | failed_files=0 | 1.19 f/s | ETA 109.4m | last=0.9s
+  [1e] [2780/10599] kept=3729/33329 (11.2%) | failed_files=0 | 1.19 f/s | ETA 109.3m | last=0.8s
+  [1e] [2790/10599] kept=3741/33449 (11.2%) | failed_files=0 | 1.19 f/s | ETA 109.1m | last=0.9s
+  [1e] [2800/10599] kept=3752/33569 (11.2%) | failed_files=0 | 1.19 f/s | ETA 109.0m | last=0.8s
+  [1e] [2810/10599] kept=3777/33689 (11.2%) | failed_files=0 | 1.19 f/s | ETA 108.9m | last=0.8s
+  [1e] [2820/10599] kept=3786/33809 (11.2%) | failed_files=0 | 1.19 f/s | ETA 108.7m | last=0.8s
+  [1e] [2830/10599] kept=3809/33929 (11.2%) | failed_files=0 | 1.19 f/s | ETA 108.6m | last=0.8s
+  [1e] [2840/10599] kept=3816/34049 (11.2%) | failed_files=0 | 1.19 f/s | ETA 108.4m | last=0.8s
+  [1e] [2850/10599] kept=3826/34169 (11.2%) | failed_files=0 | 1.19 f/s | ETA 108.3m | last=0.8s
+  [1e] [2860/10599] kept=3833/34289 (11.2%) | failed_files=0 | 1.19 f/s | ETA 108.1m | last=0.8s
+  [1e] [2870/10599] kept=3865/34409 (11.2%) | failed_files=0 | 1.19 f/s | ETA 108.0m | last=0.8s
+  [1e] [2880/10599] kept=3873/34529 (11.2%) | failed_files=0 | 1.19 f/s | ETA 107.8m | last=0.8s
+  [1e] [2890/10599] kept=3884/34649 (11.2%) | failed_files=0 | 1.19 f/s | ETA 107.7m | last=0.8s
+  [1e] [2900/10599] kept=3888/34769 (11.2%) | failed_files=0 | 1.19 f/s | ETA 107.5m | last=0.8s
+  [1e] [2910/10599] kept=3892/34889 (11.2%) | failed_files=0 | 1.19 f/s | ETA 107.4m | last=0.8s
+  [1e] [2920/10599] kept=3900/35009 (11.1%) | failed_files=0 | 1.19 f/s | ETA 107.2m | last=0.8s
+  [1e] [2930/10599] kept=3909/35129 (11.1%) | failed_files=0 | 1.19 f/s | ETA 107.1m | last=0.8s
+  [1e] [2940/10599] kept=3920/35249 (11.1%) | failed_files=0 | 1.19 f/s | ETA 107.0m | last=0.8s
+  [1e] [2950/10599] kept=3929/35369 (11.1%) | failed_files=0 | 1.19 f/s | ETA 106.8m | last=0.8s
+  [1e] [2960/10599] kept=3937/35489 (11.1%) | failed_files=0 | 1.19 f/s | ETA 106.7m | last=0.8s
+  [1e] [2970/10599] kept=3947/35609 (11.1%) | failed_files=0 | 1.19 f/s | ETA 106.5m | last=0.8s
+  [1e] [2980/10599] kept=3961/35729 (11.1%) | failed_files=0 | 1.19 f/s | ETA 106.4m | last=0.8s
+  [1e] [2990/10599] kept=3972/35849 (11.1%) | failed_files=0 | 1.19 f/s | ETA 106.2m | last=0.8s
+  [1e] [3000/10599] kept=3991/35969 (11.1%) | failed_files=0 | 1.19 f/s | ETA 106.1m | last=0.8s
+    [partial save: 3991 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [3010/10599] kept=4002/36089 (11.1%) | failed_files=0 | 1.19 f/s | ETA 106.0m | last=0.8s
+  [1e] [3020/10599] kept=4020/36209 (11.1%) | failed_files=0 | 1.19 f/s | ETA 105.8m | last=0.8s
+  [1e] [3030/10599] kept=4024/36329 (11.1%) | failed_files=0 | 1.19 f/s | ETA 105.7m | last=0.8s
+  [1e] [3040/10599] kept=4039/36449 (11.1%) | failed_files=0 | 1.19 f/s | ETA 105.5m | last=0.8s
+  [1e] [3050/10599] kept=4051/36569 (11.1%) | failed_files=0 | 1.19 f/s | ETA 105.4m | last=0.8s
+  [1e] [3060/10599] kept=4058/36689 (11.1%) | failed_files=0 | 1.19 f/s | ETA 105.2m | last=0.8s
+  [1e] [3070/10599] kept=4072/36809 (11.1%) | failed_files=0 | 1.19 f/s | ETA 105.1m | last=0.8s
+  [1e] [3080/10599] kept=4082/36929 (11.1%) | failed_files=0 | 1.19 f/s | ETA 105.0m | last=0.8s
+  [1e] [3090/10599] kept=4090/37049 (11.0%) | failed_files=0 | 1.19 f/s | ETA 104.8m | last=0.8s
+  [1e] [3100/10599] kept=4100/37169 (11.0%) | failed_files=0 | 1.19 f/s | ETA 104.7m | last=0.8s
+  [1e] [3110/10599] kept=4112/37289 (11.0%) | failed_files=0 | 1.19 f/s | ETA 104.5m | last=0.8s
+  [1e] [3120/10599] kept=4119/37409 (11.0%) | failed_files=0 | 1.19 f/s | ETA 104.4m | last=0.9s
+  [1e] [3130/10599] kept=4129/37529 (11.0%) | failed_files=0 | 1.19 f/s | ETA 104.2m | last=0.8s
+  [1e] [3140/10599] kept=4132/37649 (11.0%) | failed_files=0 | 1.19 f/s | ETA 104.1m | last=0.8s
+  [1e] [3150/10599] kept=4150/37769 (11.0%) | failed_files=0 | 1.19 f/s | ETA 103.9m | last=0.8s
+  [1e] [3160/10599] kept=4156/37889 (11.0%) | failed_files=0 | 1.19 f/s | ETA 103.8m | last=0.8s
+  [1e] [3170/10599] kept=4177/38009 (11.0%) | failed_files=0 | 1.19 f/s | ETA 103.7m | last=0.9s
+  [1e] [3180/10599] kept=4186/38129 (11.0%) | failed_files=0 | 1.19 f/s | ETA 103.5m | last=0.8s
+  [1e] [3190/10599] kept=4200/38249 (11.0%) | failed_files=0 | 1.19 f/s | ETA 103.4m | last=0.8s
+  [1e] [3200/10599] kept=4220/38369 (11.0%) | failed_files=0 | 1.19 f/s | ETA 103.3m | last=0.9s
+  [1e] [3210/10599] kept=4233/38489 (11.0%) | failed_files=0 | 1.19 f/s | ETA 103.1m | last=0.8s
+  [1e] [3220/10599] kept=4256/38609 (11.0%) | failed_files=0 | 1.19 f/s | ETA 103.0m | last=0.8s
+  [1e] [3230/10599] kept=4295/38729 (11.1%) | failed_files=0 | 1.19 f/s | ETA 102.9m | last=0.8s
+  [1e] [3240/10599] kept=4300/38849 (11.1%) | failed_files=0 | 1.19 f/s | ETA 102.7m | last=0.8s
+  [1e] [3250/10599] kept=4320/38969 (11.1%) | failed_files=0 | 1.19 f/s | ETA 102.6m | last=0.9s
+  [1e] [3260/10599] kept=4341/39089 (11.1%) | failed_files=0 | 1.19 f/s | ETA 102.5m | last=0.8s
+  [1e] [3270/10599] kept=4353/39209 (11.1%) | failed_files=0 | 1.19 f/s | ETA 102.3m | last=0.8s
+  [1e] [3280/10599] kept=4369/39329 (11.1%) | failed_files=0 | 1.19 f/s | ETA 102.2m | last=0.8s
+  [1e] [3290/10599] kept=4381/39449 (11.1%) | failed_files=0 | 1.19 f/s | ETA 102.0m | last=0.8s
+  [1e] [3300/10599] kept=4388/39569 (11.1%) | failed_files=0 | 1.19 f/s | ETA 101.9m | last=0.9s
+  [1e] [3310/10599] kept=4394/39689 (11.1%) | failed_files=0 | 1.19 f/s | ETA 101.8m | last=0.8s
+  [1e] [3320/10599] kept=4408/39809 (11.1%) | failed_files=0 | 1.19 f/s | ETA 101.6m | last=0.8s
+  [1e] [3330/10599] kept=4431/39929 (11.1%) | failed_files=0 | 1.19 f/s | ETA 101.5m | last=0.8s
+  [1e] [3340/10599] kept=4456/40049 (11.1%) | failed_files=0 | 1.19 f/s | ETA 101.3m | last=0.8s
+  [1e] [3350/10599] kept=4474/40169 (11.1%) | failed_files=0 | 1.19 f/s | ETA 101.2m | last=0.8s
+  [1e] [3360/10599] kept=4481/40289 (11.1%) | failed_files=0 | 1.19 f/s | ETA 101.1m | last=0.8s
+  [1e] [3370/10599] kept=4492/40409 (11.1%) | failed_files=0 | 1.19 f/s | ETA 100.9m | last=0.8s
+  [1e] [3380/10599] kept=4511/40529 (11.1%) | failed_files=0 | 1.19 f/s | ETA 100.8m | last=0.8s
+  [1e] [3390/10599] kept=4532/40649 (11.1%) | failed_files=0 | 1.19 f/s | ETA 100.6m | last=0.8s
+  [1e] [3400/10599] kept=4546/40769 (11.2%) | failed_files=0 | 1.19 f/s | ETA 100.5m | last=0.8s
+  [1e] [3410/10599] kept=4560/40889 (11.2%) | failed_files=0 | 1.19 f/s | ETA 100.4m | last=0.8s
+  [1e] [3420/10599] kept=4568/41009 (11.1%) | failed_files=0 | 1.19 f/s | ETA 100.2m | last=0.8s
+  [1e] [3430/10599] kept=4583/41129 (11.1%) | failed_files=0 | 1.19 f/s | ETA 100.1m | last=0.8s
+  [1e] [3440/10599] kept=4603/41249 (11.2%) | failed_files=0 | 1.19 f/s | ETA 99.9m | last=0.8s
+  [1e] [3450/10599] kept=4606/41369 (11.1%) | failed_files=0 | 1.19 f/s | ETA 99.8m | last=0.9s
+  [1e] [3460/10599] kept=4615/41489 (11.1%) | failed_files=0 | 1.19 f/s | ETA 99.6m | last=0.9s
+  [1e] [3470/10599] kept=4623/41609 (11.1%) | failed_files=0 | 1.19 f/s | ETA 99.5m | last=0.8s
+  [1e] [3480/10599] kept=4625/41729 (11.1%) | failed_files=0 | 1.19 f/s | ETA 99.4m | last=0.8s
+  [1e] [3490/10599] kept=4629/41849 (11.1%) | failed_files=0 | 1.19 f/s | ETA 99.2m | last=0.8s
+  [1e] [3500/10599] kept=4633/41969 (11.0%) | failed_files=0 | 1.19 f/s | ETA 99.1m | last=0.9s
+    [partial save: 4633 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [3510/10599] kept=4644/42089 (11.0%) | failed_files=0 | 1.19 f/s | ETA 99.0m | last=0.9s
+  [1e] [3520/10599] kept=4661/42209 (11.0%) | failed_files=0 | 1.19 f/s | ETA 98.8m | last=0.8s
+  [1e] [3530/10599] kept=4676/42329 (11.0%) | failed_files=0 | 1.19 f/s | ETA 98.7m | last=0.9s
+  [1e] [3540/10599] kept=4687/42449 (11.0%) | failed_files=0 | 1.19 f/s | ETA 98.6m | last=0.9s
+  [1e] [3550/10599] kept=4706/42569 (11.1%) | failed_files=0 | 1.19 f/s | ETA 98.4m | last=0.8s
+  [1e] [3560/10599] kept=4723/42689 (11.1%) | failed_files=0 | 1.19 f/s | ETA 98.3m | last=0.8s
+  [1e] [3570/10599] kept=4729/42809 (11.0%) | failed_files=0 | 1.19 f/s | ETA 98.2m | last=0.8s
+  [1e] [3580/10599] kept=4741/42929 (11.0%) | failed_files=0 | 1.19 f/s | ETA 98.0m | last=0.8s
+  [1e] [3590/10599] kept=4763/43049 (11.1%) | failed_files=0 | 1.19 f/s | ETA 97.9m | last=0.8s
+  [1e] [3600/10599] kept=4770/43169 (11.0%) | failed_files=0 | 1.19 f/s | ETA 97.8m | last=0.8s
+  [1e] [3610/10599] kept=4774/43289 (11.0%) | failed_files=0 | 1.19 f/s | ETA 97.6m | last=0.8s
+  [1e] [3620/10599] kept=4791/43409 (11.0%) | failed_files=0 | 1.19 f/s | ETA 97.5m | last=0.9s
+  [1e] [3630/10599] kept=4816/43529 (11.1%) | failed_files=0 | 1.19 f/s | ETA 97.4m | last=0.8s
+  [1e] [3640/10599] kept=4825/43649 (11.1%) | failed_files=0 | 1.19 f/s | ETA 97.2m | last=0.8s
+  [1e] [3650/10599] kept=4839/43769 (11.1%) | failed_files=0 | 1.19 f/s | ETA 97.1m | last=0.8s
+  [1e] [3660/10599] kept=4843/43889 (11.0%) | failed_files=0 | 1.19 f/s | ETA 96.9m | last=0.8s
+  [1e] [3670/10599] kept=4857/44009 (11.0%) | failed_files=0 | 1.19 f/s | ETA 96.8m | last=0.9s
+  [1e] [3680/10599] kept=4865/44129 (11.0%) | failed_files=0 | 1.19 f/s | ETA 96.7m | last=0.8s
+  [1e] [3690/10599] kept=4890/44249 (11.1%) | failed_files=0 | 1.19 f/s | ETA 96.5m | last=0.8s
+  [1e] [3700/10599] kept=4904/44369 (11.1%) | failed_files=0 | 1.19 f/s | ETA 96.4m | last=0.8s
+  [1e] [3710/10599] kept=4908/44489 (11.0%) | failed_files=0 | 1.19 f/s | ETA 96.3m | last=0.8s
+  [1e] [3720/10599] kept=4923/44609 (11.0%) | failed_files=0 | 1.19 f/s | ETA 96.1m | last=0.9s
+  [1e] [3730/10599] kept=4935/44729 (11.0%) | failed_files=0 | 1.19 f/s | ETA 96.0m | last=0.9s
+  [1e] [3740/10599] kept=4947/44849 (11.0%) | failed_files=0 | 1.19 f/s | ETA 95.8m | last=0.8s
+  [1e] [3750/10599] kept=4957/44969 (11.0%) | failed_files=0 | 1.19 f/s | ETA 95.7m | last=0.9s
+  [1e] [3760/10599] kept=4976/45089 (11.0%) | failed_files=0 | 1.19 f/s | ETA 95.6m | last=0.8s
+  [1e] [3770/10599] kept=4994/45209 (11.0%) | failed_files=0 | 1.19 f/s | ETA 95.4m | last=0.8s
+  [1e] [3780/10599] kept=5003/45329 (11.0%) | failed_files=0 | 1.19 f/s | ETA 95.3m | last=0.8s
+  [1e] [3790/10599] kept=5019/45449 (11.0%) | failed_files=0 | 1.19 f/s | ETA 95.1m | last=0.8s
+  [1e] [3800/10599] kept=5028/45569 (11.0%) | failed_files=0 | 1.19 f/s | ETA 95.0m | last=1.0s
+  [1e] [3810/10599] kept=5034/45689 (11.0%) | failed_files=0 | 1.19 f/s | ETA 94.9m | last=0.8s
+  [1e] [3820/10599] kept=5063/45809 (11.1%) | failed_files=0 | 1.19 f/s | ETA 94.8m | last=0.8s
+  [1e] [3830/10599] kept=5083/45929 (11.1%) | failed_files=0 | 1.19 f/s | ETA 94.6m | last=0.8s
+  [1e] [3840/10599] kept=5090/46049 (11.1%) | failed_files=0 | 1.19 f/s | ETA 94.5m | last=0.8s
+  [1e] [3850/10599] kept=5103/46169 (11.1%) | failed_files=0 | 1.19 f/s | ETA 94.3m | last=0.8s
+  [1e] [3860/10599] kept=5114/46289 (11.0%) | failed_files=0 | 1.19 f/s | ETA 94.2m | last=0.8s
+  [1e] [3870/10599] kept=5121/46409 (11.0%) | failed_files=0 | 1.19 f/s | ETA 94.0m | last=0.9s
+  [1e] [3880/10599] kept=5127/46529 (11.0%) | failed_files=0 | 1.19 f/s | ETA 93.9m | last=0.9s
+  [1e] [3890/10599] kept=5139/46649 (11.0%) | failed_files=0 | 1.19 f/s | ETA 93.8m | last=0.9s
+  [1e] [3900/10599] kept=5153/46769 (11.0%) | failed_files=0 | 1.19 f/s | ETA 93.7m | last=1.0s
+  [1e] [3910/10599] kept=5163/46889 (11.0%) | failed_files=0 | 1.19 f/s | ETA 93.5m | last=0.9s
+  [1e] [3920/10599] kept=5174/47009 (11.0%) | failed_files=0 | 1.19 f/s | ETA 93.4m | last=0.8s
+  [1e] [3930/10599] kept=5179/47129 (11.0%) | failed_files=0 | 1.19 f/s | ETA 93.3m | last=0.8s
+  [1e] [3940/10599] kept=5185/47249 (11.0%) | failed_files=0 | 1.19 f/s | ETA 93.1m | last=0.8s
+  [1e] [3950/10599] kept=5193/47369 (11.0%) | failed_files=0 | 1.19 f/s | ETA 93.0m | last=0.8s
+  [1e] [3960/10599] kept=5199/47489 (10.9%) | failed_files=0 | 1.19 f/s | ETA 92.9m | last=0.8s
+  [1e] [3970/10599] kept=5204/47609 (10.9%) | failed_files=0 | 1.19 f/s | ETA 92.7m | last=0.9s
+  [1e] [3980/10599] kept=5250/47729 (11.0%) | failed_files=0 | 1.19 f/s | ETA 92.6m | last=0.8s
+  [1e] [3990/10599] kept=5261/47849 (11.0%) | failed_files=0 | 1.19 f/s | ETA 92.4m | last=0.8s
+  [1e] [4000/10599] kept=5272/47969 (11.0%) | failed_files=0 | 1.19 f/s | ETA 92.3m | last=0.8s
+    [partial save: 5272 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [4010/10599] kept=5279/48089 (11.0%) | failed_files=0 | 1.19 f/s | ETA 92.2m | last=0.9s
+  [1e] [4020/10599] kept=5281/48209 (11.0%) | failed_files=0 | 1.19 f/s | ETA 92.0m | last=0.9s
+  [1e] [4030/10599] kept=5290/48329 (10.9%) | failed_files=0 | 1.19 f/s | ETA 91.9m | last=0.8s
+  [1e] [4040/10599] kept=5299/48449 (10.9%) | failed_files=0 | 1.19 f/s | ETA 91.8m | last=0.8s
+  [1e] [4050/10599] kept=5313/48569 (10.9%) | failed_files=0 | 1.19 f/s | ETA 91.6m | last=0.9s
+  [1e] [4060/10599] kept=5322/48689 (10.9%) | failed_files=0 | 1.19 f/s | ETA 91.5m | last=0.9s
+  [1e] [4070/10599] kept=5326/48809 (10.9%) | failed_files=0 | 1.19 f/s | ETA 91.4m | last=0.9s
+  [1e] [4080/10599] kept=5331/48929 (10.9%) | failed_files=0 | 1.19 f/s | ETA 91.3m | last=0.8s
+  [1e] [4090/10599] kept=5338/49049 (10.9%) | failed_files=0 | 1.19 f/s | ETA 91.1m | last=0.8s
+  [1e] [4100/10599] kept=5372/49169 (10.9%) | failed_files=0 | 1.19 f/s | ETA 91.0m | last=0.8s
+  [1e] [4110/10599] kept=5406/49289 (11.0%) | failed_files=0 | 1.19 f/s | ETA 90.8m | last=0.8s
+  [1e] [4120/10599] kept=5442/49409 (11.0%) | failed_files=0 | 1.19 f/s | ETA 90.7m | last=0.8s
+  [1e] [4130/10599] kept=5492/49529 (11.1%) | failed_files=0 | 1.19 f/s | ETA 90.6m | last=0.8s
+  [1e] [4140/10599] kept=5525/49649 (11.1%) | failed_files=0 | 1.19 f/s | ETA 90.4m | last=0.8s
+  [1e] [4150/10599] kept=5551/49769 (11.2%) | failed_files=0 | 1.19 f/s | ETA 90.3m | last=0.9s
+  [1e] [4160/10599] kept=5574/49889 (11.2%) | failed_files=0 | 1.19 f/s | ETA 90.2m | last=0.9s
+  [1e] [4170/10599] kept=5602/50009 (11.2%) | failed_files=0 | 1.19 f/s | ETA 90.0m | last=0.8s
+  [1e] [4180/10599] kept=5623/50129 (11.2%) | failed_files=0 | 1.19 f/s | ETA 89.9m | last=0.9s
+  [1e] [4190/10599] kept=5640/50249 (11.2%) | failed_files=0 | 1.19 f/s | ETA 89.8m | last=0.9s
+  [1e] [4200/10599] kept=5649/50369 (11.2%) | failed_files=0 | 1.19 f/s | ETA 89.6m | last=0.9s
+  [1e] [4210/10599] kept=5651/50489 (11.2%) | failed_files=0 | 1.19 f/s | ETA 89.5m | last=0.9s
+  [1e] [4220/10599] kept=5678/50609 (11.2%) | failed_files=0 | 1.19 f/s | ETA 89.3m | last=0.9s
+  [1e] [4230/10599] kept=5694/50729 (11.2%) | failed_files=0 | 1.19 f/s | ETA 89.2m | last=0.8s
+  [1e] [4240/10599] kept=5719/50849 (11.2%) | failed_files=0 | 1.19 f/s | ETA 89.1m | last=0.8s
+  [1e] [4250/10599] kept=5746/50969 (11.3%) | failed_files=0 | 1.19 f/s | ETA 88.9m | last=0.8s
+  [1e] [4260/10599] kept=5751/51089 (11.3%) | failed_files=0 | 1.19 f/s | ETA 88.8m | last=0.8s
+  [1e] [4270/10599] kept=5761/51209 (11.2%) | failed_files=0 | 1.19 f/s | ETA 88.7m | last=0.9s
+  [1e] [4280/10599] kept=5775/51329 (11.3%) | failed_files=0 | 1.19 f/s | ETA 88.5m | last=0.9s
+  [1e] [4290/10599] kept=5793/51449 (11.3%) | failed_files=0 | 1.19 f/s | ETA 88.4m | last=0.8s
+  [1e] [4300/10599] kept=5815/51569 (11.3%) | failed_files=0 | 1.19 f/s | ETA 88.3m | last=0.8s
+  [1e] [4310/10599] kept=5832/51689 (11.3%) | failed_files=0 | 1.19 f/s | ETA 88.1m | last=0.8s
+  [1e] [4320/10599] kept=5841/51809 (11.3%) | failed_files=0 | 1.19 f/s | ETA 88.0m | last=0.8s
+  [1e] [4330/10599] kept=5875/51929 (11.3%) | failed_files=0 | 1.19 f/s | ETA 87.9m | last=0.8s
+  [1e] [4340/10599] kept=5904/52049 (11.3%) | failed_files=0 | 1.19 f/s | ETA 87.7m | last=0.9s
+  [1e] [4350/10599] kept=5935/52169 (11.4%) | failed_files=0 | 1.19 f/s | ETA 87.6m | last=0.9s
+  [1e] [4360/10599] kept=5954/52289 (11.4%) | failed_files=0 | 1.19 f/s | ETA 87.5m | last=0.8s
+  [1e] [4370/10599] kept=5968/52409 (11.4%) | failed_files=0 | 1.19 f/s | ETA 87.3m | last=0.8s
+  [1e] [4380/10599] kept=5991/52529 (11.4%) | failed_files=0 | 1.19 f/s | ETA 87.2m | last=0.8s
+  [1e] [4390/10599] kept=6004/52649 (11.4%) | failed_files=0 | 1.19 f/s | ETA 87.0m | last=0.8s
+  [1e] [4400/10599] kept=6014/52769 (11.4%) | failed_files=0 | 1.19 f/s | ETA 86.9m | last=0.8s
+  [1e] [4410/10599] kept=6029/52889 (11.4%) | failed_files=0 | 1.19 f/s | ETA 86.8m | last=0.8s
+  [1e] [4420/10599] kept=6058/53009 (11.4%) | failed_files=0 | 1.19 f/s | ETA 86.6m | last=0.9s
+  [1e] [4430/10599] kept=6061/53129 (11.4%) | failed_files=0 | 1.19 f/s | ETA 86.5m | last=0.8s
+  [1e] [4440/10599] kept=6080/53249 (11.4%) | failed_files=0 | 1.19 f/s | ETA 86.3m | last=0.8s
+  [1e] [4450/10599] kept=6106/53369 (11.4%) | failed_files=0 | 1.19 f/s | ETA 86.2m | last=1.1s
+  [1e] [4460/10599] kept=6147/53489 (11.5%) | failed_files=0 | 1.19 f/s | ETA 86.1m | last=0.8s
+  [1e] [4470/10599] kept=6162/53609 (11.5%) | failed_files=0 | 1.19 f/s | ETA 85.9m | last=0.8s
+  [1e] [4480/10599] kept=6173/53729 (11.5%) | failed_files=0 | 1.19 f/s | ETA 85.8m | last=0.9s
+  [1e] [4490/10599] kept=6192/53849 (11.5%) | failed_files=0 | 1.19 f/s | ETA 85.6m | last=0.8s
+  [1e] [4500/10599] kept=6193/53969 (11.5%) | failed_files=0 | 1.19 f/s | ETA 85.5m | last=0.8s
+    [partial save: 6193 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [4510/10599] kept=6206/54089 (11.5%) | failed_files=0 | 1.19 f/s | ETA 85.4m | last=0.8s
+  [1e] [4520/10599] kept=6215/54209 (11.5%) | failed_files=0 | 1.19 f/s | ETA 85.2m | last=0.8s
+  [1e] [4530/10599] kept=6220/54329 (11.4%) | failed_files=0 | 1.19 f/s | ETA 85.1m | last=0.8s
+  [1e] [4540/10599] kept=6231/54449 (11.4%) | failed_files=0 | 1.19 f/s | ETA 85.0m | last=0.8s
+  [1e] [4550/10599] kept=6238/54569 (11.4%) | failed_files=0 | 1.19 f/s | ETA 84.8m | last=0.8s
+  [1e] [4560/10599] kept=6242/54689 (11.4%) | failed_files=0 | 1.19 f/s | ETA 84.7m | last=0.8s
+  [1e] [4570/10599] kept=6251/54809 (11.4%) | failed_files=0 | 1.19 f/s | ETA 84.5m | last=0.8s
+  [1e] [4580/10599] kept=6261/54929 (11.4%) | failed_files=0 | 1.19 f/s | ETA 84.4m | last=0.9s
+  [1e] [4590/10599] kept=6269/55049 (11.4%) | failed_files=0 | 1.19 f/s | ETA 84.3m | last=0.9s
+  [1e] [4600/10599] kept=6282/55169 (11.4%) | failed_files=0 | 1.19 f/s | ETA 84.1m | last=0.9s
+  [1e] [4610/10599] kept=6291/55289 (11.4%) | failed_files=0 | 1.19 f/s | ETA 84.0m | last=0.9s
+  [1e] [4620/10599] kept=6295/55409 (11.4%) | failed_files=0 | 1.19 f/s | ETA 83.9m | last=0.8s
+  [1e] [4630/10599] kept=6298/55529 (11.3%) | failed_files=0 | 1.19 f/s | ETA 83.7m | last=0.8s
+  [1e] [4640/10599] kept=6304/55649 (11.3%) | failed_files=0 | 1.19 f/s | ETA 83.6m | last=0.9s
+  [1e] [4650/10599] kept=6316/55769 (11.3%) | failed_files=0 | 1.19 f/s | ETA 83.4m | last=0.9s
+  [1e] [4660/10599] kept=6323/55889 (11.3%) | failed_files=0 | 1.19 f/s | ETA 83.3m | last=0.9s
+  [1e] [4670/10599] kept=6342/56009 (11.3%) | failed_files=0 | 1.19 f/s | ETA 83.2m | last=0.8s
+  [1e] [4680/10599] kept=6354/56129 (11.3%) | failed_files=0 | 1.19 f/s | ETA 83.0m | last=0.8s
+  [1e] [4690/10599] kept=6367/56249 (11.3%) | failed_files=0 | 1.19 f/s | ETA 82.9m | last=0.8s
+  [1e] [4700/10599] kept=6370/56369 (11.3%) | failed_files=0 | 1.19 f/s | ETA 82.8m | last=0.8s
+  [1e] [4710/10599] kept=6371/56489 (11.3%) | failed_files=0 | 1.19 f/s | ETA 82.6m | last=0.8s
+  [1e] [4720/10599] kept=6381/56609 (11.3%) | failed_files=0 | 1.19 f/s | ETA 82.5m | last=0.8s
+  [1e] [4730/10599] kept=6392/56729 (11.3%) | failed_files=0 | 1.19 f/s | ETA 82.3m | last=0.9s
+  [1e] [4740/10599] kept=6396/56849 (11.3%) | failed_files=0 | 1.19 f/s | ETA 82.2m | last=0.8s
+  [1e] [4750/10599] kept=6404/56969 (11.2%) | failed_files=0 | 1.19 f/s | ETA 82.1m | last=0.8s
+  [1e] [4760/10599] kept=6415/57089 (11.2%) | failed_files=0 | 1.19 f/s | ETA 81.9m | last=0.8s
+  [1e] [4770/10599] kept=6428/57209 (11.2%) | failed_files=0 | 1.19 f/s | ETA 81.8m | last=0.9s
+  [1e] [4780/10599] kept=6435/57329 (11.2%) | failed_files=0 | 1.19 f/s | ETA 81.7m | last=0.8s
+  [1e] [4790/10599] kept=6441/57449 (11.2%) | failed_files=0 | 1.19 f/s | ETA 81.5m | last=0.8s
+  [1e] [4800/10599] kept=6475/57569 (11.2%) | failed_files=0 | 1.19 f/s | ETA 81.4m | last=0.8s
+  [1e] [4810/10599] kept=6485/57689 (11.2%) | failed_files=0 | 1.19 f/s | ETA 81.2m | last=0.8s
+  [1e] [4820/10599] kept=6494/57809 (11.2%) | failed_files=0 | 1.19 f/s | ETA 81.1m | last=0.8s
+  [1e] [4830/10599] kept=6521/57929 (11.3%) | failed_files=0 | 1.19 f/s | ETA 80.9m | last=0.8s
+  [1e] [4840/10599] kept=6541/58049 (11.3%) | failed_files=0 | 1.19 f/s | ETA 80.8m | last=0.8s
+  [1e] [4850/10599] kept=6554/58169 (11.3%) | failed_files=0 | 1.19 f/s | ETA 80.7m | last=0.8s
+  [1e] [4860/10599] kept=6572/58289 (11.3%) | failed_files=0 | 1.19 f/s | ETA 80.5m | last=0.8s
+  [1e] [4870/10599] kept=6594/58409 (11.3%) | failed_files=0 | 1.19 f/s | ETA 80.4m | last=0.8s
+  [1e] [4880/10599] kept=6611/58529 (11.3%) | failed_files=0 | 1.19 f/s | ETA 80.2m | last=0.8s
+  [1e] [4890/10599] kept=6647/58649 (11.3%) | failed_files=0 | 1.19 f/s | ETA 80.1m | last=0.8s
+  [1e] [4900/10599] kept=6672/58769 (11.4%) | failed_files=0 | 1.19 f/s | ETA 79.9m | last=0.8s
+  [1e] [4910/10599] kept=6696/58889 (11.4%) | failed_files=0 | 1.19 f/s | ETA 79.8m | last=0.8s
+  [1e] [4920/10599] kept=6724/59009 (11.4%) | failed_files=0 | 1.19 f/s | ETA 79.7m | last=0.8s
+  [1e] [4930/10599] kept=6751/59129 (11.4%) | failed_files=0 | 1.19 f/s | ETA 79.5m | last=0.8s
+  [1e] [4940/10599] kept=6769/59249 (11.4%) | failed_files=0 | 1.19 f/s | ETA 79.4m | last=0.8s
+  [1e] [4950/10599] kept=6782/59369 (11.4%) | failed_files=0 | 1.19 f/s | ETA 79.2m | last=0.8s
+  [1e] [4960/10599] kept=6794/59489 (11.4%) | failed_files=0 | 1.19 f/s | ETA 79.1m | last=0.8s
+  [1e] [4970/10599] kept=6804/59609 (11.4%) | failed_files=0 | 1.19 f/s | ETA 78.9m | last=0.8s
+  [1e] [4980/10599] kept=6826/59729 (11.4%) | failed_files=0 | 1.19 f/s | ETA 78.8m | last=0.8s
+  [1e] [4990/10599] kept=6839/59849 (11.4%) | failed_files=0 | 1.19 f/s | ETA 78.6m | last=0.8s
+  [1e] [5000/10599] kept=6848/59969 (11.4%) | failed_files=0 | 1.19 f/s | ETA 78.5m | last=0.8s
+    [partial save: 6848 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [5010/10599] kept=6874/60089 (11.4%) | failed_files=0 | 1.19 f/s | ETA 78.4m | last=0.9s
+  [1e] [5020/10599] kept=6903/60209 (11.5%) | failed_files=0 | 1.19 f/s | ETA 78.3m | last=0.8s
+  [1e] [5030/10599] kept=6919/60329 (11.5%) | failed_files=0 | 1.19 f/s | ETA 78.1m | last=0.8s
+  [1e] [5040/10599] kept=6933/60449 (11.5%) | failed_files=0 | 1.19 f/s | ETA 78.0m | last=0.9s
+  [1e] [5050/10599] kept=6940/60569 (11.5%) | failed_files=0 | 1.19 f/s | ETA 77.8m | last=0.8s
+  [1e] [5060/10599] kept=6950/60689 (11.5%) | failed_files=0 | 1.19 f/s | ETA 77.7m | last=0.8s
+  [1e] [5070/10599] kept=6966/60809 (11.5%) | failed_files=0 | 1.19 f/s | ETA 77.6m | last=0.8s
+  [1e] [5080/10599] kept=6979/60929 (11.5%) | failed_files=0 | 1.19 f/s | ETA 77.4m | last=0.8s
+  [1e] [5090/10599] kept=6998/61049 (11.5%) | failed_files=0 | 1.19 f/s | ETA 77.3m | last=0.8s
+  [1e] [5100/10599] kept=7008/61169 (11.5%) | failed_files=0 | 1.19 f/s | ETA 77.1m | last=0.8s
+  [1e] [5110/10599] kept=7023/61289 (11.5%) | failed_files=0 | 1.19 f/s | ETA 77.0m | last=0.8s
+  [1e] [5120/10599] kept=7031/61409 (11.4%) | failed_files=0 | 1.19 f/s | ETA 76.8m | last=0.8s
+  [1e] [5130/10599] kept=7051/61529 (11.5%) | failed_files=0 | 1.19 f/s | ETA 76.7m | last=0.8s
+  [1e] [5140/10599] kept=7057/61649 (11.4%) | failed_files=0 | 1.19 f/s | ETA 76.6m | last=0.8s
+  [1e] [5150/10599] kept=7071/61769 (11.4%) | failed_files=0 | 1.19 f/s | ETA 76.4m | last=0.8s
+  [1e] [5160/10599] kept=7079/61889 (11.4%) | failed_files=0 | 1.19 f/s | ETA 76.3m | last=0.8s
+  [1e] [5170/10599] kept=7083/62009 (11.4%) | failed_files=0 | 1.19 f/s | ETA 76.1m | last=0.8s
+  [1e] [5180/10599] kept=7089/62129 (11.4%) | failed_files=0 | 1.19 f/s | ETA 76.0m | last=0.8s
+  [1e] [5190/10599] kept=7108/62249 (11.4%) | failed_files=0 | 1.19 f/s | ETA 75.8m | last=0.8s
+  [1e] [5200/10599] kept=7115/62369 (11.4%) | failed_files=0 | 1.19 f/s | ETA 75.7m | last=0.8s
+  [1e] [5210/10599] kept=7125/62489 (11.4%) | failed_files=0 | 1.19 f/s | ETA 75.6m | last=0.8s
+  [1e] [5220/10599] kept=7137/62609 (11.4%) | failed_files=0 | 1.19 f/s | ETA 75.4m | last=0.8s
+  [1e] [5230/10599] kept=7154/62729 (11.4%) | failed_files=0 | 1.19 f/s | ETA 75.3m | last=0.8s
+  [1e] [5240/10599] kept=7165/62849 (11.4%) | failed_files=0 | 1.19 f/s | ETA 75.1m | last=0.8s
+  [1e] [5250/10599] kept=7177/62969 (11.4%) | failed_files=0 | 1.19 f/s | ETA 75.0m | last=0.8s
+  [1e] [5260/10599] kept=7188/63089 (11.4%) | failed_files=0 | 1.19 f/s | ETA 74.9m | last=0.9s
+  [1e] [5270/10599] kept=7201/63209 (11.4%) | failed_files=0 | 1.19 f/s | ETA 74.7m | last=0.8s
+  [1e] [5280/10599] kept=7215/63329 (11.4%) | failed_files=0 | 1.19 f/s | ETA 74.6m | last=0.8s
+  [1e] [5290/10599] kept=7228/63449 (11.4%) | failed_files=0 | 1.19 f/s | ETA 74.4m | last=0.8s
+  [1e] [5300/10599] kept=7243/63569 (11.4%) | failed_files=0 | 1.19 f/s | ETA 74.3m | last=0.8s
+  [1e] [5310/10599] kept=7253/63689 (11.4%) | failed_files=0 | 1.19 f/s | ETA 74.2m | last=0.8s
+  [1e] [5320/10599] kept=7267/63809 (11.4%) | failed_files=0 | 1.19 f/s | ETA 74.0m | last=0.8s
+  [1e] [5330/10599] kept=7290/63929 (11.4%) | failed_files=0 | 1.19 f/s | ETA 73.9m | last=0.8s
+  [1e] [5340/10599] kept=7302/64049 (11.4%) | failed_files=0 | 1.19 f/s | ETA 73.7m | last=0.9s
+  [1e] [5350/10599] kept=7304/64169 (11.4%) | failed_files=0 | 1.19 f/s | ETA 73.6m | last=0.8s
+  [1e] [5360/10599] kept=7327/64289 (11.4%) | failed_files=0 | 1.19 f/s | ETA 73.5m | last=0.8s
+  [1e] [5370/10599] kept=7342/64409 (11.4%) | failed_files=0 | 1.19 f/s | ETA 73.3m | last=0.9s
+  [1e] [5380/10599] kept=7358/64529 (11.4%) | failed_files=0 | 1.19 f/s | ETA 73.2m | last=0.9s
+  [1e] [5390/10599] kept=7379/64649 (11.4%) | failed_files=0 | 1.19 f/s | ETA 73.1m | last=0.9s
+  [1e] [5400/10599] kept=7395/64769 (11.4%) | failed_files=0 | 1.19 f/s | ETA 72.9m | last=0.8s
+  [1e] [5410/10599] kept=7411/64889 (11.4%) | failed_files=0 | 1.19 f/s | ETA 72.8m | last=0.8s
+  [1e] [5420/10599] kept=7429/65009 (11.4%) | failed_files=0 | 1.19 f/s | ETA 72.6m | last=0.9s
+  [1e] [5430/10599] kept=7433/65129 (11.4%) | failed_files=0 | 1.19 f/s | ETA 72.5m | last=0.8s
+  [1e] [5440/10599] kept=7448/65249 (11.4%) | failed_files=0 | 1.19 f/s | ETA 72.4m | last=0.8s
+  [1e] [5450/10599] kept=7455/65369 (11.4%) | failed_files=0 | 1.19 f/s | ETA 72.2m | last=0.8s
+  [1e] [5460/10599] kept=7468/65489 (11.4%) | failed_files=0 | 1.19 f/s | ETA 72.1m | last=0.9s
+  [1e] [5470/10599] kept=7478/65609 (11.4%) | failed_files=0 | 1.19 f/s | ETA 72.0m | last=1.0s
+  [1e] [5480/10599] kept=7481/65729 (11.4%) | failed_files=0 | 1.19 f/s | ETA 71.9m | last=0.9s
+  [1e] [5490/10599] kept=7505/65849 (11.4%) | failed_files=0 | 1.19 f/s | ETA 71.7m | last=0.9s
+  [1e] [5500/10599] kept=7515/65969 (11.4%) | failed_files=0 | 1.19 f/s | ETA 71.6m | last=0.9s
+    [partial save: 7515 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [5510/10599] kept=7525/66089 (11.4%) | failed_files=0 | 1.19 f/s | ETA 71.5m | last=0.9s
+  [1e] [5520/10599] kept=7542/66209 (11.4%) | failed_files=0 | 1.19 f/s | ETA 71.4m | last=0.9s
+  [1e] [5530/10599] kept=7553/66329 (11.4%) | failed_files=0 | 1.19 f/s | ETA 71.2m | last=0.9s
+  [1e] [5540/10599] kept=7578/66449 (11.4%) | failed_files=0 | 1.19 f/s | ETA 71.1m | last=1.0s
+  [1e] [5550/10599] kept=7589/66569 (11.4%) | failed_files=0 | 1.19 f/s | ETA 71.0m | last=1.0s
+  [1e] [5560/10599] kept=7597/66689 (11.4%) | failed_files=0 | 1.19 f/s | ETA 70.9m | last=0.9s
+  [1e] [5570/10599] kept=7611/66809 (11.4%) | failed_files=0 | 1.18 f/s | ETA 70.7m | last=0.9s
+  [1e] [5580/10599] kept=7629/66929 (11.4%) | failed_files=0 | 1.18 f/s | ETA 70.6m | last=0.9s
+  [1e] [5590/10599] kept=7643/67049 (11.4%) | failed_files=0 | 1.18 f/s | ETA 70.5m | last=1.0s
+  [1e] [5600/10599] kept=7654/67169 (11.4%) | failed_files=0 | 1.18 f/s | ETA 70.4m | last=0.9s
+  [1e] [5610/10599] kept=7668/67289 (11.4%) | failed_files=0 | 1.18 f/s | ETA 70.2m | last=0.9s
+  [1e] [5620/10599] kept=7674/67409 (11.4%) | failed_files=0 | 1.18 f/s | ETA 70.1m | last=1.0s
+  [1e] [5630/10599] kept=7683/67529 (11.4%) | failed_files=0 | 1.18 f/s | ETA 70.0m | last=1.0s
+  [1e] [5640/10599] kept=7701/67649 (11.4%) | failed_files=0 | 1.18 f/s | ETA 69.9m | last=1.0s
+  [1e] [5650/10599] kept=7718/67769 (11.4%) | failed_files=0 | 1.18 f/s | ETA 69.7m | last=0.9s
+  [1e] [5660/10599] kept=7731/67889 (11.4%) | failed_files=0 | 1.18 f/s | ETA 69.6m | last=0.9s
+  [1e] [5670/10599] kept=7741/68009 (11.4%) | failed_files=0 | 1.18 f/s | ETA 69.5m | last=1.0s
+  [1e] [5680/10599] kept=7746/68129 (11.4%) | failed_files=0 | 1.18 f/s | ETA 69.4m | last=1.0s
+  [1e] [5690/10599] kept=7752/68249 (11.4%) | failed_files=0 | 1.18 f/s | ETA 69.3m | last=1.0s
+  [1e] [5700/10599] kept=7782/68369 (11.4%) | failed_files=0 | 1.18 f/s | ETA 69.1m | last=0.9s
+  [1e] [5710/10599] kept=7802/68489 (11.4%) | failed_files=0 | 1.18 f/s | ETA 69.0m | last=0.9s
+  [1e] [5720/10599] kept=7827/68609 (11.4%) | failed_files=0 | 1.18 f/s | ETA 68.9m | last=0.9s
+  [1e] [5730/10599] kept=7838/68729 (11.4%) | failed_files=0 | 1.18 f/s | ETA 68.8m | last=1.1s
+  [1e] [5740/10599] kept=7847/68849 (11.4%) | failed_files=0 | 1.18 f/s | ETA 68.7m | last=0.9s
+  [1e] [5750/10599] kept=7861/68969 (11.4%) | failed_files=0 | 1.18 f/s | ETA 68.5m | last=0.9s
+  [1e] [5760/10599] kept=7873/69089 (11.4%) | failed_files=0 | 1.18 f/s | ETA 68.4m | last=0.9s
+  [1e] [5770/10599] kept=7876/69209 (11.4%) | failed_files=0 | 1.18 f/s | ETA 68.3m | last=0.9s
+  [1e] [5780/10599] kept=7886/69329 (11.4%) | failed_files=0 | 1.18 f/s | ETA 68.2m | last=0.9s
+  [1e] [5790/10599] kept=7894/69449 (11.4%) | failed_files=0 | 1.18 f/s | ETA 68.0m | last=0.9s
+  [1e] [5800/10599] kept=7908/69569 (11.4%) | failed_files=0 | 1.18 f/s | ETA 67.9m | last=1.1s
+  [1e] [5810/10599] kept=7939/69689 (11.4%) | failed_files=0 | 1.18 f/s | ETA 67.8m | last=1.0s
+  [1e] [5820/10599] kept=7954/69809 (11.4%) | failed_files=0 | 1.18 f/s | ETA 67.7m | last=0.9s
+  [1e] [5830/10599] kept=7975/69929 (11.4%) | failed_files=0 | 1.18 f/s | ETA 67.5m | last=1.0s
+  [1e] [5840/10599] kept=7990/70049 (11.4%) | failed_files=0 | 1.18 f/s | ETA 67.4m | last=0.9s
+  [1e] [5850/10599] kept=7997/70169 (11.4%) | failed_files=0 | 1.18 f/s | ETA 67.3m | last=0.9s
+  [1e] [5860/10599] kept=8006/70289 (11.4%) | failed_files=0 | 1.18 f/s | ETA 67.2m | last=1.0s
+  [1e] [5870/10599] kept=8020/70409 (11.4%) | failed_files=0 | 1.18 f/s | ETA 67.0m | last=1.0s
+  [1e] [5880/10599] kept=8034/70529 (11.4%) | failed_files=0 | 1.18 f/s | ETA 66.9m | last=0.9s
+  [1e] [5890/10599] kept=8039/70649 (11.4%) | failed_files=0 | 1.18 f/s | ETA 66.8m | last=1.0s
+  [1e] [5900/10599] kept=8051/70769 (11.4%) | failed_files=0 | 1.18 f/s | ETA 66.6m | last=0.9s
+  [1e] [5910/10599] kept=8061/70889 (11.4%) | failed_files=0 | 1.17 f/s | ETA 66.5m | last=0.9s
+  [1e] [5920/10599] kept=8069/71009 (11.4%) | failed_files=0 | 1.17 f/s | ETA 66.4m | last=0.9s
+  [1e] [5930/10599] kept=8092/71129 (11.4%) | failed_files=0 | 1.17 f/s | ETA 66.3m | last=0.9s
+  [1e] [5940/10599] kept=8108/71249 (11.4%) | failed_files=0 | 1.17 f/s | ETA 66.1m | last=1.0s
+  [1e] [5950/10599] kept=8121/71369 (11.4%) | failed_files=0 | 1.17 f/s | ETA 66.0m | last=0.9s
+  [1e] [5960/10599] kept=8131/71489 (11.4%) | failed_files=0 | 1.17 f/s | ETA 65.9m | last=0.9s
+  [1e] [5970/10599] kept=8146/71609 (11.4%) | failed_files=0 | 1.17 f/s | ETA 65.7m | last=0.9s
+  [1e] [5980/10599] kept=8152/71729 (11.4%) | failed_files=0 | 1.17 f/s | ETA 65.6m | last=0.9s
+  [1e] [5990/10599] kept=8164/71849 (11.4%) | failed_files=0 | 1.17 f/s | ETA 65.5m | last=0.9s
+  [1e] [6000/10599] kept=8172/71969 (11.4%) | failed_files=0 | 1.17 f/s | ETA 65.3m | last=0.9s
+    [partial save: 8172 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [6010/10599] kept=8194/72089 (11.4%) | failed_files=0 | 1.17 f/s | ETA 65.2m | last=0.9s
+  [1e] [6020/10599] kept=8204/72209 (11.4%) | failed_files=0 | 1.17 f/s | ETA 65.1m | last=0.9s
+  [1e] [6030/10599] kept=8217/72329 (11.4%) | failed_files=0 | 1.17 f/s | ETA 64.9m | last=0.9s
+  [1e] [6040/10599] kept=8241/72449 (11.4%) | failed_files=0 | 1.17 f/s | ETA 64.8m | last=0.9s
+  [1e] [6050/10599] kept=8245/72569 (11.4%) | failed_files=0 | 1.17 f/s | ETA 64.7m | last=0.9s
+  [1e] [6060/10599] kept=8248/72689 (11.3%) | failed_files=0 | 1.17 f/s | ETA 64.5m | last=0.9s
+  [1e] [6070/10599] kept=8264/72809 (11.4%) | failed_files=0 | 1.17 f/s | ETA 64.4m | last=0.9s
+  [1e] [6080/10599] kept=8272/72929 (11.3%) | failed_files=0 | 1.17 f/s | ETA 64.3m | last=0.9s
+  [1e] [6090/10599] kept=8295/73049 (11.4%) | failed_files=0 | 1.17 f/s | ETA 64.1m | last=0.9s
+  [1e] [6100/10599] kept=8305/73169 (11.4%) | failed_files=0 | 1.17 f/s | ETA 64.0m | last=0.9s
+  [1e] [6110/10599] kept=8318/73289 (11.3%) | failed_files=0 | 1.17 f/s | ETA 63.9m | last=0.9s
+  [1e] [6120/10599] kept=8330/73409 (11.3%) | failed_files=0 | 1.17 f/s | ETA 63.7m | last=0.9s
+  [1e] [6130/10599] kept=8345/73529 (11.3%) | failed_files=0 | 1.17 f/s | ETA 63.6m | last=0.9s
+  [1e] [6140/10599] kept=8370/73649 (11.4%) | failed_files=0 | 1.17 f/s | ETA 63.4m | last=1.0s
+  [1e] [6150/10599] kept=8386/73769 (11.4%) | failed_files=0 | 1.17 f/s | ETA 63.3m | last=0.9s
+  [1e] [6160/10599] kept=8418/73889 (11.4%) | failed_files=0 | 1.17 f/s | ETA 63.2m | last=0.9s
+  [1e] [6170/10599] kept=8440/74009 (11.4%) | failed_files=0 | 1.17 f/s | ETA 63.0m | last=0.9s
+  [1e] [6180/10599] kept=8465/74129 (11.4%) | failed_files=0 | 1.17 f/s | ETA 62.9m | last=0.9s
+  [1e] [6190/10599] kept=8491/74249 (11.4%) | failed_files=0 | 1.17 f/s | ETA 62.8m | last=0.9s
+  [1e] [6200/10599] kept=8506/74369 (11.4%) | failed_files=0 | 1.17 f/s | ETA 62.7m | last=0.9s
+  [1e] [6210/10599] kept=8512/74489 (11.4%) | failed_files=0 | 1.17 f/s | ETA 62.5m | last=1.1s
+  [1e] [6220/10599] kept=8536/74609 (11.4%) | failed_files=0 | 1.17 f/s | ETA 62.4m | last=1.0s
+  [1e] [6230/10599] kept=8563/74729 (11.5%) | failed_files=0 | 1.17 f/s | ETA 62.3m | last=0.9s
+  [1e] [6240/10599] kept=8608/74849 (11.5%) | failed_files=0 | 1.17 f/s | ETA 62.1m | last=0.9s
+  [1e] [6250/10599] kept=8650/74969 (11.5%) | failed_files=0 | 1.17 f/s | ETA 62.0m | last=0.9s
+  [1e] [6260/10599] kept=8687/75089 (11.6%) | failed_files=0 | 1.17 f/s | ETA 61.9m | last=1.0s
+  [1e] [6270/10599] kept=8702/75209 (11.6%) | failed_files=0 | 1.17 f/s | ETA 61.7m | last=1.0s
+  [1e] [6280/10599] kept=8711/75329 (11.6%) | failed_files=0 | 1.17 f/s | ETA 61.6m | last=0.9s
+  [1e] [6290/10599] kept=8720/75449 (11.6%) | failed_files=0 | 1.17 f/s | ETA 61.5m | last=0.9s
+  [1e] [6300/10599] kept=8727/75569 (11.5%) | failed_files=0 | 1.17 f/s | ETA 61.3m | last=0.9s
+  [1e] [6310/10599] kept=8734/75689 (11.5%) | failed_files=0 | 1.17 f/s | ETA 61.2m | last=0.9s
+  [1e] [6320/10599] kept=8738/75809 (11.5%) | failed_files=0 | 1.17 f/s | ETA 61.1m | last=0.9s
+  [1e] [6330/10599] kept=8739/75929 (11.5%) | failed_files=0 | 1.17 f/s | ETA 60.9m | last=0.9s
+  [1e] [6340/10599] kept=8767/76049 (11.5%) | failed_files=0 | 1.17 f/s | ETA 60.8m | last=1.0s
+  [1e] [6350/10599] kept=8769/76169 (11.5%) | failed_files=0 | 1.17 f/s | ETA 60.7m | last=0.9s
+  [1e] [6360/10599] kept=8771/76289 (11.5%) | failed_files=0 | 1.17 f/s | ETA 60.5m | last=0.9s
+  [1e] [6370/10599] kept=8775/76409 (11.5%) | failed_files=0 | 1.17 f/s | ETA 60.4m | last=0.9s
+  [1e] [6380/10599] kept=8778/76529 (11.5%) | failed_files=0 | 1.17 f/s | ETA 60.3m | last=0.9s
+  [1e] [6390/10599] kept=8780/76649 (11.5%) | failed_files=0 | 1.17 f/s | ETA 60.1m | last=1.0s
+  [1e] [6400/10599] kept=8783/76769 (11.4%) | failed_files=0 | 1.17 f/s | ETA 60.0m | last=0.9s
+  [1e] [6410/10599] kept=8784/76889 (11.4%) | failed_files=0 | 1.17 f/s | ETA 59.9m | last=0.9s
+  [1e] [6420/10599] kept=8787/77009 (11.4%) | failed_files=0 | 1.17 f/s | ETA 59.7m | last=0.9s
+  [1e] [6430/10599] kept=8803/77129 (11.4%) | failed_files=0 | 1.17 f/s | ETA 59.6m | last=1.0s
+  [1e] [6440/10599] kept=8831/77249 (11.4%) | failed_files=0 | 1.17 f/s | ETA 59.5m | last=0.9s
+  [1e] [6450/10599] kept=8853/77369 (11.4%) | failed_files=0 | 1.17 f/s | ETA 59.3m | last=0.9s
+  [1e] [6460/10599] kept=8875/77489 (11.5%) | failed_files=0 | 1.17 f/s | ETA 59.2m | last=0.9s
+  [1e] [6470/10599] kept=8880/77609 (11.4%) | failed_files=0 | 1.17 f/s | ETA 59.1m | last=1.0s
+  [1e] [6480/10599] kept=8891/77729 (11.4%) | failed_files=0 | 1.17 f/s | ETA 58.9m | last=0.9s
+  [1e] [6490/10599] kept=8902/77849 (11.4%) | failed_files=0 | 1.17 f/s | ETA 58.8m | last=1.0s
+  [1e] [6500/10599] kept=8909/77969 (11.4%) | failed_files=0 | 1.16 f/s | ETA 58.6m | last=0.9s
+    [partial save: 8909 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [6510/10599] kept=8929/78089 (11.4%) | failed_files=0 | 1.16 f/s | ETA 58.5m | last=0.9s
+  [1e] [6520/10599] kept=8941/78209 (11.4%) | failed_files=0 | 1.16 f/s | ETA 58.4m | last=0.9s
+  [1e] [6530/10599] kept=8950/78329 (11.4%) | failed_files=0 | 1.16 f/s | ETA 58.3m | last=0.9s
+  [1e] [6540/10599] kept=8964/78449 (11.4%) | failed_files=0 | 1.16 f/s | ETA 58.1m | last=1.1s
+  [1e] [6550/10599] kept=8964/78569 (11.4%) | failed_files=0 | 1.16 f/s | ETA 58.0m | last=1.0s
+  [1e] [6560/10599] kept=8970/78689 (11.4%) | failed_files=0 | 1.16 f/s | ETA 57.9m | last=0.9s
+  [1e] [6570/10599] kept=8986/78809 (11.4%) | failed_files=0 | 1.16 f/s | ETA 57.7m | last=0.9s
+  [1e] [6580/10599] kept=8995/78929 (11.4%) | failed_files=0 | 1.16 f/s | ETA 57.6m | last=0.9s
+  [1e] [6590/10599] kept=9016/79049 (11.4%) | failed_files=0 | 1.16 f/s | ETA 57.5m | last=0.9s
+  [1e] [6600/10599] kept=9036/79169 (11.4%) | failed_files=0 | 1.16 f/s | ETA 57.3m | last=0.9s
+  [1e] [6610/10599] kept=9043/79289 (11.4%) | failed_files=0 | 1.16 f/s | ETA 57.2m | last=0.9s
+  [1e] [6620/10599] kept=9069/79409 (11.4%) | failed_files=0 | 1.16 f/s | ETA 57.1m | last=0.9s
+  [1e] [6630/10599] kept=9084/79529 (11.4%) | failed_files=0 | 1.16 f/s | ETA 56.9m | last=0.9s
+  [1e] [6640/10599] kept=9099/79649 (11.4%) | failed_files=0 | 1.16 f/s | ETA 56.8m | last=0.9s
+  [1e] [6650/10599] kept=9123/79769 (11.4%) | failed_files=0 | 1.16 f/s | ETA 56.7m | last=0.9s
+  [1e] [6660/10599] kept=9134/79889 (11.4%) | failed_files=0 | 1.16 f/s | ETA 56.5m | last=0.9s
+  [1e] [6670/10599] kept=9138/80009 (11.4%) | failed_files=0 | 1.16 f/s | ETA 56.4m | last=0.9s
+  [1e] [6680/10599] kept=9147/80129 (11.4%) | failed_files=0 | 1.16 f/s | ETA 56.2m | last=0.9s
+  [1e] [6690/10599] kept=9165/80249 (11.4%) | failed_files=0 | 1.16 f/s | ETA 56.1m | last=0.9s
+  [1e] [6700/10599] kept=9179/80369 (11.4%) | failed_files=0 | 1.16 f/s | ETA 56.0m | last=1.0s
+  [1e] [6710/10599] kept=9194/80489 (11.4%) | failed_files=0 | 1.16 f/s | ETA 55.8m | last=0.9s
+  [1e] [6720/10599] kept=9199/80609 (11.4%) | failed_files=0 | 1.16 f/s | ETA 55.7m | last=1.0s
+  [1e] [6730/10599] kept=9211/80729 (11.4%) | failed_files=0 | 1.16 f/s | ETA 55.6m | last=0.9s
+  [1e] [6740/10599] kept=9220/80849 (11.4%) | failed_files=0 | 1.16 f/s | ETA 55.4m | last=0.9s
+  [1e] [6750/10599] kept=9255/80969 (11.4%) | failed_files=0 | 1.16 f/s | ETA 55.3m | last=0.9s
+  [1e] [6760/10599] kept=9261/81089 (11.4%) | failed_files=0 | 1.16 f/s | ETA 55.2m | last=1.0s
+  [1e] [6770/10599] kept=9267/81209 (11.4%) | failed_files=0 | 1.16 f/s | ETA 55.0m | last=1.0s
+  [1e] [6780/10599] kept=9273/81329 (11.4%) | failed_files=0 | 1.16 f/s | ETA 54.9m | last=1.0s
+  [1e] [6790/10599] kept=9285/81449 (11.4%) | failed_files=0 | 1.16 f/s | ETA 54.8m | last=0.9s
+  [1e] [6800/10599] kept=9294/81569 (11.4%) | failed_files=0 | 1.16 f/s | ETA 54.6m | last=1.0s
+  [1e] [6810/10599] kept=9300/81689 (11.4%) | failed_files=0 | 1.16 f/s | ETA 54.5m | last=1.0s
+  [1e] [6820/10599] kept=9309/81809 (11.4%) | failed_files=0 | 1.16 f/s | ETA 54.3m | last=0.9s
+  [1e] [6830/10599] kept=9321/81929 (11.4%) | failed_files=0 | 1.16 f/s | ETA 54.2m | last=0.9s
+  [1e] [6840/10599] kept=9325/82049 (11.4%) | failed_files=0 | 1.16 f/s | ETA 54.1m | last=0.9s
+  [1e] [6850/10599] kept=9329/82169 (11.4%) | failed_files=0 | 1.16 f/s | ETA 53.9m | last=0.9s
+  [1e] [6860/10599] kept=9345/82289 (11.4%) | failed_files=0 | 1.16 f/s | ETA 53.8m | last=0.9s
+  [1e] [6870/10599] kept=9354/82409 (11.4%) | failed_files=0 | 1.16 f/s | ETA 53.6m | last=0.9s
+  [1e] [6880/10599] kept=9356/82529 (11.3%) | failed_files=0 | 1.16 f/s | ETA 53.5m | last=0.9s
+  [1e] [6890/10599] kept=9366/82649 (11.3%) | failed_files=0 | 1.16 f/s | ETA 53.4m | last=0.9s
+  [1e] [6900/10599] kept=9387/82769 (11.3%) | failed_files=0 | 1.16 f/s | ETA 53.2m | last=0.9s
+  [1e] [6910/10599] kept=9405/82889 (11.3%) | failed_files=0 | 1.16 f/s | ETA 53.1m | last=0.9s
+  [1e] [6920/10599] kept=9411/83009 (11.3%) | failed_files=0 | 1.16 f/s | ETA 52.9m | last=0.9s
+  [1e] [6930/10599] kept=9441/83129 (11.4%) | failed_files=0 | 1.16 f/s | ETA 52.8m | last=0.9s
+  [1e] [6940/10599] kept=9467/83249 (11.4%) | failed_files=0 | 1.16 f/s | ETA 52.7m | last=0.9s
+  [1e] [6950/10599] kept=9485/83369 (11.4%) | failed_files=0 | 1.16 f/s | ETA 52.5m | last=0.9s
+  [1e] [6960/10599] kept=9498/83489 (11.4%) | failed_files=0 | 1.16 f/s | ETA 52.4m | last=1.0s
+  [1e] [6970/10599] kept=9511/83609 (11.4%) | failed_files=0 | 1.16 f/s | ETA 52.2m | last=0.9s
+  [1e] [6980/10599] kept=9527/83729 (11.4%) | failed_files=0 | 1.16 f/s | ETA 52.1m | last=0.9s
+  [1e] [6990/10599] kept=9552/83849 (11.4%) | failed_files=0 | 1.16 f/s | ETA 52.0m | last=0.9s
+  [1e] [7000/10599] kept=9573/83969 (11.4%) | failed_files=0 | 1.16 f/s | ETA 51.8m | last=0.9s
+    [partial save: 9573 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [7010/10599] kept=9581/84089 (11.4%) | failed_files=0 | 1.16 f/s | ETA 51.7m | last=0.9s
+  [1e] [7020/10599] kept=9599/84209 (11.4%) | failed_files=0 | 1.16 f/s | ETA 51.6m | last=1.0s
+  [1e] [7030/10599] kept=9630/84329 (11.4%) | failed_files=0 | 1.16 f/s | ETA 51.5m | last=1.1s
+  [1e] [7040/10599] kept=9648/84449 (11.4%) | failed_files=0 | 1.16 f/s | ETA 51.3m | last=0.9s
+  [1e] [7050/10599] kept=9681/84569 (11.4%) | failed_files=0 | 1.16 f/s | ETA 51.2m | last=0.9s
+  [1e] [7060/10599] kept=9695/84689 (11.4%) | failed_files=0 | 1.16 f/s | ETA 51.0m | last=0.9s
+  [1e] [7070/10599] kept=9713/84809 (11.5%) | failed_files=0 | 1.16 f/s | ETA 50.9m | last=0.9s
+  [1e] [7080/10599] kept=9731/84929 (11.5%) | failed_files=0 | 1.16 f/s | ETA 50.8m | last=1.0s
+  [1e] [7090/10599] kept=9747/85049 (11.5%) | failed_files=0 | 1.16 f/s | ETA 50.6m | last=0.9s
+  [1e] [7100/10599] kept=9770/85169 (11.5%) | failed_files=0 | 1.16 f/s | ETA 50.5m | last=1.0s
+  [1e] [7110/10599] kept=9774/85289 (11.5%) | failed_files=0 | 1.16 f/s | ETA 50.3m | last=0.9s
+  [1e] [7120/10599] kept=9781/85409 (11.5%) | failed_files=0 | 1.15 f/s | ETA 50.2m | last=1.0s
+  [1e] [7130/10599] kept=9790/85529 (11.4%) | failed_files=0 | 1.15 f/s | ETA 50.1m | last=0.9s
+  [1e] [7140/10599] kept=9800/85649 (11.4%) | failed_files=0 | 1.15 f/s | ETA 49.9m | last=0.9s
+  [1e] [7150/10599] kept=9826/85769 (11.5%) | failed_files=0 | 1.15 f/s | ETA 49.8m | last=1.0s
+  [1e] [7160/10599] kept=9842/85889 (11.5%) | failed_files=0 | 1.15 f/s | ETA 49.7m | last=1.0s
+  [1e] [7170/10599] kept=9865/86009 (11.5%) | failed_files=0 | 1.15 f/s | ETA 49.5m | last=1.0s
+  [1e] [7180/10599] kept=9883/86129 (11.5%) | failed_files=0 | 1.15 f/s | ETA 49.4m | last=0.9s
+  [1e] [7190/10599] kept=9899/86249 (11.5%) | failed_files=0 | 1.15 f/s | ETA 49.2m | last=1.0s
+  [1e] [7200/10599] kept=9916/86369 (11.5%) | failed_files=0 | 1.15 f/s | ETA 49.1m | last=0.9s
+  [1e] [7210/10599] kept=9924/86489 (11.5%) | failed_files=0 | 1.15 f/s | ETA 49.0m | last=0.9s
+  [1e] [7220/10599] kept=9943/86609 (11.5%) | failed_files=0 | 1.15 f/s | ETA 48.8m | last=0.9s
+  [1e] [7230/10599] kept=9953/86729 (11.5%) | failed_files=0 | 1.15 f/s | ETA 48.7m | last=0.9s
+  [1e] [7240/10599] kept=9968/86849 (11.5%) | failed_files=0 | 1.15 f/s | ETA 48.5m | last=1.0s
+  [1e] [7250/10599] kept=9974/86969 (11.5%) | failed_files=0 | 1.15 f/s | ETA 48.4m | last=1.0s
+  [1e] [7260/10599] kept=10002/87089 (11.5%) | failed_files=0 | 1.15 f/s | ETA 48.3m | last=1.1s
+  [1e] [7270/10599] kept=10024/87209 (11.5%) | failed_files=0 | 1.15 f/s | ETA 48.1m | last=0.9s
+  [1e] [7280/10599] kept=10037/87329 (11.5%) | failed_files=0 | 1.15 f/s | ETA 48.0m | last=1.0s
+  [1e] [7290/10599] kept=10059/87449 (11.5%) | failed_files=0 | 1.15 f/s | ETA 47.8m | last=0.9s
+  [1e] [7300/10599] kept=10078/87569 (11.5%) | failed_files=0 | 1.15 f/s | ETA 47.7m | last=0.9s
+  [1e] [7310/10599] kept=10129/87689 (11.6%) | failed_files=0 | 1.15 f/s | ETA 47.6m | last=1.0s
+  [1e] [7320/10599] kept=10154/87809 (11.6%) | failed_files=0 | 1.15 f/s | ETA 47.4m | last=0.9s
+  [1e] [7330/10599] kept=10184/87929 (11.6%) | failed_files=0 | 1.15 f/s | ETA 47.3m | last=1.0s
+  [1e] [7340/10599] kept=10190/88049 (11.6%) | failed_files=0 | 1.15 f/s | ETA 47.2m | last=0.9s
+  [1e] [7350/10599] kept=10196/88169 (11.6%) | failed_files=0 | 1.15 f/s | ETA 47.0m | last=0.9s
+  [1e] [7360/10599] kept=10196/88289 (11.5%) | failed_files=0 | 1.15 f/s | ETA 46.9m | last=0.9s
+  [1e] [7370/10599] kept=10198/88409 (11.5%) | failed_files=0 | 1.15 f/s | ETA 46.7m | last=0.9s
+  [1e] [7380/10599] kept=10198/88529 (11.5%) | failed_files=0 | 1.15 f/s | ETA 46.6m | last=0.9s
+  [1e] [7390/10599] kept=10201/88649 (11.5%) | failed_files=0 | 1.15 f/s | ETA 46.4m | last=0.9s
+  [1e] [7400/10599] kept=10204/88769 (11.5%) | failed_files=0 | 1.15 f/s | ETA 46.3m | last=0.9s
+  [1e] [7410/10599] kept=10213/88889 (11.5%) | failed_files=0 | 1.15 f/s | ETA 46.2m | last=1.1s
+  [1e] [7420/10599] kept=10216/89009 (11.5%) | failed_files=0 | 1.15 f/s | ETA 46.0m | last=1.0s
+  [1e] [7430/10599] kept=10227/89129 (11.5%) | failed_files=0 | 1.15 f/s | ETA 45.9m | last=0.9s
+  [1e] [7440/10599] kept=10240/89249 (11.5%) | failed_files=0 | 1.15 f/s | ETA 45.7m | last=0.9s
+  [1e] [7450/10599] kept=10273/89369 (11.5%) | failed_files=0 | 1.15 f/s | ETA 45.6m | last=0.9s
+  [1e] [7460/10599] kept=10291/89489 (11.5%) | failed_files=0 | 1.15 f/s | ETA 45.5m | last=0.9s
+  [1e] [7470/10599] kept=10305/89609 (11.5%) | failed_files=0 | 1.15 f/s | ETA 45.3m | last=0.9s
+  [1e] [7480/10599] kept=10314/89729 (11.5%) | failed_files=0 | 1.15 f/s | ETA 45.2m | last=0.9s
+  [1e] [7490/10599] kept=10327/89849 (11.5%) | failed_files=0 | 1.15 f/s | ETA 45.0m | last=0.9s
+  [1e] [7500/10599] kept=10336/89969 (11.5%) | failed_files=0 | 1.15 f/s | ETA 44.9m | last=1.0s
+    [partial save: 10336 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [7510/10599] kept=10348/90089 (11.5%) | failed_files=0 | 1.15 f/s | ETA 44.8m | last=0.9s
+  [1e] [7520/10599] kept=10349/90209 (11.5%) | failed_files=0 | 1.15 f/s | ETA 44.6m | last=0.9s
+  [1e] [7530/10599] kept=10353/90329 (11.5%) | failed_files=0 | 1.15 f/s | ETA 44.5m | last=1.0s
+  [1e] [7540/10599] kept=10369/90449 (11.5%) | failed_files=0 | 1.15 f/s | ETA 44.4m | last=0.9s
+  [1e] [7550/10599] kept=10384/90569 (11.5%) | failed_files=0 | 1.15 f/s | ETA 44.2m | last=1.0s
+  [1e] [7560/10599] kept=10388/90689 (11.5%) | failed_files=0 | 1.15 f/s | ETA 44.1m | last=1.0s
+  [1e] [7570/10599] kept=10405/90809 (11.5%) | failed_files=0 | 1.15 f/s | ETA 43.9m | last=0.9s
+  [1e] [7580/10599] kept=10424/90929 (11.5%) | failed_files=0 | 1.15 f/s | ETA 43.8m | last=0.9s
+  [1e] [7590/10599] kept=10448/91049 (11.5%) | failed_files=0 | 1.15 f/s | ETA 43.6m | last=0.9s
+  [1e] [7600/10599] kept=10481/91169 (11.5%) | failed_files=0 | 1.15 f/s | ETA 43.5m | last=0.9s
+  [1e] [7610/10599] kept=10500/91289 (11.5%) | failed_files=0 | 1.15 f/s | ETA 43.4m | last=0.9s
+  [1e] [7620/10599] kept=10503/91409 (11.5%) | failed_files=0 | 1.15 f/s | ETA 43.2m | last=0.9s
+  [1e] [7630/10599] kept=10510/91529 (11.5%) | failed_files=0 | 1.15 f/s | ETA 43.1m | last=0.9s
+  [1e] [7640/10599] kept=10522/91649 (11.5%) | failed_files=0 | 1.15 f/s | ETA 42.9m | last=0.9s
+  [1e] [7650/10599] kept=10534/91769 (11.5%) | failed_files=0 | 1.15 f/s | ETA 42.8m | last=0.9s
+  [1e] [7660/10599] kept=10566/91889 (11.5%) | failed_files=0 | 1.15 f/s | ETA 42.7m | last=0.9s
+  [1e] [7670/10599] kept=10600/92009 (11.5%) | failed_files=0 | 1.15 f/s | ETA 42.5m | last=1.0s
+  [1e] [7680/10599] kept=10629/92129 (11.5%) | failed_files=0 | 1.15 f/s | ETA 42.4m | last=0.9s
+  [1e] [7690/10599] kept=10637/92249 (11.5%) | failed_files=0 | 1.15 f/s | ETA 42.2m | last=0.9s
+  [1e] [7700/10599] kept=10693/92369 (11.6%) | failed_files=0 | 1.15 f/s | ETA 42.1m | last=0.9s
+  [1e] [7710/10599] kept=10728/92489 (11.6%) | failed_files=0 | 1.15 f/s | ETA 41.9m | last=0.9s
+  [1e] [7720/10599] kept=10774/92609 (11.6%) | failed_files=0 | 1.15 f/s | ETA 41.8m | last=0.9s
+  [1e] [7730/10599] kept=10798/92729 (11.6%) | failed_files=0 | 1.15 f/s | ETA 41.7m | last=0.9s
+  [1e] [7740/10599] kept=10824/92849 (11.7%) | failed_files=0 | 1.15 f/s | ETA 41.5m | last=0.9s
+  [1e] [7750/10599] kept=10845/92969 (11.7%) | failed_files=0 | 1.15 f/s | ETA 41.4m | last=0.9s
+  [1e] [7760/10599] kept=10847/93089 (11.7%) | failed_files=0 | 1.15 f/s | ETA 41.2m | last=0.9s
+  [1e] [7770/10599] kept=10859/93209 (11.7%) | failed_files=0 | 1.15 f/s | ETA 41.1m | last=0.9s
+  [1e] [7780/10599] kept=10920/93329 (11.7%) | failed_files=0 | 1.15 f/s | ETA 40.9m | last=0.9s
+  [1e] [7790/10599] kept=10958/93449 (11.7%) | failed_files=0 | 1.15 f/s | ETA 40.8m | last=0.9s
+  [1e] [7800/10599] kept=10966/93569 (11.7%) | failed_files=0 | 1.15 f/s | ETA 40.7m | last=1.0s
+  [1e] [7810/10599] kept=10990/93689 (11.7%) | failed_files=0 | 1.15 f/s | ETA 40.5m | last=1.0s
+  [1e] [7820/10599] kept=11000/93809 (11.7%) | failed_files=0 | 1.15 f/s | ETA 40.4m | last=1.0s
+  [1e] [7830/10599] kept=11015/93929 (11.7%) | failed_files=0 | 1.15 f/s | ETA 40.2m | last=0.9s
+  [1e] [7840/10599] kept=11034/94049 (11.7%) | failed_files=0 | 1.15 f/s | ETA 40.1m | last=1.0s
+  [1e] [7850/10599] kept=11034/94169 (11.7%) | failed_files=0 | 1.15 f/s | ETA 40.0m | last=1.0s
+  [1e] [7860/10599] kept=11039/94289 (11.7%) | failed_files=0 | 1.15 f/s | ETA 39.8m | last=1.0s
+  [1e] [7870/10599] kept=11039/94409 (11.7%) | failed_files=0 | 1.15 f/s | ETA 39.7m | last=1.0s
+  [1e] [7880/10599] kept=11039/94529 (11.7%) | failed_files=0 | 1.15 f/s | ETA 39.5m | last=1.1s
+  [1e] [7890/10599] kept=11039/94649 (11.7%) | failed_files=0 | 1.15 f/s | ETA 39.4m | last=1.0s
+  [1e] [7900/10599] kept=11041/94769 (11.7%) | failed_files=0 | 1.15 f/s | ETA 39.3m | last=0.9s
+  [1e] [7910/10599] kept=11043/94889 (11.6%) | failed_files=0 | 1.15 f/s | ETA 39.1m | last=1.0s
+  [1e] [7920/10599] kept=11045/95009 (11.6%) | failed_files=0 | 1.14 f/s | ETA 39.0m | last=0.9s
+  [1e] [7930/10599] kept=11052/95129 (11.6%) | failed_files=0 | 1.14 f/s | ETA 38.9m | last=0.9s
+  [1e] [7940/10599] kept=11059/95249 (11.6%) | failed_files=0 | 1.14 f/s | ETA 38.7m | last=0.9s
+  [1e] [7950/10599] kept=11060/95369 (11.6%) | failed_files=0 | 1.14 f/s | ETA 38.6m | last=0.9s
+  [1e] [7960/10599] kept=11069/95489 (11.6%) | failed_files=0 | 1.14 f/s | ETA 38.4m | last=0.9s
+  [1e] [7970/10599] kept=11069/95609 (11.6%) | failed_files=0 | 1.14 f/s | ETA 38.3m | last=0.9s
+  [1e] [7980/10599] kept=11069/95729 (11.6%) | failed_files=0 | 1.14 f/s | ETA 38.1m | last=0.9s
+  [1e] [7990/10599] kept=11079/95849 (11.6%) | failed_files=0 | 1.14 f/s | ETA 38.0m | last=0.9s
+  [1e] [8000/10599] kept=11079/95969 (11.5%) | failed_files=0 | 1.14 f/s | ETA 37.8m | last=0.9s
+    [partial save: 11079 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [8010/10599] kept=11080/96089 (11.5%) | failed_files=0 | 1.14 f/s | ETA 37.7m | last=1.0s
+  [1e] [8020/10599] kept=11084/96209 (11.5%) | failed_files=0 | 1.14 f/s | ETA 37.6m | last=0.9s
+  [1e] [8030/10599] kept=11084/96329 (11.5%) | failed_files=0 | 1.14 f/s | ETA 37.4m | last=0.9s
+  [1e] [8040/10599] kept=11084/96449 (11.5%) | failed_files=0 | 1.14 f/s | ETA 37.3m | last=1.0s
+  [1e] [8050/10599] kept=11087/96569 (11.5%) | failed_files=0 | 1.14 f/s | ETA 37.2m | last=1.0s
+  [1e] [8060/10599] kept=11088/96689 (11.5%) | failed_files=0 | 1.14 f/s | ETA 37.0m | last=0.9s
+  [1e] [8070/10599] kept=11090/96809 (11.5%) | failed_files=0 | 1.14 f/s | ETA 36.9m | last=0.9s
+  [1e] [8080/10599] kept=11092/96929 (11.4%) | failed_files=0 | 1.14 f/s | ETA 36.7m | last=1.0s
+  [1e] [8090/10599] kept=11097/97049 (11.4%) | failed_files=0 | 1.14 f/s | ETA 36.6m | last=1.0s
+  [1e] [8100/10599] kept=11097/97169 (11.4%) | failed_files=0 | 1.14 f/s | ETA 36.4m | last=1.0s
+  [1e] [8110/10599] kept=11101/97289 (11.4%) | failed_files=0 | 1.14 f/s | ETA 36.3m | last=0.9s
+  [1e] [8120/10599] kept=11101/97409 (11.4%) | failed_files=0 | 1.14 f/s | ETA 36.2m | last=1.0s
+  [1e] [8130/10599] kept=11102/97529 (11.4%) | failed_files=0 | 1.14 f/s | ETA 36.0m | last=0.9s
+  [1e] [8140/10599] kept=11102/97649 (11.4%) | failed_files=0 | 1.14 f/s | ETA 35.9m | last=0.9s
+  [1e] [8150/10599] kept=11102/97769 (11.4%) | failed_files=0 | 1.14 f/s | ETA 35.7m | last=0.9s
+  [1e] [8160/10599] kept=11102/97889 (11.3%) | failed_files=0 | 1.14 f/s | ETA 35.6m | last=1.0s
+  [1e] [8170/10599] kept=11102/98009 (11.3%) | failed_files=0 | 1.14 f/s | ETA 35.4m | last=0.9s
+  [1e] [8180/10599] kept=11102/98129 (11.3%) | failed_files=0 | 1.14 f/s | ETA 35.3m | last=0.9s
+  [1e] [8190/10599] kept=11102/98249 (11.3%) | failed_files=0 | 1.14 f/s | ETA 35.2m | last=0.9s
+  [1e] [8200/10599] kept=11102/98369 (11.3%) | failed_files=0 | 1.14 f/s | ETA 35.0m | last=0.9s
+  [1e] [8210/10599] kept=11102/98489 (11.3%) | failed_files=0 | 1.14 f/s | ETA 34.9m | last=0.9s
+  [1e] [8220/10599] kept=11104/98609 (11.3%) | failed_files=0 | 1.14 f/s | ETA 34.7m | last=0.9s
+  [1e] [8230/10599] kept=11104/98729 (11.2%) | failed_files=0 | 1.14 f/s | ETA 34.6m | last=0.9s
+  [1e] [8240/10599] kept=11104/98849 (11.2%) | failed_files=0 | 1.14 f/s | ETA 34.4m | last=0.9s
+  [1e] [8250/10599] kept=11104/98969 (11.2%) | failed_files=0 | 1.14 f/s | ETA 34.3m | last=0.9s
+  [1e] [8260/10599] kept=11104/99089 (11.2%) | failed_files=0 | 1.14 f/s | ETA 34.1m | last=0.9s
+  [1e] [8270/10599] kept=11104/99209 (11.2%) | failed_files=0 | 1.14 f/s | ETA 34.0m | last=0.9s
+  [1e] [8280/10599] kept=11104/99329 (11.2%) | failed_files=0 | 1.14 f/s | ETA 33.8m | last=0.9s
+  [1e] [8290/10599] kept=11104/99449 (11.2%) | failed_files=0 | 1.14 f/s | ETA 33.7m | last=0.9s
+  [1e] [8300/10599] kept=11104/99569 (11.2%) | failed_files=0 | 1.14 f/s | ETA 33.6m | last=0.9s
+  [1e] [8310/10599] kept=11104/99689 (11.1%) | failed_files=0 | 1.14 f/s | ETA 33.4m | last=1.1s
+  [1e] [8320/10599] kept=11105/99809 (11.1%) | failed_files=0 | 1.14 f/s | ETA 33.3m | last=1.0s
+  [1e] [8330/10599] kept=11105/99929 (11.1%) | failed_files=0 | 1.14 f/s | ETA 33.1m | last=1.0s
+  [1e] [8340/10599] kept=11106/100049 (11.1%) | failed_files=0 | 1.14 f/s | ETA 33.0m | last=0.9s
+  [1e] [8350/10599] kept=11106/100169 (11.1%) | failed_files=0 | 1.14 f/s | ETA 32.9m | last=0.9s
+  [1e] [8360/10599] kept=11107/100289 (11.1%) | failed_files=0 | 1.14 f/s | ETA 32.7m | last=1.0s
+  [1e] [8370/10599] kept=11107/100409 (11.1%) | failed_files=0 | 1.14 f/s | ETA 32.6m | last=0.9s
+  [1e] [8380/10599] kept=11107/100529 (11.0%) | failed_files=0 | 1.14 f/s | ETA 32.4m | last=0.9s
+  [1e] [8390/10599] kept=11107/100649 (11.0%) | failed_files=0 | 1.14 f/s | ETA 32.3m | last=0.9s
+  [1e] [8400/10599] kept=11109/100769 (11.0%) | failed_files=0 | 1.14 f/s | ETA 32.1m | last=0.9s
+  [1e] [8410/10599] kept=11109/100889 (11.0%) | failed_files=0 | 1.14 f/s | ETA 32.0m | last=1.1s
+  [1e] [8420/10599] kept=11111/101009 (11.0%) | failed_files=0 | 1.14 f/s | ETA 31.8m | last=0.9s
+  [1e] [8430/10599] kept=11111/101129 (11.0%) | failed_files=0 | 1.14 f/s | ETA 31.7m | last=1.0s
+  [1e] [8440/10599] kept=11111/101249 (11.0%) | failed_files=0 | 1.14 f/s | ETA 31.6m | last=0.9s
+  [1e] [8450/10599] kept=11112/101369 (11.0%) | failed_files=0 | 1.14 f/s | ETA 31.4m | last=0.9s
+  [1e] [8460/10599] kept=11112/101489 (10.9%) | failed_files=0 | 1.14 f/s | ETA 31.3m | last=0.9s
+  [1e] [8470/10599] kept=11112/101609 (10.9%) | failed_files=0 | 1.14 f/s | ETA 31.1m | last=0.9s
+  [1e] [8480/10599] kept=11115/101729 (10.9%) | failed_files=0 | 1.14 f/s | ETA 31.0m | last=0.9s
+  [1e] [8490/10599] kept=11115/101849 (10.9%) | failed_files=0 | 1.14 f/s | ETA 30.8m | last=0.9s
+  [1e] [8500/10599] kept=11118/101969 (10.9%) | failed_files=0 | 1.14 f/s | ETA 30.7m | last=0.9s
+    [partial save: 11118 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [8510/10599] kept=11119/102089 (10.9%) | failed_files=0 | 1.14 f/s | ETA 30.5m | last=0.9s
+  [1e] [8520/10599] kept=11119/102209 (10.9%) | failed_files=0 | 1.14 f/s | ETA 30.4m | last=0.9s
+  [1e] [8530/10599] kept=11119/102329 (10.9%) | failed_files=0 | 1.14 f/s | ETA 30.3m | last=0.9s
+  [1e] [8540/10599] kept=11121/102449 (10.9%) | failed_files=0 | 1.14 f/s | ETA 30.1m | last=0.9s
+  [1e] [8550/10599] kept=11122/102569 (10.8%) | failed_files=0 | 1.14 f/s | ETA 30.0m | last=0.9s
+  [1e] [8560/10599] kept=11134/102689 (10.8%) | failed_files=0 | 1.14 f/s | ETA 29.8m | last=0.9s
+  [1e] [8570/10599] kept=11136/102809 (10.8%) | failed_files=0 | 1.14 f/s | ETA 29.7m | last=0.9s
+  [1e] [8580/10599] kept=11139/102929 (10.8%) | failed_files=0 | 1.14 f/s | ETA 29.5m | last=0.9s
+  [1e] [8590/10599] kept=11146/103049 (10.8%) | failed_files=0 | 1.14 f/s | ETA 29.4m | last=0.9s
+  [1e] [8600/10599] kept=11159/103169 (10.8%) | failed_files=0 | 1.14 f/s | ETA 29.2m | last=0.9s
+  [1e] [8610/10599] kept=11166/103289 (10.8%) | failed_files=0 | 1.14 f/s | ETA 29.1m | last=0.9s
+  [1e] [8620/10599] kept=11176/103409 (10.8%) | failed_files=0 | 1.14 f/s | ETA 28.9m | last=1.0s
+  [1e] [8630/10599] kept=11185/103529 (10.8%) | failed_files=0 | 1.14 f/s | ETA 28.8m | last=0.9s
+  [1e] [8640/10599] kept=11193/103649 (10.8%) | failed_files=0 | 1.14 f/s | ETA 28.7m | last=0.9s
+  [1e] [8650/10599] kept=11198/103769 (10.8%) | failed_files=0 | 1.14 f/s | ETA 28.5m | last=1.0s
+  [1e] [8660/10599] kept=11206/103889 (10.8%) | failed_files=0 | 1.14 f/s | ETA 28.4m | last=1.1s
+  [1e] [8670/10599] kept=11219/104009 (10.8%) | failed_files=0 | 1.14 f/s | ETA 28.2m | last=1.0s
+  [1e] [8680/10599] kept=11241/104129 (10.8%) | failed_files=0 | 1.14 f/s | ETA 28.1m | last=1.1s
+  [1e] [8690/10599] kept=11245/104249 (10.8%) | failed_files=0 | 1.14 f/s | ETA 27.9m | last=1.1s
+  [1e] [8700/10599] kept=11261/104369 (10.8%) | failed_files=0 | 1.14 f/s | ETA 27.8m | last=0.9s
+  [1e] [8710/10599] kept=11288/104489 (10.8%) | failed_files=0 | 1.14 f/s | ETA 27.7m | last=0.9s
+  [1e] [8720/10599] kept=11328/104609 (10.8%) | failed_files=0 | 1.14 f/s | ETA 27.5m | last=0.9s
+  [1e] [8730/10599] kept=11343/104729 (10.8%) | failed_files=0 | 1.14 f/s | ETA 27.4m | last=0.9s
+  [1e] [8740/10599] kept=11357/104849 (10.8%) | failed_files=0 | 1.14 f/s | ETA 27.2m | last=1.0s
+  [1e] [8750/10599] kept=11374/104969 (10.8%) | failed_files=0 | 1.14 f/s | ETA 27.1m | last=0.9s
+  [1e] [8760/10599] kept=11417/105089 (10.9%) | failed_files=0 | 1.14 f/s | ETA 26.9m | last=0.9s
+  [1e] [8770/10599] kept=11429/105209 (10.9%) | failed_files=0 | 1.14 f/s | ETA 26.8m | last=0.9s
+  [1e] [8780/10599] kept=11444/105329 (10.9%) | failed_files=0 | 1.14 f/s | ETA 26.6m | last=0.9s
+  [1e] [8790/10599] kept=11473/105449 (10.9%) | failed_files=0 | 1.14 f/s | ETA 26.5m | last=0.9s
+  [1e] [8800/10599] kept=11496/105569 (10.9%) | failed_files=0 | 1.14 f/s | ETA 26.4m | last=0.9s
+  [1e] [8810/10599] kept=11531/105689 (10.9%) | failed_files=0 | 1.14 f/s | ETA 26.2m | last=0.9s
+  [1e] [8820/10599] kept=11533/105809 (10.9%) | failed_files=0 | 1.14 f/s | ETA 26.1m | last=1.1s
+  [1e] [8830/10599] kept=11543/105929 (10.9%) | failed_files=0 | 1.14 f/s | ETA 25.9m | last=1.0s
+  [1e] [8840/10599] kept=11545/106049 (10.9%) | failed_files=0 | 1.14 f/s | ETA 25.8m | last=0.9s
+  [1e] [8850/10599] kept=11547/106169 (10.9%) | failed_files=0 | 1.14 f/s | ETA 25.6m | last=1.0s
+  [1e] [8860/10599] kept=11547/106289 (10.9%) | failed_files=0 | 1.14 f/s | ETA 25.5m | last=0.9s
+  [1e] [8870/10599] kept=11547/106409 (10.9%) | failed_files=0 | 1.14 f/s | ETA 25.3m | last=0.9s
+  [1e] [8880/10599] kept=11550/106529 (10.8%) | failed_files=0 | 1.14 f/s | ETA 25.2m | last=0.9s
+  [1e] [8890/10599] kept=11550/106649 (10.8%) | failed_files=0 | 1.14 f/s | ETA 25.1m | last=0.9s
+  [1e] [8900/10599] kept=11550/106769 (10.8%) | failed_files=0 | 1.14 f/s | ETA 24.9m | last=0.9s
+  [1e] [8910/10599] kept=11550/106889 (10.8%) | failed_files=0 | 1.14 f/s | ETA 24.8m | last=0.9s
+  [1e] [8920/10599] kept=11550/107009 (10.8%) | failed_files=0 | 1.14 f/s | ETA 24.6m | last=0.9s
+  [1e] [8930/10599] kept=11551/107129 (10.8%) | failed_files=0 | 1.14 f/s | ETA 24.5m | last=0.9s
+  [1e] [8940/10599] kept=11552/107249 (10.8%) | failed_files=0 | 1.14 f/s | ETA 24.3m | last=0.9s
+  [1e] [8950/10599] kept=11553/107369 (10.8%) | failed_files=0 | 1.14 f/s | ETA 24.2m | last=0.9s
+  [1e] [8960/10599] kept=11553/107489 (10.7%) | failed_files=0 | 1.14 f/s | ETA 24.0m | last=0.9s
+  [1e] [8970/10599] kept=11553/107609 (10.7%) | failed_files=0 | 1.14 f/s | ETA 23.9m | last=0.9s
+  [1e] [8980/10599] kept=11553/107729 (10.7%) | failed_files=0 | 1.14 f/s | ETA 23.7m | last=0.9s
+  [1e] [8990/10599] kept=11561/107849 (10.7%) | failed_files=0 | 1.14 f/s | ETA 23.6m | last=1.0s
+  [1e] [9000/10599] kept=11569/107969 (10.7%) | failed_files=0 | 1.14 f/s | ETA 23.4m | last=0.9s
+    [partial save: 11569 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [9010/10599] kept=11571/108089 (10.7%) | failed_files=0 | 1.14 f/s | ETA 23.3m | last=0.9s
+  [1e] [9020/10599] kept=11571/108209 (10.7%) | failed_files=0 | 1.14 f/s | ETA 23.2m | last=0.9s
+  [1e] [9030/10599] kept=11571/108329 (10.7%) | failed_files=0 | 1.14 f/s | ETA 23.0m | last=1.0s
+  [1e] [9040/10599] kept=11572/108449 (10.7%) | failed_files=0 | 1.14 f/s | ETA 22.9m | last=0.9s
+  [1e] [9050/10599] kept=11575/108569 (10.7%) | failed_files=0 | 1.14 f/s | ETA 22.7m | last=1.4s
+  [1e] [9060/10599] kept=11575/108689 (10.6%) | failed_files=0 | 1.14 f/s | ETA 22.6m | last=0.9s
+  [1e] [9070/10599] kept=11582/108809 (10.6%) | failed_files=0 | 1.14 f/s | ETA 22.4m | last=1.0s
+  [1e] [9080/10599] kept=11582/108929 (10.6%) | failed_files=0 | 1.14 f/s | ETA 22.3m | last=1.0s
+  [1e] [9090/10599] kept=11583/109049 (10.6%) | failed_files=0 | 1.14 f/s | ETA 22.2m | last=1.1s
+  [1e] [9100/10599] kept=11591/109169 (10.6%) | failed_files=0 | 1.14 f/s | ETA 22.0m | last=1.0s
+  [1e] [9110/10599] kept=11591/109289 (10.6%) | failed_files=0 | 1.13 f/s | ETA 21.9m | last=0.9s
+  [1e] [9120/10599] kept=11594/109409 (10.6%) | failed_files=0 | 1.13 f/s | ETA 21.7m | last=1.1s
+  [1e] [9130/10599] kept=11595/109529 (10.6%) | failed_files=0 | 1.13 f/s | ETA 21.6m | last=0.9s
+  [1e] [9140/10599] kept=11596/109649 (10.6%) | failed_files=0 | 1.13 f/s | ETA 21.4m | last=0.9s
+  [1e] [9150/10599] kept=11598/109769 (10.6%) | failed_files=0 | 1.13 f/s | ETA 21.3m | last=0.9s
+  [1e] [9160/10599] kept=11598/109889 (10.6%) | failed_files=0 | 1.13 f/s | ETA 21.1m | last=0.9s
+  [1e] [9170/10599] kept=11600/110009 (10.5%) | failed_files=0 | 1.13 f/s | ETA 21.0m | last=0.9s
+  [1e] [9180/10599] kept=11600/110129 (10.5%) | failed_files=0 | 1.13 f/s | ETA 20.8m | last=0.9s
+  [1e] [9190/10599] kept=11609/110249 (10.5%) | failed_files=0 | 1.13 f/s | ETA 20.7m | last=0.9s
+  [1e] [9200/10599] kept=11609/110369 (10.5%) | failed_files=0 | 1.13 f/s | ETA 20.6m | last=0.9s
+  [1e] [9210/10599] kept=11609/110489 (10.5%) | failed_files=0 | 1.13 f/s | ETA 20.4m | last=0.9s
+  [1e] [9220/10599] kept=11610/110609 (10.5%) | failed_files=0 | 1.13 f/s | ETA 20.3m | last=0.9s
+  [1e] [9230/10599] kept=11610/110729 (10.5%) | failed_files=0 | 1.13 f/s | ETA 20.1m | last=0.9s
+  [1e] [9240/10599] kept=11614/110849 (10.5%) | failed_files=0 | 1.13 f/s | ETA 20.0m | last=0.9s
+  [1e] [9250/10599] kept=11615/110969 (10.5%) | failed_files=0 | 1.13 f/s | ETA 19.8m | last=0.9s
+  [1e] [9260/10599] kept=11618/111089 (10.5%) | failed_files=0 | 1.13 f/s | ETA 19.7m | last=1.0s
+  [1e] [9270/10599] kept=11620/111209 (10.4%) | failed_files=0 | 1.13 f/s | ETA 19.5m | last=1.0s
+  [1e] [9280/10599] kept=11620/111329 (10.4%) | failed_files=0 | 1.13 f/s | ETA 19.4m | last=1.2s
+  [1e] [9290/10599] kept=11626/111449 (10.4%) | failed_files=0 | 1.13 f/s | ETA 19.3m | last=1.1s
+  [1e] [9300/10599] kept=11629/111569 (10.4%) | failed_files=0 | 1.13 f/s | ETA 19.1m | last=1.1s
+  [1e] [9310/10599] kept=11631/111689 (10.4%) | failed_files=0 | 1.13 f/s | ETA 19.0m | last=1.0s
+  [1e] [9320/10599] kept=11633/111809 (10.4%) | failed_files=0 | 1.13 f/s | ETA 18.8m | last=1.0s
+  [1e] [9330/10599] kept=11634/111929 (10.4%) | failed_files=0 | 1.13 f/s | ETA 18.7m | last=0.9s
+  [1e] [9340/10599] kept=11641/112049 (10.4%) | failed_files=0 | 1.13 f/s | ETA 18.5m | last=0.9s
+  [1e] [9350/10599] kept=11641/112169 (10.4%) | failed_files=0 | 1.13 f/s | ETA 18.4m | last=0.9s
+  [1e] [9360/10599] kept=11641/112289 (10.4%) | failed_files=0 | 1.13 f/s | ETA 18.2m | last=1.0s
+  [1e] [9370/10599] kept=11641/112409 (10.4%) | failed_files=0 | 1.13 f/s | ETA 18.1m | last=1.0s
+  [1e] [9380/10599] kept=11641/112529 (10.3%) | failed_files=0 | 1.13 f/s | ETA 17.9m | last=1.0s
+  [1e] [9390/10599] kept=11649/112649 (10.3%) | failed_files=0 | 1.13 f/s | ETA 17.8m | last=1.0s
+  [1e] [9400/10599] kept=11650/112769 (10.3%) | failed_files=0 | 1.13 f/s | ETA 17.7m | last=1.1s
+  [1e] [9410/10599] kept=11651/112889 (10.3%) | failed_files=0 | 1.13 f/s | ETA 17.5m | last=1.0s
+  [1e] [9420/10599] kept=11651/113009 (10.3%) | failed_files=0 | 1.13 f/s | ETA 17.4m | last=1.0s
+  [1e] [9430/10599] kept=11651/113129 (10.3%) | failed_files=0 | 1.13 f/s | ETA 17.2m | last=1.1s
+  [1e] [9440/10599] kept=11652/113249 (10.3%) | failed_files=0 | 1.13 f/s | ETA 17.1m | last=1.0s
+  [1e] [9450/10599] kept=11652/113369 (10.3%) | failed_files=0 | 1.13 f/s | ETA 16.9m | last=1.1s
+  [1e] [9460/10599] kept=11654/113489 (10.3%) | failed_files=0 | 1.13 f/s | ETA 16.8m | last=0.9s
+  [1e] [9470/10599] kept=11657/113609 (10.3%) | failed_files=0 | 1.13 f/s | ETA 16.6m | last=1.0s
+  [1e] [9480/10599] kept=11658/113729 (10.3%) | failed_files=0 | 1.13 f/s | ETA 16.5m | last=1.1s
+  [1e] [9490/10599] kept=11658/113849 (10.2%) | failed_files=0 | 1.13 f/s | ETA 16.4m | last=1.1s
+  [1e] [9500/10599] kept=11658/113969 (10.2%) | failed_files=0 | 1.13 f/s | ETA 16.2m | last=0.9s
+    [partial save: 11658 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [9510/10599] kept=11658/114089 (10.2%) | failed_files=0 | 1.13 f/s | ETA 16.1m | last=0.9s
+  [1e] [9520/10599] kept=11658/114209 (10.2%) | failed_files=0 | 1.13 f/s | ETA 15.9m | last=0.9s
+  [1e] [9530/10599] kept=11659/114329 (10.2%) | failed_files=0 | 1.13 f/s | ETA 15.8m | last=0.9s
+  [1e] [9540/10599] kept=11663/114449 (10.2%) | failed_files=0 | 1.13 f/s | ETA 15.6m | last=0.9s
+  [1e] [9550/10599] kept=11663/114569 (10.2%) | failed_files=0 | 1.13 f/s | ETA 15.5m | last=0.9s
+  [1e] [9560/10599] kept=11663/114689 (10.2%) | failed_files=0 | 1.13 f/s | ETA 15.3m | last=0.9s
+  [1e] [9570/10599] kept=11665/114809 (10.2%) | failed_files=0 | 1.13 f/s | ETA 15.2m | last=0.9s
+  [1e] [9580/10599] kept=11666/114929 (10.2%) | failed_files=0 | 1.13 f/s | ETA 15.0m | last=0.9s
+  [1e] [9590/10599] kept=11667/115049 (10.1%) | failed_files=0 | 1.13 f/s | ETA 14.9m | last=1.0s
+  [1e] [9600/10599] kept=11667/115169 (10.1%) | failed_files=0 | 1.13 f/s | ETA 14.8m | last=1.0s
+  [1e] [9610/10599] kept=11667/115289 (10.1%) | failed_files=0 | 1.13 f/s | ETA 14.6m | last=0.9s
+  [1e] [9620/10599] kept=11668/115409 (10.1%) | failed_files=0 | 1.13 f/s | ETA 14.5m | last=0.9s
+  [1e] [9630/10599] kept=11671/115529 (10.1%) | failed_files=0 | 1.13 f/s | ETA 14.3m | last=1.1s
+  [1e] [9640/10599] kept=11677/115649 (10.1%) | failed_files=0 | 1.13 f/s | ETA 14.2m | last=1.1s
+  [1e] [9650/10599] kept=11679/115769 (10.1%) | failed_files=0 | 1.13 f/s | ETA 14.0m | last=0.9s
+  [1e] [9660/10599] kept=11681/115889 (10.1%) | failed_files=0 | 1.13 f/s | ETA 13.9m | last=1.5s
+  [1e] [9670/10599] kept=11688/116009 (10.1%) | failed_files=0 | 1.13 f/s | ETA 13.7m | last=1.0s
+  [1e] [9680/10599] kept=11697/116129 (10.1%) | failed_files=0 | 1.13 f/s | ETA 13.6m | last=0.9s
+  [1e] [9690/10599] kept=11704/116249 (10.1%) | failed_files=0 | 1.13 f/s | ETA 13.4m | last=0.9s
+  [1e] [9700/10599] kept=11717/116369 (10.1%) | failed_files=0 | 1.13 f/s | ETA 13.3m | last=1.0s
+  [1e] [9710/10599] kept=11720/116489 (10.1%) | failed_files=0 | 1.13 f/s | ETA 13.1m | last=1.0s
+  [1e] [9720/10599] kept=11727/116609 (10.1%) | failed_files=0 | 1.13 f/s | ETA 13.0m | last=1.0s
+  [1e] [9730/10599] kept=11730/116729 (10.0%) | failed_files=0 | 1.13 f/s | ETA 12.9m | last=0.9s
+  [1e] [9740/10599] kept=11747/116849 (10.1%) | failed_files=0 | 1.13 f/s | ETA 12.7m | last=1.1s
+  [1e] [9750/10599] kept=11760/116969 (10.1%) | failed_files=0 | 1.13 f/s | ETA 12.6m | last=1.1s
+  [1e] [9760/10599] kept=11761/117089 (10.0%) | failed_files=0 | 1.13 f/s | ETA 12.4m | last=1.0s
+  [1e] [9770/10599] kept=11764/117209 (10.0%) | failed_files=0 | 1.13 f/s | ETA 12.3m | last=0.9s
+  [1e] [9780/10599] kept=11768/117329 (10.0%) | failed_files=0 | 1.13 f/s | ETA 12.1m | last=0.9s
+  [1e] [9790/10599] kept=11774/117449 (10.0%) | failed_files=0 | 1.13 f/s | ETA 12.0m | last=1.0s
+  [1e] [9800/10599] kept=11788/117569 (10.0%) | failed_files=0 | 1.13 f/s | ETA 11.8m | last=1.0s
+  [1e] [9810/10599] kept=11829/117689 (10.1%) | failed_files=0 | 1.13 f/s | ETA 11.7m | last=0.9s
+  [1e] [9820/10599] kept=11847/117809 (10.1%) | failed_files=0 | 1.13 f/s | ETA 11.5m | last=1.0s
+  [1e] [9830/10599] kept=11861/117929 (10.1%) | failed_files=0 | 1.13 f/s | ETA 11.4m | last=1.0s
+  [1e] [9840/10599] kept=11876/118049 (10.1%) | failed_files=0 | 1.13 f/s | ETA 11.2m | last=0.9s
+  [1e] [9850/10599] kept=11898/118169 (10.1%) | failed_files=0 | 1.13 f/s | ETA 11.1m | last=0.9s
+  [1e] [9860/10599] kept=11931/118289 (10.1%) | failed_files=0 | 1.13 f/s | ETA 10.9m | last=0.9s
+  [1e] [9870/10599] kept=11939/118409 (10.1%) | failed_files=0 | 1.13 f/s | ETA 10.8m | last=1.0s
+  [1e] [9880/10599] kept=11956/118529 (10.1%) | failed_files=0 | 1.13 f/s | ETA 10.7m | last=1.4s
+  [1e] [9890/10599] kept=11967/118649 (10.1%) | failed_files=0 | 1.12 f/s | ETA 10.5m | last=1.0s
+  [1e] [9900/10599] kept=11998/118769 (10.1%) | failed_files=0 | 1.12 f/s | ETA 10.4m | last=1.1s
+  [1e] [9910/10599] kept=12018/118889 (10.1%) | failed_files=0 | 1.12 f/s | ETA 10.2m | last=1.0s
+  [1e] [9920/10599] kept=12039/119009 (10.1%) | failed_files=0 | 1.12 f/s | ETA 10.1m | last=1.0s
+  [1e] [9930/10599] kept=12054/119129 (10.1%) | failed_files=0 | 1.12 f/s | ETA 9.9m | last=0.9s
+  [1e] [9940/10599] kept=12071/119249 (10.1%) | failed_files=0 | 1.12 f/s | ETA 9.8m | last=0.9s
+  [1e] [9950/10599] kept=12101/119369 (10.1%) | failed_files=0 | 1.12 f/s | ETA 9.6m | last=0.9s
+  [1e] [9960/10599] kept=12138/119489 (10.2%) | failed_files=0 | 1.12 f/s | ETA 9.5m | last=0.9s
+  [1e] [9970/10599] kept=12172/119609 (10.2%) | failed_files=0 | 1.12 f/s | ETA 9.3m | last=0.9s
+  [1e] [9980/10599] kept=12203/119729 (10.2%) | failed_files=0 | 1.12 f/s | ETA 9.2m | last=1.0s
+  [1e] [9990/10599] kept=12237/119849 (10.2%) | failed_files=0 | 1.12 f/s | ETA 9.0m | last=0.9s
+  [1e] [10000/10599] kept=12267/119969 (10.2%) | failed_files=0 | 1.12 f/s | ETA 8.9m | last=1.0s
+    [partial save: 12267 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [10010/10599] kept=12295/120089 (10.2%) | failed_files=0 | 1.12 f/s | ETA 8.7m | last=0.9s
+  [1e] [10020/10599] kept=12309/120209 (10.2%) | failed_files=0 | 1.12 f/s | ETA 8.6m | last=0.9s
+  [1e] [10030/10599] kept=12338/120329 (10.3%) | failed_files=0 | 1.12 f/s | ETA 8.4m | last=1.1s
+  [1e] [10040/10599] kept=12353/120449 (10.3%) | failed_files=0 | 1.12 f/s | ETA 8.3m | last=1.0s
+  [1e] [10050/10599] kept=12374/120569 (10.3%) | failed_files=0 | 1.12 f/s | ETA 8.2m | last=1.0s
+  [1e] [10060/10599] kept=12390/120689 (10.3%) | failed_files=0 | 1.12 f/s | ETA 8.0m | last=1.2s
+  [1e] [10070/10599] kept=12414/120809 (10.3%) | failed_files=0 | 1.12 f/s | ETA 7.9m | last=0.9s
+  [1e] [10080/10599] kept=12429/120929 (10.3%) | failed_files=0 | 1.12 f/s | ETA 7.7m | last=0.9s
+  [1e] [10090/10599] kept=12454/121049 (10.3%) | failed_files=0 | 1.12 f/s | ETA 7.6m | last=1.0s
+  [1e] [10100/10599] kept=12474/121169 (10.3%) | failed_files=0 | 1.12 f/s | ETA 7.4m | last=1.1s
+  [1e] [10110/10599] kept=12488/121289 (10.3%) | failed_files=0 | 1.12 f/s | ETA 7.3m | last=1.0s
+  [1e] [10120/10599] kept=12492/121409 (10.3%) | failed_files=0 | 1.12 f/s | ETA 7.1m | last=0.9s
+  [1e] [10130/10599] kept=12512/121529 (10.3%) | failed_files=0 | 1.12 f/s | ETA 7.0m | last=0.9s
+  [1e] [10140/10599] kept=12525/121649 (10.3%) | failed_files=0 | 1.12 f/s | ETA 6.8m | last=0.9s
+  [1e] [10150/10599] kept=12533/121769 (10.3%) | failed_files=0 | 1.12 f/s | ETA 6.7m | last=0.9s
+  [1e] [10160/10599] kept=12537/121889 (10.3%) | failed_files=0 | 1.12 f/s | ETA 6.5m | last=0.9s
+  [1e] [10170/10599] kept=12537/122009 (10.3%) | failed_files=0 | 1.12 f/s | ETA 6.4m | last=0.9s
+  [1e] [10180/10599] kept=12545/122129 (10.3%) | failed_files=0 | 1.12 f/s | ETA 6.2m | last=1.0s
+  [1e] [10190/10599] kept=12552/122249 (10.3%) | failed_files=0 | 1.12 f/s | ETA 6.1m | last=0.9s
+  [1e] [10200/10599] kept=12562/122369 (10.3%) | failed_files=0 | 1.12 f/s | ETA 5.9m | last=0.9s
+  [1e] [10210/10599] kept=12566/122489 (10.3%) | failed_files=0 | 1.12 f/s | ETA 5.8m | last=1.0s
+  [1e] [10220/10599] kept=12568/122609 (10.3%) | failed_files=0 | 1.12 f/s | ETA 5.6m | last=0.9s
+  [1e] [10230/10599] kept=12569/122729 (10.2%) | failed_files=0 | 1.12 f/s | ETA 5.5m | last=0.9s
+  [1e] [10240/10599] kept=12569/122849 (10.2%) | failed_files=0 | 1.12 f/s | ETA 5.3m | last=1.2s
+  [1e] [10250/10599] kept=12581/122969 (10.2%) | failed_files=0 | 1.12 f/s | ETA 5.2m | last=0.9s
+  [1e] [10260/10599] kept=12590/123089 (10.2%) | failed_files=0 | 1.12 f/s | ETA 5.0m | last=1.0s
+  [1e] [10270/10599] kept=12601/123209 (10.2%) | failed_files=0 | 1.12 f/s | ETA 4.9m | last=1.1s
+  [1e] [10280/10599] kept=12608/123329 (10.2%) | failed_files=0 | 1.12 f/s | ETA 4.7m | last=1.0s
+  [1e] [10290/10599] kept=12623/123449 (10.2%) | failed_files=0 | 1.12 f/s | ETA 4.6m | last=0.9s
+  [1e] [10300/10599] kept=12653/123569 (10.2%) | failed_files=0 | 1.12 f/s | ETA 4.4m | last=0.9s
+  [1e] [10310/10599] kept=12662/123689 (10.2%) | failed_files=0 | 1.12 f/s | ETA 4.3m | last=1.1s
+  [1e] [10320/10599] kept=12681/123809 (10.2%) | failed_files=0 | 1.12 f/s | ETA 4.2m | last=0.9s
+  [1e] [10330/10599] kept=12695/123929 (10.2%) | failed_files=0 | 1.12 f/s | ETA 4.0m | last=0.9s
+  [1e] [10340/10599] kept=12709/124049 (10.2%) | failed_files=0 | 1.12 f/s | ETA 3.9m | last=0.9s
+  [1e] [10350/10599] kept=12727/124169 (10.2%) | failed_files=0 | 1.12 f/s | ETA 3.7m | last=1.6s
+  [1e] [10360/10599] kept=12738/124289 (10.2%) | failed_files=0 | 1.12 f/s | ETA 3.6m | last=0.9s
+  [1e] [10370/10599] kept=12754/124409 (10.3%) | failed_files=0 | 1.12 f/s | ETA 3.4m | last=0.9s
+  [1e] [10380/10599] kept=12761/124529 (10.2%) | failed_files=0 | 1.12 f/s | ETA 3.3m | last=1.0s
+  [1e] [10390/10599] kept=12768/124649 (10.2%) | failed_files=0 | 1.12 f/s | ETA 3.1m | last=0.9s
+  [1e] [10400/10599] kept=12782/124769 (10.2%) | failed_files=0 | 1.12 f/s | ETA 3.0m | last=0.9s
+  [1e] [10410/10599] kept=12787/124889 (10.2%) | failed_files=0 | 1.12 f/s | ETA 2.8m | last=0.9s
+  [1e] [10420/10599] kept=12787/125009 (10.2%) | failed_files=0 | 1.12 f/s | ETA 2.7m | last=0.9s
+  [1e] [10430/10599] kept=12793/125129 (10.2%) | failed_files=0 | 1.12 f/s | ETA 2.5m | last=0.9s
+  [1e] [10440/10599] kept=12800/125249 (10.2%) | failed_files=0 | 1.12 f/s | ETA 2.4m | last=0.9s
+  [1e] [10450/10599] kept=12802/125369 (10.2%) | failed_files=0 | 1.12 f/s | ETA 2.2m | last=0.9s
+  [1e] [10460/10599] kept=12803/125489 (10.2%) | failed_files=0 | 1.12 f/s | ETA 2.1m | last=1.0s
+  [1e] [10470/10599] kept=12809/125609 (10.2%) | failed_files=0 | 1.12 f/s | ETA 1.9m | last=1.0s
+  [1e] [10480/10599] kept=12809/125729 (10.2%) | failed_files=0 | 1.12 f/s | ETA 1.8m | last=0.9s
+  [1e] [10490/10599] kept=12812/125849 (10.2%) | failed_files=0 | 1.12 f/s | ETA 1.6m | last=0.9s
+  [1e] [10500/10599] kept=12815/125969 (10.2%) | failed_files=0 | 1.12 f/s | ETA 1.5m | last=1.0s
+    [partial save: 12815 pseudo windows] → pseudo_labels_partial.npz
+  [1e] [10510/10599] kept=12823/126089 (10.2%) | failed_files=0 | 1.12 f/s | ETA 1.3m | last=1.1s
+  [1e] [10520/10599] kept=12823/126209 (10.2%) | failed_files=0 | 1.12 f/s | ETA 1.2m | last=0.9s
+  [1e] [10530/10599] kept=12831/126329 (10.2%) | failed_files=0 | 1.12 f/s | ETA 1.0m | last=1.0s
+  [1e] [10540/10599] kept=12833/126449 (10.1%) | failed_files=0 | 1.12 f/s | ETA 0.9m | last=1.0s
+  [1e] [10550/10599] kept=12842/126569 (10.1%) | failed_files=0 | 1.12 f/s | ETA 0.7m | last=0.9s
+  [1e] [10560/10599] kept=12847/126689 (10.1%) | failed_files=0 | 1.12 f/s | ETA 0.6m | last=0.9s
+  [1e] [10570/10599] kept=12847/126809 (10.1%) | failed_files=0 | 1.12 f/s | ETA 0.4m | last=0.9s
+  [1e] [10580/10599] kept=12849/126929 (10.1%) | failed_files=0 | 1.12 f/s | ETA 0.3m | last=0.9s
+  [1e] [10590/10599] kept=12850/127049 (10.1%) | failed_files=0 | 1.12 f/s | ETA 0.1m | last=0.9s
+  [1e] [10599/10599] kept=12850/127157 (10.1%) | failed_files=0 | 1.12 f/s | ETA 0.0m | last=0.9s
+  [1e] Pseudo cache: 12850/127157 windows (10.1%) → pseudo_labels.npz
+  Perch ONNX: /Users/enricozafiris/.cache/kagglehub/datasets/rishikeshjani/perch-onnx-for-birdclef-2026/versions/2/perch_v2.onnx
+  Loading Perch head: final_head.keras
+  Perch inference: 739 labeled window(s) (embed batch=16)
+  … window 1/739
+  … window 100/739
+  … window 200/739
+  … window 300/739
+  … window 400/739
+  … window 500/739
+  … window 600/739
+  … window 700/739
+  … window 739/739
+Python(19056) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+  [Perch/1d (pre-pseudo head)] macro_AP=0.91962 (ranking) | macro_AUC=0.99603 | median_AUC=0.99954 | n_windows=739 n_classes=75
+
+  [1e] Fine-tuning head on supervised + pseudo embeddings…
+  [1e] Saved → final_head_pseudo.keras
+  Perch ONNX: /Users/enricozafiris/.cache/kagglehub/datasets/rishikeshjani/perch-onnx-for-birdclef-2026/versions/2/perch_v2.onnx
+  Loading Perch head: final_head_pseudo.keras
+  Perch inference: 739 labeled window(s) (embed batch=16)
+  … window 1/739
+  … window 100/739
+  … window 200/739
+  … window 300/739
+  … window 400/739
+  … window 500/739
+  … window 600/739
+  … window 700/739
+  … window 739/739
+  [Perch/1e (pseudo-refined)] macro_AP=0.96530 (ranking) | macro_AUC=0.99855 | median_AUC=1.00000 | n_windows=739 n_classes=75
+  [1e] Submission bundle updated → /Users/enricozafiris/Desktop/NIGHT 18051905/submission
+  [Kaggle bundle] 10 file(s) → /Users/enricozafiris/Desktop/NIGHT 18051905/submission/20260519_221436_dataset_kaggle
+
+  Results saved → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/arch_search_1e_results.json
+
+  Finalize summary → /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/tournament_finalize_results.json
+
+  ▼ SECTION SUMMARY — Tournament Phase B — Finalize
+  ──────────────────────────────────────────────────────────────
+    · Track: PERCH
+    · Success: True
+    · aug: aug_r02_a1_high_snr_time_stretch
+    · Results: /Users/enricozafiris/Desktop/NIGHT 18051905/log
+    · s/meta_agent/tournament_finalize_results.json
+  ──────────────────────────────────────────────────────────────
+
+
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  Final architecture — PERCH                                ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  arch_type     : residual_mlp
+  description   : Dense(1024) stem. Four residual blocks with skip
+  description   : connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout
+  description   : 0.3, Dense(n_classes, sigmoid).
+  aug_preset    : aug_r02_a1_high_snr_time_stretch
+  learning_rate : 0.001
+  batch_size    : 256
+  epochs        : 40
+  dropout       : 0.3
+  memory_dir    : /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/aug_search/aug_r02_a1_high_snr_time_stretch
+  Finalize complete — submission under /Users/enricozafiris/Desktop/NIGHT 18051905/submission
+
+
+  Total time: 372.5 min
+============================================================
+
+  Staged pipeline finished (tournament).
+  Tournament results: /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/tournament_results.json
+  Kaggle bundle: /Users/enricozafiris/Desktop/NIGHT 18051905/submission
+  Perch final: /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/final  |  CNN final: /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/cnn/final
+
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  Final architecture — PERCH                                ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  arch_type     : residual_mlp
+  description   : Dense(1024) stem. Four residual blocks with skip
+  description   : connections (BN→Dense→LN→blocks→proj→sigmoid). Dropout
+  description   : 0.3, Dense(n_classes, sigmoid).
+  aug_preset    : aug_r02_a1_high_snr_time_stretch
+  learning_rate : 0.001
+  batch_size    : 256
+  epochs        : 40
+  dropout       : 0.3
+  memory_dir    : /Users/enricozafiris/Desktop/NIGHT 18051905/logs/meta_agent/perch/aug_search/aug_r02_a1_high_snr_time_stretch
+  Pipeline run complete — see logs/meta_agent/ and submission/
+

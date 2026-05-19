@@ -308,10 +308,9 @@ def _parse_cnn_aug_batch(
     except json.JSONDecodeError:
         root = _extract_first_json_object(cleaned)
 
+    planner_note = ""
     if isinstance(root, dict):
-        note = str(root.get("planner_note") or "")[:160]
-        if note:
-            print(f"  [CnnAugResearcher] Plan: {note}")
+        planner_note = str(root.get("planner_note") or root.get("batch_note") or "").strip()
 
     # `_coerce_experiments_list` accepts every common shape (canonical list,
     # bare list, slots-as-keys, single experiment at root) — the previous
@@ -348,7 +347,13 @@ def _parse_cnn_aug_batch(
                 history_count=history_count,
             )
         )
-    return out[:batch_size]
+    out = out[:batch_size]
+    if planner_note and out:
+        out[0]["_planner_note"] = planner_note
+    import run_log
+
+    run_log.apply_planner_rationale_fallback(out, planner_note)
+    return out
 
 
 class CnnAugResearcher:
@@ -432,12 +437,13 @@ class CnnAugResearcher:
         else:
             specs = [_parse_cnn_aug_spec(response, round_i=round_i, history_count=total)]
 
-        for spec in specs:
-            print(
-                f"  [CnnAugResearcher] [{spec.get('slot', '?')}] "
-                f"preset={spec.get('preset_name')} anchor={spec.get('audio_anchor')} "
-                f"spec_aug prob={spec.get('aug_prob')} mix_p={spec.get('mix_prob')}"
-            )
+        import run_log
+
+        run_log.print_researcher_proposals(
+            specs,
+            track="cnn",
+            round_label=f"1c aug round {round_i}",
+        )
         return specs
 
 

@@ -48,6 +48,14 @@ class CodeExecutor:
     ) -> ExecutionResult:
         cmd = [self.python_executable, "-u", str(script_path)]
         env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+        try:
+            from run_log import compact_terminal
+
+            if compact_terminal():
+                env["CNN_COMPACT_LOG"] = "1"
+                env["PYTHONWARNINGS"] = "ignore"
+        except ImportError:
+            pass
         if stream_output:
             return self._run_streaming(cmd, env=env, label=label)
         try:

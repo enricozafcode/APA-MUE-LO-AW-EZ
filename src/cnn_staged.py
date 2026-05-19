@@ -18,7 +18,7 @@ from typing import Any
 from code_executor import CodeExecutor
 from evaluator import Evaluator
 from llm_client import LLMClient
-from memory import ExperimentMemory
+from memory import ExperimentMemory, resolve_researcher_history_max_runs
 
 try:
     from .cnn_agent import (
@@ -111,26 +111,61 @@ BATCH — return exactly {batch_size} experiments in ONE JSON:
 Slots (batch_size=3): tweak | explore | free — each needs arch_description.
 Required keys per experiment: slot, arch_type, arch_description, depth, filters_base, filter_pattern,
 pooling_type, classifier_hidden_units, dropout, batch_norm, residuals, learning_rate, batch_size,
-optimizer, weight_decay, epochs, n_mels, n_frames, reasoning, hypothesis, strategy.
+optimizer, weight_decay, reasoning, hypothesis, strategy.
+
+LOCKED BY META-AGENT (do NOT put in JSON — coder cannot change these):
+epochs, n_mels, n_frames, max_samples, val_split, augmentation preset/probabilities.
+arch_description must use shallow-to-mid CNNs: at least 2 MaxPooling2D (or strided conv) stages before global pool;
+max 64 filters per Conv2D block; avoid full-resolution deep stacks (no 6+ conv layers all at 64x128).
 """
 
 CNN_REFINE_ADDENDUM = """
-REFINE MODE — locked arch_type={locked}. All experiments must use arch_type="{locked}" and strategy="exploit".
-Vary layout/hypers within the family only. Short JSON.
+REFINE MODE (stage 1b) — locked arch_type={locked}. Every experiment MUST use arch_type="{locked}" and strategy="exploit".
+Vary hyperparameters vs the champion seed spec (learning_rate, batch_size, dropout, weight_decay, depth,
+filters_base, pooling_type, classifier_hidden_units, residuals, optimizer). Each slot must change
+something different — do not duplicate the same hypers across slots.
+epochs / mel shape / sample caps are LOCKED by the meta-agent (not searchable here).
+
+Return ONE JSON:
+{{"planner_note": "1-2 sentences on this round", "experiments": [...]}}
+
+Each experiment MUST include:
+- slot (e.g. tweak, explore)
+- arch_type "{locked}"
+- reasoning (1-2 sentences: what you learned + what this slot changes vs champion)
+- hypothesis (one short sentence)
+- arch_description ONLY if you change layers/pooling/head structure; otherwise omit or write "structure unchanged"
+- hyperparameters that differ from the champion (listed above)
+
+Keep reasoning/hypothesis short but non-empty — never omit them.
 """
 
 CNN_CODER_SYSTEM = (
     GENERATION_SYSTEM_PROMPT
     + "\n\nYou implement the researcher's arch_description as a full Keras CNN on mel input "
     "(batch, n_mels, n_frames, 1). Use only tf.keras layers. "
-    "get_training_config() must return epochs, batch_size, learning_rate, optimizer, n_mels, n_frames, "
-    "val_split, and optional aug_prob/aug_noise_std/aug_time_mask/aug_freq_mask/aug_preset.\n"
+    "get_training_config() must return batch_size, learning_rate, optimizer (string, e.g. \"adam\"), "
+    "batch_norm (bool), val_split, and optional aug_prob/aug_noise_std/aug_time_mask/aug_freq_mask/aug_preset. "
+    "Do NOT set epochs, n_mels, or n_frames — meta-agent overrides lock those.\n"
+    "FAST SEARCH RULES (required):\n"
+    "- Use input_shape from build_model() as-is (typically 64x128x1).\n"
+    "- At least 2 MaxPooling2D layers (or Conv2D stride=2) before GlobalAveragePooling2D.\n"
+    "- Max 64 filters per Conv2D; prefer 16→32→64 with pooling between blocks.\n"
+    "- Keep the model small (~under 1M params); avoid wide full-resolution residual towers.\n"
     "Keras 3 rules:\n"
     "- Prefer Sequential with Input(shape=...) as the first layer.\n"
     "- For residual/skip connections use the Functional API (Input → branches → Add → head), "
     "NOT model.add(layers.Add()([shortcut, model])).\n"
     "- If unsure about residuals, set residuals=False and use a plain Conv block stack."
 )
+
+# Default caps for staged CNN search (1a/1b/1c sample trials). Override via meta_agent.cnn_search_arch_limits.
+DEFAULT_CNN_SEARCH_ARCH_LIMITS: dict[str, Any] = {
+    "max_conv_filters": 64,
+    "min_pooling_layers": 2,
+    "max_params": 1_500_000,
+    "num_classes_dry_run": 234,
+}
 
 
 def _llm_failed(response: str) -> bool:
@@ -159,8 +194,6 @@ def _fill_cnn_defaults(spec: dict) -> dict:
         "epochs": 10,
         "n_mels": 64,
         "n_frames": 128,
-        "reasoning": "Safe default CNN.",
-        "hypothesis": "Baseline mel-CNN should train.",
         "strategy": "explore",
     }
     out = dict(defaults)
@@ -168,22 +201,62 @@ def _fill_cnn_defaults(spec: dict) -> dict:
     return out
 
 
-def _spec_to_coder_prompt(spec: dict) -> str:
+_SCALAR_HYPER_KEYS = (
+    "learning_rate",
+    "batch_size",
+    "epochs",
+    "dropout",
+    "weight_decay",
+    "n_mels",
+    "n_frames",
+    "depth",
+    "filters_base",
+    "classifier_hidden_units",
+)
+
+_REFINE_FALLBACK_TWEAKS = (
+    {"slot": "tweak", "learning_rate_scale": 0.5, "dropout_delta": 0.0},
+    {"slot": "explore", "learning_rate_scale": 2.0, "dropout_delta": 0.1},
+    {"slot": "free", "learning_rate_scale": 1.0, "dropout_delta": -0.05, "batch_size_scale": 2.0},
+)
+
+
+def _coerce_spec_scalars(spec: dict) -> dict:
+    """LLM sometimes returns search grids as lists; training code needs scalars."""
+    for key in _SCALAR_HYPER_KEYS:
+        if key not in spec:
+            continue
+        val = spec[key]
+        if isinstance(val, list) and val:
+            spec[key] = val[0]
+    opt = spec.get("optimizer")
+    if isinstance(opt, list):
+        spec["optimizer"] = opt[0] if opt else "adam"
+    return spec
+
+
+def _spec_to_coder_prompt(spec: dict, config: dict | None = None) -> str:
     lines = [
         "Implement this BirdCLEF CNN experiment:",
         f"arch_type: {spec.get('arch_type')}",
         f"arch_description:\n{spec.get('arch_description', '')}",
         "",
-        "Hyperparameters for get_training_config():",
+        "Hyperparameters for get_training_config() (architecture knobs only):",
     ]
     for k in (
         "depth", "filters_base", "filter_pattern", "pooling_type",
         "classifier_hidden_units", "dropout", "batch_norm", "residuals",
-        "learning_rate", "batch_size", "optimizer", "weight_decay", "epochs",
-        "n_mels", "n_frames",
+        "learning_rate", "batch_size", "optimizer", "weight_decay",
     ):
         if k in spec:
             lines.append(f"  {k}: {spec[k]}")
+    if config is not None:
+        enforced = _enforced_training_overrides(config, spec)
+        lines.append(
+            "\nLOCKED by meta-agent (return these in get_training_config(); do not change): "
+            f"epochs={enforced.get('epochs')}, n_mels={enforced.get('n_mels')}, "
+            f"n_frames={enforced.get('n_frames')}, batch_norm={enforced.get('batch_norm', True)}"
+        )
     locked = _locked_cnn_aug(spec) if isinstance(spec.get("_config"), dict) else {}
     if not locked and spec.get("aug_preset"):
         lines.append(f"  aug_preset: {spec['aug_preset']}")
@@ -194,6 +267,111 @@ def _spec_to_coder_prompt(spec: dict) -> str:
     return "\n".join(lines)
 
 
+def _cnn_arch_limits(config: dict | None) -> dict[str, Any]:
+    meta = (config or {}).get("meta_agent") or {}
+    raw = meta.get("cnn_search_arch_limits") or {}
+    limits = dict(DEFAULT_CNN_SEARCH_ARCH_LIMITS)
+    limits.update({k: v for k, v in raw.items() if v is not None})
+    return limits
+
+
+def _max_conv2d_filters(code: str) -> int:
+    import ast
+
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return 0
+    best = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else (func.id if isinstance(func, ast.Name) else "")
+        if name != "Conv2D" or not node.args:
+            continue
+        arg0 = node.args[0]
+        if isinstance(arg0, ast.Constant) and isinstance(arg0.value, int):
+            best = max(best, int(arg0.value))
+    return best
+
+
+def _count_pooling_layers(code: str) -> int:
+    return len(
+        re.findall(
+            r"\b(?:Max|Average)Pooling2D\s*\(",
+            code,
+        )
+    )
+
+
+def _dry_run_cnn_param_count(
+    code: str,
+    *,
+    input_shape: tuple[int, int, int] = (64, 128, 1),
+    num_classes: int = 234,
+) -> tuple[int | None, list[str]]:
+    """Instantiate build_model to count params (catches huge/full-res stacks before training)."""
+    try:
+        import tensorflow as tf
+    except ImportError:
+        return None, ["tensorflow not available for architecture dry-run"]
+
+    namespace: dict[str, Any] = {"tf": tf, "tensorflow": tf}
+    try:
+        compiled = compile(code, "<cnn_slot>", "exec")
+        exec(compiled, namespace)  # noqa: S102
+    except Exception as exc:
+        return None, [f"Could not exec slot code: {exc}"]
+
+    build_model = namespace.get("build_model")
+    get_training_config = namespace.get("get_training_config")
+    if not callable(build_model):
+        return None, ["Missing build_model() for dry-run"]
+    if not callable(get_training_config):
+        return None, ["Missing get_training_config() for dry-run"]
+    try:
+        _ = get_training_config()
+        model = build_model(input_shape, num_classes)
+        return int(model.count_params()), []
+    except Exception as exc:
+        return None, [f"build_model dry-run failed: {exc}"]
+
+
+def validate_slot_architecture(code: str, config: dict | None = None) -> list[str]:
+    """Reject CNN slots that are too slow for sample search (full-res wide stacks, no pooling)."""
+    limits = _cnn_arch_limits(config)
+    issues: list[str] = []
+
+    pool_n = _count_pooling_layers(code)
+    if pool_n < int(limits["min_pooling_layers"]):
+        issues.append(
+            f"Need at least {limits['min_pooling_layers']} Pooling2D layers before global pool "
+            f"(found {pool_n}). Use MaxPooling2D(2,2) between conv blocks."
+        )
+
+    max_filters = _max_conv2d_filters(code)
+    cap = int(limits["max_conv_filters"])
+    if max_filters > cap:
+        issues.append(
+            f"Conv2D filter count {max_filters} exceeds search cap {cap}. "
+            "Use at most 64 filters per block."
+        )
+
+    mel = _cnn_mel_shape_from_config(config or {})
+    input_shape = (int(mel["n_mels"]), int(mel["n_frames"]), 1)
+    n_classes = int(limits.get("num_classes_dry_run", 234))
+    n_params, dr_issues = _dry_run_cnn_param_count(code, input_shape=input_shape, num_classes=n_classes)
+    issues.extend(dr_issues)
+    max_p = int(limits["max_params"])
+    if n_params is not None and n_params > max_p:
+        issues.append(
+            f"Model has {n_params:,} parameters (cap {max_p:,}). "
+            "Use fewer / smaller conv blocks and pooling."
+        )
+    return issues
+
+
 def generate_cnn_slot_code(
     coder_llm: LLMClient,
     spec: dict,
@@ -201,8 +379,9 @@ def generate_cnn_slot_code(
     max_retries: int = 5,
     *,
     seed_slot_code: str | None = None,
+    config: dict | None = None,
 ) -> str | None:
-    prompt = _spec_to_coder_prompt(spec)
+    prompt = _spec_to_coder_prompt(spec, config)
     if seed_slot_code:
         prompt += (
             "\n\nRefine mode: start from this working 1a slot. "
@@ -232,6 +411,11 @@ def generate_cnn_slot_code(
                 lines = lines[:-1]
             code = "\n".join(lines).strip()
         issues = validate_slot_code(code) if code else ["No code found."]
+        if not issues and code and config is not None:
+            trial = _apply_slot_overrides(
+                code, _enforced_training_overrides(config, spec)
+            )
+            issues = validate_slot_architecture(trial, config)
         if not issues:
             print("  [Coder] Code validated.")
             return code
@@ -272,14 +456,104 @@ def _parse_json_root(text: str) -> Any:
     return None
 
 
+def _coerce_rationale_fields(spec: dict) -> dict:
+    aliases = (
+        ("rationale", "reasoning"),
+        ("reason", "reasoning"),
+        ("plan", "reasoning"),
+        ("notes", "reasoning"),
+        ("commentary", "reasoning"),
+        ("expected_outcome", "hypothesis"),
+    )
+    for src, dst in aliases:
+        if not str(spec.get(dst) or "").strip() and spec.get(src):
+            spec[dst] = spec[src]
+    return spec
+
+
+def _values_differ(a: Any, b: Any) -> bool:
+    if a == b:
+        return False
+    try:
+        return abs(float(a) - float(b)) > 1e-12
+    except (TypeError, ValueError):
+        return str(a) != str(b)
+
+
+def _synthesize_refine_reasoning(spec: dict, seed: dict) -> str:
+    import run_log
+
+    parts: list[str] = []
+    for key in run_log.CNN_SPEC_DELTA_KEYS:
+        if key.startswith("aug_"):
+            continue
+        if key not in spec:
+            continue
+        new_v = spec.get(key)
+        old_v = seed.get(key)
+        if key not in seed or _values_differ(new_v, old_v):
+            if key in seed:
+                parts.append(
+                    f"{key}→{run_log._format_hyper_value(new_v)} "
+                    f"(was {run_log._format_hyper_value(old_v)})"
+                )
+            else:
+                parts.append(f"{key}={run_log._format_hyper_value(new_v)}")
+    slot = spec.get("slot", "slot")
+    if parts:
+        return f"{slot}: " + "; ".join(parts[:8])
+    return f"{slot}: exploit {spec.get('arch_type')} — structure unchanged, retry nearby hypers."
+
+
+def _hypers_only_arch_blurb(spec: dict) -> str:
+    locked = spec.get("arch_type", "cnn")
+    return f"{locked}: structure unchanged vs champion; training/regularization tweak only."
+
+
 def _normalize_experiment(item: dict) -> dict:
-    spec = _fill_cnn_defaults(item)
+    spec = _coerce_spec_scalars(_fill_cnn_defaults(_coerce_rationale_fields(dict(item))))
     if not str(spec.get("arch_description", "")).strip():
         spec["arch_description"] = (
             f"{spec['arch_type']}: {spec['depth']} conv blocks, filters_base={spec['filters_base']}, "
             f"{spec['pooling_type']} pooling, classifier {spec['classifier_hidden_units']} units."
         )
     return spec
+
+
+def _refine_batch_fallback(
+    batch_size: int,
+    *,
+    locked: str,
+    seed_spec: dict,
+) -> list[dict]:
+    import run_log
+
+    seed = _normalize_experiment({**seed_spec, "arch_type": locked, "strategy": "exploit"})
+    out: list[dict] = []
+    for i in range(batch_size):
+        tweak = _REFINE_FALLBACK_TWEAKS[i % len(_REFINE_FALLBACK_TWEAKS)]
+        lr = float(seed.get("learning_rate", 1e-3))
+        scale = float(tweak.get("learning_rate_scale", 1.0))
+        drop = float(seed.get("dropout", 0.3)) + float(tweak.get("dropout_delta", 0.0))
+        drop = max(0.0, min(0.8, drop))
+        item: dict[str, Any] = {
+            "slot": tweak["slot"],
+            "arch_type": locked,
+            "strategy": "exploit",
+            "learning_rate": lr * scale,
+            "dropout": drop,
+        }
+        if tweak.get("batch_size_scale"):
+            item["batch_size"] = max(8, int(float(seed.get("batch_size", 32)) * float(tweak["batch_size_scale"])))
+        spec = _normalize_experiment({**seed, **item})
+        if run_log.is_generic_cnn_arch_description(spec.get("arch_description")):
+            spec["arch_description"] = _hypers_only_arch_blurb(spec)
+        spec["reasoning"] = _synthesize_refine_reasoning(spec, seed)
+        spec["hypothesis"] = (
+            f"Slot {spec['slot']}: {spec['arch_type']} with tuned lr/dropout improves soundscape AP."
+        )
+        out.append(spec)
+    return out
 
 
 class CnnResearcher:
@@ -312,11 +586,39 @@ class CnnResearcher:
         if self.refine_mode:
             locked = self.locked_arch_type or self.seed_spec.get("arch_type", "shallow_cnn")
             system = CNN_RESEARCHER_SYSTEM + "\n\n" + CNN_REFINE_ADDENDUM.format(locked=locked)
+            seed_norm = _normalize_experiment(
+                {**self.seed_spec, "arch_type": locked, "strategy": "exploit"}
+            )
+            seed_view = {
+                k: seed_norm[k]
+                for k in (
+                    "arch_type",
+                    "learning_rate",
+                    "batch_size",
+                    "epochs",
+                    "dropout",
+                    "weight_decay",
+                    "depth",
+                    "filters_base",
+                    "filter_pattern",
+                    "pooling_type",
+                    "classifier_hidden_units",
+                    "batch_norm",
+                    "residuals",
+                    "optimizer",
+                    "n_mels",
+                    "n_frames",
+                    "aug_preset",
+                )
+                if k in seed_norm
+            }
             user = (
-                f"{history}\n\nSearch space hints:\n{json.dumps(CNN_SEARCH_SPACE, indent=2)}\n\n"
+                f"{history}\n\nChampion seed spec (change hypers relative to this):\n"
+                f"{json.dumps(seed_view, indent=2)}\n\n"
+                f"Search space hints:\n{json.dumps(CNN_SEARCH_SPACE, indent=2)}\n\n"
                 f"Refine runs: {total} | best: {best_str}\n"
                 f"Propose exactly {batch_size} refine experiments (arch_type={locked}). "
-                'JSON: {{"experiments": [...]}}'
+                'JSON: {{"planner_note":"...", "experiments":[...]}}'
             )
         elif batch_size > 1:
             system = (
@@ -345,12 +647,7 @@ class CnnResearcher:
             specs = self._fallback_batch(batch_size)
         else:
             specs = self._parse_batch(response, batch_size)
-        if self.refine_mode and self.locked_arch_type:
-            for i, spec in enumerate(specs):
-                spec["arch_type"] = self.locked_arch_type
-                spec["strategy"] = "exploit"
-                spec.setdefault("slot", f"r{i + 1}")
-        return specs
+        return self._finalize_specs(specs)
 
     def _parse_batch(self, response: str, batch_size: int) -> list[dict]:
         root = _parse_json_root(response)
@@ -366,15 +663,70 @@ class CnnResearcher:
         if not items:
             print("  [Researcher] Parse failed — using fallbacks.")
             return self._fallback_batch(batch_size)
+        planner_note = ""
+        if isinstance(root, dict):
+            planner_note = str(root.get("planner_note") or root.get("batch_note") or "").strip()
         specs = [_normalize_experiment(x) for x in items[:batch_size]]
         while len(specs) < batch_size:
-            specs.append(_normalize_experiment(self._fallback_batch(1)[0]))
+            if self.refine_mode:
+                locked = self.locked_arch_type or self.seed_spec.get("arch_type", "shallow_cnn")
+                pad = _refine_batch_fallback(
+                    1, locked=str(locked), seed_spec=self.seed_spec
+                )
+                specs.append(pad[0])
+            else:
+                specs.append(_normalize_experiment(self._fallback_batch(1)[0]))
         for i, spec in enumerate(specs):
             if not spec.get("slot"):
                 spec["slot"] = CNN_BATCH_SLOTS[i] if i < len(CNN_BATCH_SLOTS) else f"s{i + 1}"
+        if planner_note and specs:
+            specs[0]["_planner_note"] = planner_note
+        import run_log
+
+        return specs
+
+    def _finalize_specs(self, specs: list[dict]) -> list[dict]:
+        import run_log
+
+        seed = _normalize_experiment(
+            {
+                **self.seed_spec,
+                "arch_type": self.locked_arch_type or self.seed_spec.get("arch_type", "shallow_cnn"),
+                "strategy": "exploit",
+            }
+        )
+        planner_note = ""
+        for spec in specs:
+            planner_note = str(
+                spec.get("_planner_note") or spec.get("planner_note") or planner_note
+            ).strip()
+        run_log.apply_planner_rationale_fallback(specs, planner_note)
+
+        if self.refine_mode:
+            locked = self.locked_arch_type or seed.get("arch_type", "shallow_cnn")
+            for i, spec in enumerate(specs):
+                spec["arch_type"] = locked
+                spec["strategy"] = "exploit"
+                spec.setdefault("slot", CNN_BATCH_SLOTS[i] if i < len(CNN_BATCH_SLOTS) else f"r{i + 1}")
+                _coerce_rationale_fields(spec)
+                if run_log.is_placeholder_rationale(spec.get("reasoning")):
+                    spec["reasoning"] = _synthesize_refine_reasoning(spec, seed)
+                if run_log.is_placeholder_rationale(spec.get("hypothesis")):
+                    spec["hypothesis"] = (
+                        f"Hypothesis: {spec['slot']} hypers improve macro AP on soundscapes."
+                    )
+                if run_log.is_generic_cnn_arch_description(spec.get("arch_description")):
+                    spec["arch_description"] = _hypers_only_arch_blurb(spec)
+                spec["_seed_spec"] = seed
         return specs
 
     def _fallback_batch(self, batch_size: int) -> list[dict]:
+        if self.refine_mode:
+            locked = self.locked_arch_type or self.seed_spec.get("arch_type", "shallow_cnn")
+            print("  [Researcher] Parse/LLM failed — refine hypers fallback.")
+            return self._finalize_specs(
+                _refine_batch_fallback(batch_size, locked=str(locked), seed_spec=self.seed_spec)
+            )
         templates = [
             {"slot": "tweak", "arch_type": "deep_cnn", "strategy": "exploit"},
             {"slot": "explore", "arch_type": "residual_cnn", "strategy": "explore"},
@@ -401,6 +753,21 @@ def _resolve_dirs(config: dict) -> dict[str, Path]:
     return {"logs": logs, "mem_dir": mem_dir, "code_dir": code_dir, "eval_dir": eval_dir}
 
 
+def _cnn_mel_shape_from_config(config: dict) -> dict[str, Any]:
+    """Mel dimensions used by focal + soundscape caches (must match across search)."""
+    cheap = (config.get("search") or {}).get("cheap") or {}
+    locked = _locked_cnn_aug(config) or (config.get("cnn_augmentation") or {})
+    cnn_cfg = config.get("cnn") or {}
+    n_mels = locked.get("n_mels") or cheap.get("n_mels") or cnn_cfg.get("n_mels", 64)
+    n_frames = locked.get("n_frames") or cheap.get("n_frames") or cnn_cfg.get("n_frames", 128)
+    return {
+        "n_mels": int(n_mels),
+        "n_frames": int(n_frames),
+        "sample_rate": int(cheap.get("sample_rate", 32000)),
+        "clip_seconds": float(cheap.get("clip_seconds", 5.0)),
+    }
+
+
 def _cheap_training_overrides(config: dict) -> dict[str, Any]:
     from cnn_focal_cache import focal_clip_seed_from_config
 
@@ -408,16 +775,19 @@ def _cheap_training_overrides(config: dict) -> dict[str, Any]:
     cheap = sc.get("cheap", {})
     meta = config.get("meta_agent", {})
     max_samples = meta.get("arch_search_cnn_max_samples", cheap.get("max_samples", 2000))
-    return {
+    ov = {
         "max_samples": max_samples,
         "epochs": cheap.get("epochs", 3),
         "val_split": cheap.get("val_split", 0.2),
         "focal_clip_seed": focal_clip_seed_from_config(config),
+        "batch_norm": True,
     }
+    ov.update(_cnn_mel_shape_from_config(config))
+    return ov
 
 
 def _enforced_training_overrides(config: dict, spec: dict | None = None) -> dict[str, Any]:
-    """Merge cheap caps + locked aug; refine also locks mel shape from 1a winner."""
+    """Merge cheap caps + locked aug + locked mel shape (always, not only refine)."""
     ov = dict(_cheap_training_overrides(config))
     locked = _locked_cnn_aug(config)
     if locked:
@@ -566,7 +936,7 @@ def _execute_cnn_slot(
         if parent_slot.exists():
             seed_slot = parent_slot.read_text(encoding="utf-8")
     slot_code = generate_cnn_slot_code(
-        coder_llm, spec, coder_temp, seed_slot_code=seed_slot
+        coder_llm, spec, coder_temp, seed_slot_code=seed_slot, config=config
     )
     if not slot_code:
         return None, "", spec
@@ -710,8 +1080,14 @@ def run_cnn_explore(config: dict) -> None:
     )
     print(f"  [CNN] Experiment subprocess timeout={timeout:.0f}s  coder LLM timeout={coder_timeout:.0f}s")
     evaluator = Evaluator(row_id_column_name="row_id")
-    memory = ExperimentMemory(mem_dir, ranking_metric=ranking_metric)
+    history_cap = resolve_researcher_history_max_runs(config)
+    memory = ExperimentMemory(
+        mem_dir,
+        ranking_metric=ranking_metric,
+        researcher_history_max_runs=history_cap,
+    )
     memory.set_stage(track="cnn", stage="1a", label="CNN Stage 1a — Explore")
+    memory.announce_resumed_history(track="cnn", stage="1a")
     researcher = CnnResearcher(
         researcher_llm, memory, researcher_temp, batch_size=batch_size
     )
@@ -845,6 +1221,9 @@ def run_cnn_explore(config: dict) -> None:
 
 
 def run_cnn_refine(config: dict) -> None:
+    import run_log
+
+    run_log.configure_terminal_from_config(config)
     refine_cfg = config.get("cnn_refine") or {}
     dirs = _resolve_dirs(config)
     mem_dir, code_dir, eval_dir = dirs["mem_dir"], dirs["code_dir"], dirs["eval_dir"]
@@ -882,8 +1261,14 @@ def run_cnn_refine(config: dict) -> None:
     )
     print(f"  [CNN] Experiment subprocess timeout={timeout:.0f}s  coder LLM timeout={coder_timeout:.0f}s")
     evaluator = Evaluator(row_id_column_name="row_id")
-    memory = ExperimentMemory(mem_dir, ranking_metric=ranking_metric)
+    history_cap = resolve_researcher_history_max_runs(config)
+    memory = ExperimentMemory(
+        mem_dir,
+        ranking_metric=ranking_metric,
+        researcher_history_max_runs=history_cap,
+    )
     memory.set_stage(track="cnn", stage="1b", label="CNN Stage 1b — Refine")
+    memory.announce_resumed_history(track="cnn", stage="1b")
 
     champion_path = mem_dir / REFINE_CHAMPION_SPEC_FILE
     champion_path.write_text(json.dumps(seed_spec, indent=2), encoding="utf-8")
@@ -931,6 +1316,7 @@ def run_cnn_refine(config: dict) -> None:
             specs,
             track="cnn",
             round_label=f"refine {iteration} ({phase})",
+            seed_spec=seed_spec,
         )
         improved = False
         for slot_i, spec in enumerate(specs, 1):
@@ -948,13 +1334,16 @@ def run_cnn_refine(config: dict) -> None:
                 train_overrides=train_overrides,
                 config=config,
             )
+            rv = _ranking_value_from_metrics(metrics)
+            prev_best = best_score_ever
             run_log.print_run_result(
                 slot=slot_label,
                 metrics=metrics,
                 success=bool(metrics and metrics.get("status") == "success"),
+                ranking_value=rv,
+                best_so_far=prev_best if prev_best > 0 else None,
             )
             memory.log(spec=spec, metrics=metrics, code=slot_code or "")
-            rv = _ranking_value_from_metrics(metrics)
             training_rounds += 1
             if rv is not None and rv > best_score_ever:
                 improved = True
@@ -992,11 +1381,13 @@ def run_cnn_refine(config: dict) -> None:
             f"Training rounds used: {training_rounds}/{max_total}",
             f"Best score: {best_score_ever:.5f}",
             f"Best run: {memory._format_run_score(best[0])}" if best else "—",
-            f"Artifacts: {mem_dir}",
+            f"Artifacts: .../{mem_dir.name}",
         ],
     )
     if best:
-        run_log.print_final_architecture(track="cnn", spec=best[0].get("spec"), memory_dir=mem_dir)
+        fin_spec = dict(best[0].get("spec") or {})
+        fin_spec["_seed_spec"] = seed_spec
+        run_log.print_final_architecture(track="cnn", spec=fin_spec, memory_dir=mem_dir)
     print(f"\n{'=' * 60}\n  CNN refine done | best={best_score_ever:.5f}\n{'=' * 60}")
 
 
@@ -1397,6 +1788,9 @@ def run_cnn_pseudo_refine(config: dict) -> dict:
 
 def dispatch_cnn_staged(config: dict) -> None:
     """Route staged CNN subprocess modes."""
+    import run_log
+
+    run_log.configure_terminal_from_config(config)
     if config.get("cnn_pseudo_refine"):
         run_cnn_pseudo_refine(config)
         return

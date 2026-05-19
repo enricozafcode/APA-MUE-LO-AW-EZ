@@ -55,10 +55,15 @@ class PerchExperimentMemory(ExperimentMemory):
         logs_dir: Path,
         ranking_metric: str = "macro_average_precision",
         *,
+        researcher_history_max_runs: int | None = None,
         summary_batch_size: int = SUMMARY_BATCH_SIZE,
         confidence_full_tries: int = CONFIDENCE_FULL_TRIES,
     ) -> None:
-        super().__init__(logs_dir, ranking_metric=ranking_metric)
+        super().__init__(
+            logs_dir,
+            ranking_metric=ranking_metric,
+            researcher_history_max_runs=researcher_history_max_runs,
+        )
         self.digest_path = Path(logs_dir) / self.DIGEST_FILE
         self.summary_batch_size = max(1, int(summary_batch_size))
         self.confidence_full_tries = max(1, int(confidence_full_tries))
@@ -494,6 +499,15 @@ class PerchExperimentMemory(ExperimentMemory):
             lines.append(f"  description: {desc}")
         else:
             lines.append("  description: (none logged)")
+        reason = (entry.get("reasoning") or spec.get("reasoning") or "").strip()
+        hyp = (entry.get("hypothesis") or spec.get("hypothesis") or "").strip()
+        cap = self._RATIONALE_MAX_CHARS
+        if reason:
+            r = reason if len(reason) <= cap else reason[: cap - 1] + "…"
+            lines.append(f"  reasoning: {r}")
+        if hyp:
+            h = hyp if len(hyp) <= cap else hyp[: cap - 1] + "…"
+            lines.append(f"  hypothesis: {h}")
         return lines
 
     def champion_context_block(
@@ -546,8 +560,8 @@ class PerchExperimentMemory(ExperimentMemory):
         seed = self._digest.get("refine_seed") or {}
         return dict(seed.get("seed_spec") or {})
 
-    def researcher_context(self, *, max_runs: int = 40) -> str:
-        """Lean history for the planner: arch_type, description, results only."""
+    def researcher_context(self, *, max_runs: int | None = None) -> str:
+        """Lean history for the planner: arch_type, description, results, prior LLM rationale."""
         self._update_digest_best()
 
         total = self.total()
@@ -587,10 +601,11 @@ class PerchExperimentMemory(ExperimentMemory):
             lines.append(f"BEST SO FAR: {bs} | {self._format_run_score(b)}")
             lines.append("")
 
-        # Chronological log — enough for ~30–40 planner rounds without blowing context
-        show = self._runs[-max_runs:] if total > max_runs else self._runs
+        cap = max_runs if max_runs is not None else self.researcher_history_max_runs
+        show = self._runs[-cap:] if cap and total > cap else self._runs
         start_idx = total - len(show) + 1
-        lines.append(f"RUNS (chronological, last {len(show)}):")
+        cap_note = f" (capped to last {cap})" if cap and total > cap else ""
+        lines.append(f"RUNS (chronological, {len(show)} shown{cap_note}):")
         for offset, entry in enumerate(show):
             lines.extend(self._run_researcher_line(entry, start_idx + offset))
 

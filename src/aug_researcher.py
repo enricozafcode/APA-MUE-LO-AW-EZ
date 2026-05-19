@@ -195,7 +195,7 @@ def _aug_safe_defaults(*, reason: str = "Parser fallback — medium baseline.") 
     base["preset_name"] = "fallback_medium"
     base["strategy"] = "explore"
     base["reasoning"] = reason
-    base["hypothesis"] = "Safe default augmentation."
+    base["hypothesis"] = ""
     return base
 
 
@@ -422,9 +422,6 @@ def _parse_aug_batch_response(response: str, batch_size: int, *, quiet: bool = F
             for item in raw_list:
                 if isinstance(item, dict) and _is_valid_aug_spec_dict(item):
                     specs.append(item)
-    if planner_note and not quiet:
-        print(f"  [AugResearcher] Plan: {planner_note[:160]}")
-
     valid = [_enforce_medium_high_aug(s) for s in specs if isinstance(s, dict)]
     valid = [s for s in valid if _is_valid_aug_spec_dict(s)]
     if not valid:
@@ -439,7 +436,13 @@ def _parse_aug_batch_response(response: str, batch_size: int, *, quiet: bool = F
         out.append(_finalize_aug_spec(_assign_slot_preset_name(raw, slot=slot, index=i + 1), slot=slot))
     while len(out) < batch_size:
         out.extend(_aug_batch_fallback(batch_size - len(out)))
-    return out[:batch_size]
+    out = out[:batch_size]
+    if planner_note and out:
+        out[0]["_planner_note"] = planner_note
+    import run_log
+
+    run_log.apply_planner_rationale_fallback(out, planner_note)
+    return out
 
 
 def _aug_batch_fallback(batch_size: int) -> list[dict]:
@@ -586,6 +589,18 @@ class AugResearcher:
         else:
             specs = [_parse_aug_spec(response)]
 
+        for spec in specs:
+            if self.refine_mode:
+                spec["strategy"] = "exploit"
+
+        import run_log
+
+        run_log.print_researcher_proposals(
+            specs,
+            track="perch",
+            round_label="aug planner",
+        )
+
         if self.quiet and specs:
             names = ", ".join(str(s.get("preset_name", "?")) for s in specs[: self.batch_size])
             line = f"    → {names}"
@@ -596,20 +611,6 @@ class AugResearcher:
             elif len({str(s.get("preset_name")) for s in specs}) < len(specs):
                 line += "  (duplicate names — check LLM JSON)"
             print(line)
-        elif not self.quiet:
-            for spec in specs:
-                if self.refine_mode:
-                    spec["strategy"] = "exploit"
-                slot = spec.get("slot", "")
-                print(
-                    f"  [AugResearcher] [{slot}] preset={spec.get('preset_name')} "
-                    f"mix_p={spec.get('mix_prob')} strategy={spec.get('strategy')}"
-                )
-                print(f"  [AugResearcher] {spec.get('reasoning', '')[:100]}")
-        else:
-            for spec in specs:
-                if self.refine_mode:
-                    spec["strategy"] = "exploit"
         return specs
 
 

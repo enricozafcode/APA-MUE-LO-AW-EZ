@@ -341,7 +341,9 @@ def _write_stage_plots(
             label="val_loss",
         )
     ax_loss.grid(True, alpha=0.25)
-    ax_loss.legend(loc="upper right", fontsize=8)
+    handles, labels = ax_loss.get_legend_handles_labels()
+    if labels:
+        ax_loss.legend(loc="upper right", fontsize=8)
 
     fig.tight_layout()
     fig.savefig(history_path, bbox_inches="tight")

@@ -15,6 +15,23 @@ from typing import Any
 from soundscape_evaluator import PRIMARY_META_METRIC, format_metrics_dict
 
 
+def resolve_researcher_history_max_runs(config: dict | None) -> int | None:
+    """None = include all runs from experiment_memory.jsonl in planner context."""
+    if not config:
+        return None
+    ma = config.get("meta_agent") or {}
+    v = ma.get("researcher_history_max_runs")
+    if v is None:
+        return None
+    if isinstance(v, str) and v.strip().lower() in ("all", "none", ""):
+        return None
+    try:
+        n = int(v)
+        return n if n > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 class ExperimentMemory:
     FILE = "experiment_memory.jsonl"
 
@@ -22,13 +39,17 @@ class ExperimentMemory:
         self,
         logs_dir: Path,
         ranking_metric: str = PRIMARY_META_METRIC,
+        *,
+        researcher_history_max_runs: int | None = None,
     ) -> None:
         self.path = Path(logs_dir) / self.FILE
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.ranking_metric = ranking_metric
+        self.researcher_history_max_runs = researcher_history_max_runs
         self._runs: list[dict] = []
         self._stage_ctx: dict | None = None
         self._load()
+        self._resumed_run_count = len(self._runs)
 
     def set_stage(
         self,
@@ -173,7 +194,93 @@ class ExperimentMemory:
 
     # ------------------------------------------------------------------ researcher context
 
-    def researcher_context(self) -> str:
+    _DESC_MAX_CHARS = 220
+    _RATIONALE_MAX_CHARS = 900
+
+    def announce_resumed_history(
+        self,
+        *,
+        track: str = "",
+        stage: str = "",
+    ) -> None:
+        """Log once when a stage reuses an existing experiment_memory.jsonl."""
+        n = self._resumed_run_count
+        if n <= 0:
+            return
+        tag = ""
+        if track or stage:
+            tag = f" [{track.upper()} {stage}]" if track and stage else f" [{track or stage}]"
+        print(
+            f"  [Memory]{tag} Loaded {n} prior run(s) from {self.path.name} "
+            f"(planner will see full history up to cap)",
+            flush=True,
+        )
+
+    @staticmethod
+    def _hyperparams_short(spec: dict) -> str:
+        parts: list[str] = []
+        if spec.get("hidden_dim") is not None:
+            parts.append(f"h{spec['hidden_dim']}")
+        if spec.get("n_layers") is not None:
+            parts.append(f"L{spec['n_layers']}")
+        if spec.get("dropout") is not None:
+            parts.append(f"drop{spec['dropout']}")
+        if spec.get("learning_rate") is not None:
+            parts.append(f"lr{spec['learning_rate']}")
+        if spec.get("batch_size") is not None:
+            parts.append(f"bs{spec['batch_size']}")
+        if spec.get("optimizer"):
+            parts.append(str(spec["optimizer"])[:5])
+        if spec.get("preset_name"):
+            parts.append(f"preset={str(spec['preset_name'])[:28]}")
+        if spec.get("mix_prob") is not None:
+            parts.append(f"mix_p={spec['mix_prob']}")
+        if spec.get("aug_prob") is not None:
+            parts.append(f"aug_p={spec['aug_prob']}")
+        if spec.get("audio_anchor"):
+            parts.append(f"anchor={spec['audio_anchor']}")
+        return "|".join(parts) if parts else "default"
+
+    def _run_kind_label(self, spec: dict) -> str:
+        if spec.get("arch_type"):
+            return str(spec["arch_type"])
+        if spec.get("preset_name"):
+            return f"aug:{spec.get('preset_name')}"
+        return "?"
+
+    def _scores_line(self, entry: dict) -> str:
+        if not entry.get("success"):
+            err = (entry.get("metrics") or {}).get("reason", "")
+            return f"FAILED{f' ({err[:80]})' if err else ''}"
+        return self._format_run_score(entry)
+
+    def _run_researcher_line(self, entry: dict, run_index: int) -> list[str]:
+        spec = entry.get("spec") or {}
+        kind = self._run_kind_label(spec)
+        desc = (spec.get("arch_description") or spec.get("preset_name") or "").strip()
+        desc = str(desc).replace("\n", " ")
+        if len(desc) > self._DESC_MAX_CHARS:
+            desc = desc[: self._DESC_MAX_CHARS - 1] + "…"
+        slot = spec.get("slot")
+        slot_s = f" slot={slot}" if slot else ""
+        hp = self._hyperparams_short(spec)
+        strategy = spec.get("strategy")
+        strat_s = f" {strategy}" if strategy else ""
+        head = f"#{run_index} | {kind}{slot_s}{strat_s} | {self._scores_line(entry)}"
+        lines = [head, f"  hyperparams: {hp}"]
+        if desc:
+            lines.append(f"  label: {desc}")
+        reason = (entry.get("reasoning") or spec.get("reasoning") or "").strip()
+        hyp = (entry.get("hypothesis") or spec.get("hypothesis") or "").strip()
+        if reason:
+            r = reason if len(reason) <= self._RATIONALE_MAX_CHARS else reason[: self._RATIONALE_MAX_CHARS - 1] + "…"
+            lines.append(f"  reasoning: {r}")
+        if hyp:
+            h = hyp if len(hyp) <= self._RATIONALE_MAX_CHARS else hyp[: self._RATIONALE_MAX_CHARS - 1] + "…"
+            lines.append(f"  hypothesis: {h}")
+        return lines
+
+    def researcher_context(self, *, max_runs: int | None = None) -> str:
         """
         Full history formatted for the Researcher model.
         The Researcher reads this once per iteration to decide what to try next.
@@ -183,57 +290,41 @@ class ExperimentMemory:
         if total == 0:
             return "No experiments have been run yet. This is the very first iteration."
 
+        cap = max_runs if max_runs is not None else self.researcher_history_max_runs
         ok = self.successful_runs()
         fails = self.failed_runs()
-        best = self.best_runs(5)
+        best = self.best_runs(3)
 
         lines = [
-            f"EXPERIMENT HISTORY: {total} runs | {len(ok)} succeeded | {len(fails)} failed",
-            f"RANKING METRIC (optimize this): {self.ranking_metric} "
-            f"(also log macro_AUC, median_AUC, train_loss, val_loss each run; "
-            f"AP tracks Kaggle LB best)",
+            "EXPERIMENT LOG (loaded from experiment_memory.jsonl on disk — do not repeat failed configs)",
+            f"Runs: {total} ({len(ok)} ok, {len(fails)} failed) | "
+            f"optimize: {self.ranking_metric} "
+            f"(also: macro_AP, macro_AUC, median_AUC, train_loss, val_loss)",
             "",
         ]
 
         if best:
-            lines.append("TOP RESULTS (sorted by ranking metric):")
-            for i, r in enumerate(best, 1):
-                spec = {k: v for k, v in r["spec"].items()
-                        if k not in ("reasoning", "hypothesis")}
-                lines.append(f"  #{i} {self._format_run_score(r)} | spec={spec}")
-                if r.get("reasoning"):
-                    lines.append(f"       reasoning: {r['reasoning']}")
+            b = best[0]
+            lines.append(f"BEST SO FAR: {self._run_kind_label(b.get('spec') or {})} | {self._format_run_score(b)}")
             lines.append("")
+
+        show = self._runs[-cap:] if cap and total > cap else self._runs
+        start_idx = total - len(show) + 1
+        cap_note = f" (capped to last {cap})" if cap and total > cap else ""
+        lines.append(f"RUNS (chronological, {len(show)} shown{cap_note}):")
+        for offset, entry in enumerate(show):
+            lines.extend(self._run_researcher_line(entry, start_idx + offset))
+        lines.append("")
 
         recent_fails = fails[-5:]
         if recent_fails:
-            lines.append("RECENT FAILURES (do not repeat these):")
+            lines.append("RECENT FAILURES (avoid repeating):")
             for r in recent_fails:
-                spec = {k: v for k, v in r["spec"].items()
-                        if k not in ("reasoning", "hypothesis")}
-                lines.append(f"  - {spec}")
+                spec = r.get("spec") or {}
+                lines.append(
+                    f"  - {self._run_kind_label(spec)} | "
+                    f"{(r.get('metrics') or {}).get('reason', 'failed')}"
+                )
             lines.append("")
-
-        recent_ok = [r for r in ok[-8:] if self._ranking_value(r) >= 0]
-        if len(recent_ok) >= 2:
-            vals = [f"{self._ranking_value(r):.4f}" for r in recent_ok]
-            trend = (
-                "↑ improving"
-                if self._ranking_value(recent_ok[-1]) > self._ranking_value(recent_ok[0])
-                else "↓ declining"
-            )
-            lines.append(
-                f"RECENT {self.ranking_metric} TREND: {' → '.join(vals)} ({trend})"
-            )
-            lines.append("")
-
-        tried_params = []
-        for r in self._runs[-15:]:
-            s = {k: v for k, v in r["spec"].items()
-                 if k not in ("reasoning", "hypothesis")}
-            tried_params.append(str(s))
-        lines.append(f"LAST {len(tried_params)} CONFIGS TRIED (avoid repeating):")
-        for p in tried_params:
-            lines.append(f"  {p}")
 
         return "\n".join(lines)

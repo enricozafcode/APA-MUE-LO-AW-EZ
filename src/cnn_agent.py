@@ -98,11 +98,15 @@ SEARCH_DIMENSIONS = [
 
 HARNESS_PREFIX = """
 from __future__ import annotations
-import os, sys, inspect, time
+import os, sys, inspect, time, warnings
 from pathlib import Path
 import numpy as np
 import librosa
 import tensorflow as tf
+
+if os.environ.get("CNN_COMPACT_LOG", "").lower() in ("1", "true", "yes"):
+    warnings.filterwarnings("ignore")
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 
 _SCRIPT_PATH = Path(__file__).resolve()
 _PROJECT_ROOT = None
@@ -485,7 +489,10 @@ def main():
 
     model = build_model(X_train.shape[1:], len(species_cols))
     model.compile(optimizer=_opt, loss="binary_crossentropy")
-    model.summary()
+    if os.environ.get("CNN_COMPACT_LOG", "").lower() not in ("1", "true", "yes"):
+        model.summary()
+    else:
+        print("MODEL_READY", flush=True)
     has_validation = False
     print(f"PHASE3_DEBUG: has_validation={{has_validation}}", flush=True)
     _n_train = len(X_train_fit)
@@ -1086,11 +1093,13 @@ GENERATION_SYSTEM_PROMPT = (
     "Return ONLY one ```python``` code block and nothing else.\n"
     "Rules:\n"
     "- Define exactly get_training_config() and build_model(input_shape, num_classes)\n"
+    "- get_training_config() must include batch_norm (bool) and optimizer as a string (e.g. \"adam\")\n"
     "- Optional build_features(audio_path, sample_rate, clip_seconds, n_mels, n_frames)\n"
     "- Do NOT define main(), _ORIG_GET_TRAINING_CONFIG, or _META_OVERRIDES\n"
     "- No executable top-level statements except imports/assignments/function defs\n"
     "- Final layer must be Dense(num_classes, activation='sigmoid')\n"
     "- Compile with binary_crossentropy\n"
+    "- Fast CNN: at least 2 MaxPooling2D layers; max 64 filters per Conv2D; use input_shape as given\n"
     "- Keras 3: use Input(shape=...) with Sequential; for residuals use Functional API "
     "(Input → conv branches → Add), never model.add(layers.Add()([shortcut, model])).\n"
 )
@@ -1156,21 +1165,35 @@ def run_experiment(
     script_path.write_text(script, encoding="utf-8")
     (code_dir / f"{run_id}_slot.py").write_text(slot_code, encoding="utf-8")
 
-    timeout_s = getattr(executor, "timeout_seconds", None)
-    print(
-        f"  [CNN Run] {run_id} → training + soundscape eval "
-        f"(timeout={timeout_s}s, log stream on)",
-        flush=True,
-    )
+    try:
+        from run_log import compact_terminal, print_run_loading
+    except ImportError:
+        compact_terminal = lambda: False  # type: ignore[misc, assignment]
+
+        def print_run_loading(label: str, **kwargs: object) -> None:  # noqa: ARG001
+            print(f"  → {label}…", flush=True)
+
+    if compact_terminal():
+        print_run_loading(run_id)
+    else:
+        timeout_s = getattr(executor, "timeout_seconds", None)
+        print(
+            f"  [CNN Run] {run_id} → training + soundscape eval "
+            f"(timeout={timeout_s}s, log stream on)",
+            flush=True,
+        )
     t0 = time.time()
     result = executor.run_file(script_path, stream_output=True, label=run_id)
     elapsed = time.time() - t0
-    if getattr(result, "timed_out", False):
-        print(f"  [CNN Run] {run_id} TIMED OUT after {elapsed:.1f}s", flush=True)
-    elif result.success:
-        print(f"  [CNN Run] {run_id} finished OK in {elapsed:.1f}s", flush=True)
-    else:
-        print(f"  [CNN Run] {run_id} failed in {elapsed:.1f}s (exit {result.return_code})", flush=True)
+    if not compact_terminal():
+        if getattr(result, "timed_out", False):
+            print(f"  [CNN Run] {run_id} TIMED OUT after {elapsed:.1f}s", flush=True)
+        elif result.success:
+            print(f"  [CNN Run] {run_id} finished OK in {elapsed:.1f}s", flush=True)
+        else:
+            print(f"  [CNN Run] {run_id} failed in {elapsed:.1f}s (exit {result.return_code})", flush=True)
+    elif getattr(result, "timed_out", False):
+        print(f"  ◇ {run_id}: TIMED OUT after {elapsed:.1f}s", flush=True)
     if not result.success:
         return None, result
 

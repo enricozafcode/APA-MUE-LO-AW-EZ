@@ -43,6 +43,7 @@ from code_executor import CodeExecutor
 from evaluator import Evaluator
 from llm_client import LLMClient, llm_response_failed as _llm_response_failed
 from memory import ExperimentMemory
+from memory import resolve_researcher_history_max_runs
 from perch_memory import PerchExperimentMemory
 from soundscape_evaluator import (
     PRIMARY_META_METRIC,
@@ -1142,23 +1143,13 @@ class PerchResearcher:
                 spec["strategy"] = "exploit"
                 if i < len(slot_labels):
                     spec["slot"] = slot_labels[i]
-        planner_note = ""
-        if batch_size > 1 and specs and specs[0].get("_planner_note"):
-            planner_note = specs[0].pop("_planner_note", "")
-        if planner_note:
-            print(f"  [Researcher] Plan: {planner_note[:160]}")
-        for i, spec in enumerate(specs, 1):
-            slot = spec.get("slot", f"s{i}")
-            note = ""
+        for spec in specs:
             if spec.pop("_arch_description_synthesized", False):
-                note = " | desc=synthesized (planner omitted arch_description)"
-            desc_prev = str(spec.get("arch_description", ""))
-            if len(desc_prev) > 70:
-                desc_prev = desc_prev[:70] + "…"
-            print(
-                f"  [Researcher] [{slot}] {spec.get('strategy', '?')} | "
-                f"arch={spec.get('arch_type')} | desc={desc_prev}{note}"
-            )
+                spec.setdefault(
+                    "reasoning",
+                    (spec.get("reasoning") or "")
+                    + " [arch_description synthesized — planner omitted it]",
+                )
         return specs
 
     @staticmethod
@@ -1263,6 +1254,9 @@ class PerchResearcher:
                 spec["slot"] = slot_pool[i]
         if planner_note and specs:
             specs[0]["_planner_note"] = planner_note
+        import run_log
+
+        run_log.apply_planner_rationale_fallback(specs, planner_note)
         if len(specs) < batch_size:
             print(
                 f"  [Researcher] Warning: parsed {len(specs)}/{batch_size} experiments — "
@@ -1875,7 +1869,52 @@ Keep build_head shape-safe. Prefer a working simpler model over a broken exotic 
 )
 
 
-def _spec_to_coder_prompt(spec: dict) -> str:
+def _resolve_perch_search_training_caps(config: dict) -> dict | None:
+    """Cap head epochs/patience during sample search (1a/1b/1c); final retrain is uncapped."""
+    perch_cfg = config.get("perch") or {}
+    if not perch_cfg.get("skip_final_retrain", True):
+        return None
+    meta = config.get("meta_agent") or {}
+    cheap = (config.get("search") or {}).get("cheap") or {}
+    epochs = meta.get("arch_search_head_epochs")
+    if epochs is None:
+        epochs = cheap.get("epochs", 3)
+    patience = meta.get("arch_search_head_patience")
+    if patience is None:
+        patience = cheap.get("patience", max(2, int(epochs)))
+    return {"epochs": int(epochs), "patience": int(patience)}
+
+
+_PERCH_TRAINING_CAPS_MARKER = "# --- PERCH TRAINING CAPS ---"
+
+
+def _apply_perch_training_caps(slot_code: str, caps: dict) -> str:
+    """Force epochs/patience during search (meta-agent overrides researcher/coder)."""
+    if not caps:
+        return slot_code
+    base = slot_code.split(_PERCH_TRAINING_CAPS_MARKER)[0].strip()
+    if "def get_training_config" not in base:
+        return base
+    renamed = re.sub(
+        r"^def get_training_config\s*\(",
+        "def _ORIG_GET_TRAINING_CONFIG(",
+        base,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    ov = repr(dict(caps))
+    return (
+        renamed.strip()
+        + f"\n\n{_PERCH_TRAINING_CAPS_MARKER}\n"
+        f"_PERCH_TRAINING_CAPS = {ov}\n\n"
+        "def get_training_config():\n"
+        "    cfg = _ORIG_GET_TRAINING_CONFIG()\n"
+        "    cfg.update(_PERCH_TRAINING_CAPS)\n"
+        "    return cfg\n"
+    )
+
+
+def _spec_to_coder_prompt(spec: dict, training_caps: dict | None = None) -> str:
     arch_type        = spec.get("arch_type", "residual_mlp")
     arch_description = spec.get("arch_description", "(no description provided)")
     hypothesis       = spec.get("hypothesis", "")
@@ -1885,8 +1924,15 @@ def _spec_to_coder_prompt(spec: dict) -> str:
     arch_keys = ("hidden_dim", "proj_dim", "n_layers", "dropout", "activation", "normalization")
     arch_cfg  = {k: spec[k] for k in arch_keys if k in spec}
 
-    training_keys = ("learning_rate", "batch_size", "optimizer", "epochs", "patience", "perch_weight")
+    training_keys = ("learning_rate", "batch_size", "optimizer", "perch_weight")
     training_cfg  = {k: spec[k] for k in training_keys if k in spec}
+    if training_caps:
+        training_cfg["epochs"] = training_caps["epochs"]
+        training_cfg["patience"] = training_caps["patience"]
+    else:
+        for k in ("epochs", "patience"):
+            if k in spec:
+                training_cfg[k] = spec[k]
 
     return (
         f"Researcher's experimental proposal:\n"
@@ -1898,7 +1944,8 @@ def _spec_to_coder_prompt(spec: dict) -> str:
         f"  {arch_description}\n\n"
         f"Suggested architecture hyperparameters (these are HINTS — adapt as needed for shape safety):\n"
         f"{json.dumps(arch_cfg, indent=2)}\n\n"
-        f"Training config to return from get_training_config() (use these values verbatim unless they would break training):\n"
+        f"Training config to return from get_training_config() "
+        f"({'LOCKED caps — use exactly' if training_caps else 'use these values verbatim unless they would break training'}):\n"
         f"{json.dumps(training_cfg, indent=2)}\n\n"
         f"{_arch_type_hint(arch_type)}"
         f"Implement build_head(emb_dim, num_classes) freely in idiomatic Keras functional API, "
@@ -2036,9 +2083,14 @@ _BASELINE_SPEC = {
 
 
 def generate_perch_code(
-    coder_llm: LLMClient, spec: dict, temperature: float, max_retries: int = 5
+    coder_llm: LLMClient,
+    spec: dict,
+    temperature: float,
+    max_retries: int = 5,
+    *,
+    training_caps: dict | None = None,
 ) -> str | None:
-    prompt = _spec_to_coder_prompt(spec)
+    prompt = _spec_to_coder_prompt(spec, training_caps)
     current_prompt = prompt
 
     for attempt in range(1, max_retries + 1):
@@ -2989,14 +3041,24 @@ def _execute_perch_iteration(
     code_dir: Path,
     spec: dict | None = None,
     slot_suffix: str = "",
+    training_caps: dict | None = None,
 ) -> tuple[dict | None, str, dict | None]:
     """Coder→train for one spec (researcher may have planned several per round)."""
     if spec is None:
         spec = researcher.next_experiment()
-    slot_code = generate_perch_code(coder_llm, spec, coder_temp)
+    slot_code = generate_perch_code(
+        coder_llm, spec, coder_temp, training_caps=training_caps
+    )
     if slot_code is None:
         print("  [Coder] All AST retries exhausted — falling back to safe default residual MLP.")
         slot_code = _SAFE_DEFAULT_SLOT_CODE
+    if training_caps:
+        slot_code = _apply_perch_training_caps(slot_code, training_caps)
+        print(
+            f"  [Perch] Enforced get_training_config(): "
+            f"epochs={training_caps.get('epochs')} patience={training_caps.get('patience')}",
+            flush=True,
+        )
 
     _MAX_EXEC_ATTEMPTS = 5
     metrics = None
@@ -3036,7 +3098,11 @@ def _execute_perch_iteration(
         if repaired is None:
             print("  [Coder] Repair failed — skipping remaining attempts.")
             break
-        final_slot_code = repaired
+        final_slot_code = (
+            _apply_perch_training_caps(repaired, training_caps)
+            if training_caps
+            else repaired
+        )
 
     return metrics, final_slot_code, spec
 
@@ -3119,6 +3185,7 @@ def _run_refine_loop(
     mem_dir: Path,
     ranking_metric: str,
     experiments_per_round: int = 1,
+    training_caps: dict | None = None,
 ) -> None:
     """Adaptive exploit loop: initial training tries, +bonus on improve, hard cap."""
     initial = max(1, int(refine_cfg.get("initial_iterations", 5)))
@@ -3253,6 +3320,7 @@ def _run_refine_loop(
                 val_cache=val_cache,
                 head_train_max=head_train_max,
                 code_dir=code_dir,
+                training_caps=training_caps,
             )
 
             rank_val = _ranking_value_from_metrics(metrics)
@@ -3548,11 +3616,18 @@ def run(config: dict) -> None:
     ranking_metric = _ranking_metric_from_config(config)
     refine_cfg = config.get("perch_refine") or {}
     refine_enabled = bool(refine_cfg.get("enabled"))
-    memory = PerchExperimentMemory(mem_dir, ranking_metric=ranking_metric)
+    history_cap = resolve_researcher_history_max_runs(config)
+    memory = PerchExperimentMemory(
+        mem_dir,
+        ranking_metric=ranking_metric,
+        researcher_history_max_runs=history_cap,
+    )
     if refine_enabled:
         memory.set_stage(track="perch", stage="1b", label="Perch Stage 1b — Refine")
+        memory.announce_resumed_history(track="perch", stage="1b")
     else:
         memory.set_stage(track="perch", stage="1a", label="Perch Stage 1a — Explore")
+        memory.announce_resumed_history(track="perch", stage="1a")
     use_llm_memory = bool(config.get("perch", {}).get("use_llm_memory_summaries", False))
     memory.configure_summaries(
         use_llm=use_llm_memory,
@@ -3643,6 +3718,13 @@ def run(config: dict) -> None:
     print("=" * 60)
 
     # ── Step 8: Agent loop ────────────────────────────────────────────────
+    training_caps = _resolve_perch_search_training_caps(config)
+    if training_caps and not _cfg_quiet(config):
+        print(
+            f"  Search training caps: epochs={training_caps['epochs']} "
+            f"patience={training_caps['patience']} (locked during 1a/1b/1c)"
+        )
+
     y_true_path        = Path(tempfile.gettempdir()) / "_y_true.npy"
     y_pred_path        = Path(tempfile.gettempdir()) / "_y_pred.npy"
     trained_head_path  = Path(tempfile.gettempdir()) / "_trained_head.keras"
@@ -3667,6 +3749,7 @@ def run(config: dict) -> None:
             mem_dir=mem_dir,
             ranking_metric=ranking_metric,
             experiments_per_round=experiments_per_round,
+            training_caps=training_caps,
         )
         print(f"\n{'='*60}")
         print("  DONE (refine campaign)")
@@ -3699,7 +3782,10 @@ def run(config: dict) -> None:
         print(f"\n{'─'*60}")
         print("  ITERATION 0 — Linear probe baseline (single Dense layer)")
         print(f"{'─'*60}")
-        _bl_script = _build_script(_SAFE_DEFAULT_SLOT_CODE, train_cache, val_cache)
+        _bl_code = _SAFE_DEFAULT_SLOT_CODE
+        if training_caps:
+            _bl_code = _apply_perch_training_caps(_bl_code, training_caps)
+        _bl_script = _build_script(_bl_code, train_cache, val_cache)
         _bl_path   = code_dir / "iter_000_baseline.py"
         _bl_path.write_text(_bl_script, encoding="utf-8")
         _bl_result = executor.run_file(_bl_path)
@@ -3763,6 +3849,7 @@ def run(config: dict) -> None:
                 val_cache=val_cache,
                 head_train_max=head_train_max,
                 code_dir=code_dir,
+                training_caps=training_caps,
             )
             rank_val = _ranking_value_from_metrics(metrics)
             run_log.print_run_result(

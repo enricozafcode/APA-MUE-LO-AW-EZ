@@ -30,7 +30,10 @@
     "cheap": {
       "max_samples": 1500,
       "epochs": 3,
-      "val_split": 0.2
+      "patience": 3,
+      "val_split": 0.2,
+      "n_mels": 64,
+      "n_frames": 128
     },
     "final": {
       "max_samples": null,
@@ -54,7 +57,9 @@
       "fallback_to_1b_on_1c_miss": true
     },
     "skip_completed_stages": false,
+    "compact_terminal": true,
     "primary_metric": "macro_average_precision",
+    "researcher_history_max_runs": null,
     "experiment_tracker": {
       "enabled": true,
       "timeline_json": "logs/meta_agent/experiment_timeline.json",
@@ -86,7 +91,14 @@
     "arch_search_embed_sample_frac": 1.0,
     "arch_search_embed_max_samples": 1500,
     "force_rebuild_embed_cache": false,
-    "cnn_iterations": 3,
+    "cnn_search_arch_limits": {
+      "max_conv_filters": 64,
+      "min_pooling_layers": 2,
+      "max_params": 1500000
+    },
+    "arch_search_head_epochs": 3,
+    "arch_search_head_patience": 3,
+    "cnn_iterations": 1,
     "perch_iterations": 5,
     "cnn_staged": true,
     "cnn_stage_1b": {
@@ -100,8 +112,9 @@
     "cnn_stage_1c": {
       "enabled": true,
       "mode": "both",
-      "planner_rounds": 5,
-      "experiments_per_round": 2,
+      "planner_rounds": 3,
+      "planner_rounds_on_top_of_resume": true,
+      "experiments_per_round": 1,
       "aug_presets": ["high"],
       "include_winner_aug_baseline": true,
       "include_preset_baselines": true,
@@ -147,7 +160,8 @@
     "stage_1c": {
       "enabled": true,
       "mode": "both",
-      "planner_rounds": 5,
+      "planner_rounds": 3,
+      "planner_rounds_on_top_of_resume": true,
       "experiments_per_round": 2,
       "aug_presets": ["high"],
       "include_preset_baselines": true,

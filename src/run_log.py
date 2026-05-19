@@ -7,9 +7,30 @@ Does not change training, evaluation, or memory logic — formatting and safe re
 from __future__ import annotations
 
 import json
+import re
 import textwrap
 from pathlib import Path
 from typing import Any
+
+_compact_terminal = True
+
+
+def set_compact_terminal(enabled: bool) -> None:
+    global _compact_terminal
+    _compact_terminal = bool(enabled)
+
+
+def compact_terminal() -> bool:
+    return _compact_terminal
+
+
+def configure_terminal_from_config(config: dict | None) -> None:
+    meta = (config or {}).get("meta_agent") or {}
+    logging_cfg = (config or {}).get("logging") or {}
+    raw = meta.get("compact_terminal")
+    if raw is None:
+        raw = logging_cfg.get("compact_terminal", True)
+    set_compact_terminal(bool(raw))
 
 # ── layout ────────────────────────────────────────────────────────────────────
 
@@ -137,6 +158,10 @@ _SPEC_KEYS = (
     "reasoning",
     "aug_preset",
     "aug_baseline",
+    "preset_name",
+    "audio_anchor",
+    "mix_prob",
+    "aug_prob",
     "learning_rate",
     "batch_size",
     "epochs",
@@ -149,12 +174,160 @@ _SPEC_KEYS = (
     "planner_note",
 )
 
+_RATIONALE_KEYS = frozenset({"planner_note", "reasoning", "hypothesis"})
+
+_PLACEHOLDER_REASONING = frozenset({
+    "safe default cnn.",
+    "researcher fallback.",
+    "fallback defaults — researcher output could not be parsed.",
+    "batch fallback —",
+    "parser fallback — varied cnn baseline (seed-based).",
+})
+
+_GENERIC_CNN_ARCH_SNIPPET = "Three Conv2D blocks (32→64→128"
+
+# Hypers shown for refine / champion diffs (not full arch_description boilerplate).
+CNN_SPEC_DELTA_KEYS = (
+    "learning_rate",
+    "batch_size",
+    "epochs",
+    "dropout",
+    "weight_decay",
+    "depth",
+    "filters_base",
+    "filter_pattern",
+    "pooling_type",
+    "classifier_hidden_units",
+    "batch_norm",
+    "residuals",
+    "optimizer",
+    "n_mels",
+    "n_frames",
+    "aug_preset",
+    "aug_prob",
+    "aug_noise_std",
+    "aug_time_mask",
+    "aug_freq_mask",
+)
+_PLACEHOLDER_HYPOTHESIS = frozenset({
+    "baseline mel-cnn should train.",
+    "safe default augmentation.",
+})
+
+
+def is_placeholder_rationale(value: Any, *, field: str = "reasoning") -> bool:
+    """True when value is empty or a known code placeholder (not real LLM text)."""
+    text = str(value or "").strip()
+    if not text or text == "—":
+        return True
+    low = text.lower()
+    placeholders = (
+        _PLACEHOLDER_HYPOTHESIS if field == "hypothesis" else _PLACEHOLDER_REASONING
+    )
+    if low in placeholders:
+        return True
+    return any(low.startswith(p) for p in placeholders if p.endswith("—"))
+
+
+def _resolve_planner_note(specs: list[dict], planner_note: str = "") -> str:
+    note = (planner_note or "").strip()
+    if note:
+        return note
+    for spec in specs:
+        note = str(spec.get("_planner_note") or spec.get("planner_note") or "").strip()
+        if note:
+            return note
+    return ""
+
+
+def is_generic_cnn_arch_description(desc: Any) -> bool:
+    text = str(desc or "").strip()
+    if not text:
+        return True
+    return text.startswith(_GENERIC_CNN_ARCH_SNIPPET) or "GlobalAveragePooling, Dropout 0.3" in text
+
+
+def _format_hyper_value(val: Any) -> str:
+    if isinstance(val, float):
+        if (val != 0 and abs(val) < 0.01) or abs(val) >= 1000:
+            return f"{val:.4g}"
+        return f"{val:g}"
+    return str(val)
+
+
+def _values_differ(a: Any, b: Any) -> bool:
+    if a == b:
+        return False
+    try:
+        return abs(float(a) - float(b)) > 1e-12
+    except (TypeError, ValueError):
+        return str(a) != str(b)
+
+
+def format_cnn_spec_delta_lines(spec: dict, seed_spec: dict | None) -> list[str]:
+    """Human-readable lines for what this experiment changes vs champion seed."""
+    if not seed_spec:
+        return []
+    lines: list[str] = []
+    deltas: list[str] = []
+    for key in CNN_SPEC_DELTA_KEYS:
+        if key not in spec and key not in seed_spec:
+            continue
+        new_v = spec.get(key)
+        old_v = seed_spec.get(key)
+        if new_v is None:
+            continue
+        if key not in seed_spec or _values_differ(new_v, old_v):
+            if key in seed_spec:
+                deltas.append(f"{key}={_format_hyper_value(new_v)} (champion {_format_hyper_value(old_v)})")
+            else:
+                deltas.append(f"{key}={_format_hyper_value(new_v)}")
+    if deltas:
+        lines.append("proposed: " + "; ".join(deltas))
+    else:
+        lines.append("proposed: no hyper change vs champion (coder may still edit code)")
+    desc = str(spec.get("arch_description") or "").strip()
+    if (
+        desc
+        and not is_generic_cnn_arch_description(desc)
+        and "structure unchanged vs champion" not in desc.lower()
+    ):
+        short = desc if len(desc) <= 220 else desc[:217] + "…"
+        lines.append("layout: " + short)
+    return lines
+
+
+def apply_planner_rationale_fallback(
+    specs: list[dict],
+    planner_note: str = "",
+) -> None:
+    """If per-slot reasoning/hypothesis missing, copy batch planner_note into reasoning."""
+    note = _resolve_planner_note(specs, planner_note)
+    if not note:
+        return
+    for spec in specs:
+        if is_placeholder_rationale(spec.get("reasoning"), field="reasoning"):
+            spec["reasoning"] = note
+        if is_placeholder_rationale(spec.get("hypothesis"), field="hypothesis"):
+            spec.setdefault("hypothesis", "")
+
+
+def _print_wrapped_field(prefix: str, label: str, text: str, *, width: int = W - 6) -> None:
+    body = str(text).strip().replace("\n", " ")
+    if not body:
+        return
+    _out(f"  {prefix}{label}:")
+    for line in _wrap(body, width):
+        _out(f"  {prefix}  {line}")
+
 
 def print_researcher_proposals(
     specs: list[dict],
     *,
     track: str = "",
     round_label: str = "",
+    planner_note: str = "",
+    seed_spec: dict | None = None,
 ) -> None:
     if not specs:
         _out("  ◆ Researcher returned no experiments — Moving on...")
@@ -166,12 +339,48 @@ def print_researcher_proposals(
     _out()
     _out(f"  {hdr}")
     _out(f"  {_THIN}")
+
+    apply_planner_rationale_fallback(specs, planner_note)
+
+    note = _resolve_planner_note(specs, planner_note)
+    if note:
+        _out("  ◆ LLM planner note (batch rationale)")
+        _print_wrapped_field("│", "planner_note", note)
+        _out()
+
     for i, spec in enumerate(specs, 1):
         slot = spec.get("slot") or f"exp-{i}"
-        arch = spec.get("arch_type", "—")
+        arch = spec.get("arch_type") or spec.get("preset_name") or "—"
         strategy = spec.get("strategy", "—")
-        _out(f"  ┌─ Experiment {i}/{len(specs)}  slot={slot}  arch={arch}  strategy={strategy}")
+        _out(f"  ┌─ Experiment {i}/{len(specs)}  slot={slot}  kind={arch}  strategy={strategy}")
+
+        for key in ("reasoning", "hypothesis"):
+            val = spec.get(key)
+            if is_placeholder_rationale(val, field=key):
+                _out(f"  │  {key}: —")
+            else:
+                _print_wrapped_field("│", key, str(val))
+
+        delta_lines = format_cnn_spec_delta_lines(spec, seed_spec) if seed_spec else []
+        skip_keys = (
+            set(CNN_SPEC_DELTA_KEYS) | {"arch_type", "strategy", "slot", "arch_description"}
+            if seed_spec
+            else set()
+        )
+        if delta_lines:
+            for line in delta_lines:
+                for part in _wrap(line, W - 6):
+                    _out(f"  │  {part}")
+        elif seed_spec:
+            _out("  │  proposed: —")
+
         for key in _SPEC_KEYS:
+            if key in _RATIONALE_KEYS or key in skip_keys:
+                continue
+            if key == "arch_description" and (
+                is_generic_cnn_arch_description(spec.get(key)) or seed_spec
+            ):
+                continue
             val = spec.get(key)
             if val is None or val == "" or val == "—":
                 continue
@@ -183,6 +392,64 @@ def print_researcher_proposals(
     _out()
 
 
+def print_run_loading(label: str, *, detail: str = "training + soundscape eval") -> None:
+    _out(f"  → {label}  ({detail}…)")
+
+
+def improvement_tag(
+    value: float | None,
+    best_so_far: float | None,
+    *,
+    higher_is_better: bool = True,
+) -> str:
+    if value is None:
+        return ""
+    if best_so_far is None:
+        return "✓"
+    eps = 1e-9
+    if higher_is_better:
+        if value > best_so_far + eps:
+            return "↑ improving"
+        if value < best_so_far - eps:
+            return "↓ not improving"
+        return "→ tied"
+    if value < best_so_far - eps:
+        return "↑ improving"
+    if value > best_so_far + eps:
+        return "↓ not improving"
+    return "→ tied"
+
+
+def print_run_outcome(
+    *,
+    slot: str = "",
+    metrics: dict | None = None,
+    ranking_value: float | None = None,
+    best_so_far: float | None = None,
+    ranking_metric: str = "macro_average_precision",
+    failed: bool = False,
+    stderr_tail: str = "",
+) -> None:
+    label = slot or "run"
+    if failed or (metrics and metrics.get("status") != "success"):
+        _out(f"  ◇ {label}: FAILED")
+        if stderr_tail:
+            for ln in stderr_tail.strip()[-280:].splitlines()[-3:]:
+                _out(f"      {ln}")
+        return
+    rv = ranking_value
+    if rv is None and metrics:
+        rv = metrics.get(ranking_metric) or metrics.get("soundscape_macro_ap")
+        if rv is None:
+            rv = metrics.get("macro_average_precision")
+    tag = improvement_tag(rv, best_so_far)
+    line = _format_metrics_line(metrics, ranking_metric) if metrics else (
+        f"{ranking_metric}={float(rv):.5f}" if rv is not None else "no metrics"
+    )
+    suffix = f"  {tag}" if tag else ""
+    _out(f"  ◇ {label}:{suffix}  {line}")
+
+
 def print_run_result(
     *,
     slot: str = "",
@@ -190,7 +457,21 @@ def print_run_result(
     success: bool | None = None,
     stderr_tail: str = "",
     ranking_metric: str = "macro_average_precision",
+    ranking_value: float | None = None,
+    best_so_far: float | None = None,
 ) -> None:
+    if compact_terminal():
+        _out()
+        print_run_outcome(
+            slot=slot,
+            metrics=metrics,
+            ranking_value=ranking_value,
+            best_so_far=best_so_far,
+            ranking_metric=ranking_metric,
+            failed=success is False or bool(metrics and metrics.get("status") != "success"),
+            stderr_tail=stderr_tail,
+        )
+        return
     _out()
     label = f"  ◇ RUN RESULT"
     if slot:
@@ -242,9 +523,15 @@ def print_final_architecture(
     banner(f"Final architecture — {track.upper()}")
     if spec:
         _out(f"  arch_type     : {spec.get('arch_type', '—')}")
-        desc = (spec.get("arch_description") or spec.get("reasoning") or "")[:320]
-        if desc:
-            for line in _wrap(desc, W - 4):
+        seed = spec.get("_seed_spec") if isinstance(spec.get("_seed_spec"), dict) else None
+        delta_lines = format_cnn_spec_delta_lines(spec, seed) if seed else []
+        if delta_lines:
+            for dl in delta_lines:
+                for line in _wrap(dl, W - 4):
+                    _out(f"  changes       : {line}")
+        desc = (spec.get("arch_description") or spec.get("reasoning") or "")
+        if desc and not is_generic_cnn_arch_description(desc):
+            for line in _wrap(str(desc)[:320], W - 4):
                 _out(f"  description   : {line}")
         for key in ("aug_preset", "aug_baseline", "learning_rate", "batch_size", "epochs", "dropout"):
             if spec.get(key) is not None:
@@ -339,8 +626,78 @@ _SUPPRESS_REPEAT_SUBSTRINGS = (
 )
 
 
+_COMPACT_DROP_SUBSTRINGS = (
+    "PHASE3_DEBUG:",
+    "CONFIG_ACTIVE:",
+    "AUG_CFG:",
+    "split_stats",
+    "AUG_APPLIED:",
+    "FOCAL_CLIP_MANIFEST:",
+    "Manifest clips=",
+    "FOCAL_TRAIN_CACHE:",
+    "selected samples",
+    "Focal cache clips=",
+    "DATA: X_train=",
+    "TRAIN_START:",
+    "checkpoint_enabled",
+    "has_validation",
+    "TRAIN_BATCH:",
+    "BEST_EPOCH_BY_VAL_LOSS:",
+    "TRAIN_LOSS:",
+    "EVAL_ARTIFACTS",
+    "SOUNDSCAPE_EVAL_START",
+    "SOUNDSCAPE_EVAL_CACHE:",
+    "SOUNDSCAPE_EVAL_PROGRESS:",
+    "SOUNDSCAPE_EVAL_READY:",
+    "TRAIN_DONE",
+    "SUBMISSION:",
+    "Model: \"functional\"",
+    "Total params:",
+    "Trainable params:",
+    "Non-trainable params:",
+    "Layer (type)",
+    "Candidate files=",
+    "MODEL_READY",
+    "[CNN Run]",
+    "[CNN] Experiment subprocess timeout",
+    "UserWarning:",
+    "warnings.warn(",
+    "site-packages/",
+    ".venv/lib",
+)
+
+_COMPACT_DROP_RES = (
+    re.compile(r"Loaded\s+\d+/\d+\s"),
+    re.compile(r"\d+/\d+.*ms/step"),
+    re.compile(r"Epoch\s+\d+/\d+"),
+)
+
+_KERAS_TABLE_CHARS = frozenset("┏┡╇┃├└┳━─│╶═")
+
+
+def _is_keras_summary_line(line: str) -> bool:
+    if any(c in line for c in _KERAS_TABLE_CHARS):
+        return True
+    s = line.strip()
+    return bool(s.startswith("│ ") and ("Conv2D" in s or "Dense" in s or "InputLayer" in s))
+
+
+def _compact_should_drop_line(line: str) -> bool:
+    if _is_keras_summary_line(line):
+        return True
+    for pat in _COMPACT_DROP_SUBSTRINGS:
+        if pat in line:
+            return True
+    for rx in _COMPACT_DROP_RES:
+        if rx.search(line):
+            return True
+    return False
+
+
 def filter_subprocess_line(line: str) -> bool:
     """Return False to hide duplicate setup noise from streamed logs."""
+    if compact_terminal() and _compact_should_drop_line(line):
+        return False
     for pat in _SUPPRESS_REPEAT_SUBSTRINGS:
         if pat in line:
             key = f"subproc:{pat}"

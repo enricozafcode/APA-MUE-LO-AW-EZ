@@ -434,13 +434,21 @@ def _track_order(config: dict) -> list[str]:
     return order or ["cnn", "perch"]
 
 
+# Stage 1a architecture-search planner rounds per track (hard ceilings).
+_STAGE_1A_EXPLORATION_CAPS: dict[str, int] = {"cnn": 1, "perch": 5}
+
+
 def _track_iterations(config: dict, track: str) -> int:
     meta = _meta_cfg(config)
     keys = {
         "cnn": "cnn_iterations",
         "perch": "perch_iterations",
     }
-    return int(meta.get(keys[track], 0))
+    raw = int(meta.get(keys[track], 0))
+    if raw <= 0:
+        return 0
+    cap = int(meta.get(f"{track}_1a_max_rounds", _STAGE_1A_EXPLORATION_CAPS.get(track, raw)))
+    return min(raw, max(0, cap))
 
 
 def _pipeline_max_stage(pipeline: str) -> str:
@@ -1858,7 +1866,7 @@ def _run_cnn_1c_llm_search(
     from cnn_aug_researcher import CnnAugResearcher, cnn_aug_trial_id, spec_to_cnn_training_aug
     from cnn_soundscape_cache import DEFAULT_SOUNDSCAPE_MEL_CACHE_DIR
     from llm_client import LLMClient
-    from memory import ExperimentMemory
+    from memory import ExperimentMemory, resolve_researcher_history_max_runs
 
     runs: list[dict] = []
     aug_mem = META_LOGS / "cnn" / "aug_search" / "_llm_memory"
@@ -1873,8 +1881,14 @@ def _run_cnn_1c_llm_search(
         timeout_seconds=llm_timeout,
         stream_debug=bool(cfg.get("stream_debug", False)),
     )
-    memory = ExperimentMemory(aug_mem, ranking_metric=metric)
+    history_cap = resolve_researcher_history_max_runs(config)
+    memory = ExperimentMemory(
+        aug_mem,
+        ranking_metric=metric,
+        researcher_history_max_runs=history_cap,
+    )
     memory.set_stage(track="cnn", stage="1c", label="CNN Stage 1c — Augmentation")
+    memory.announce_resumed_history(track="cnn", stage="1c")
     researcher = CnnAugResearcher(
         llm,
         memory,
@@ -3177,6 +3191,59 @@ def _trial_index_from_aug_preset(preset: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _planner_rounds_on_top_of_resume(cfg: dict) -> bool:
+    """When true, planner_rounds × experiments_per_round = new trials added after resume."""
+    if "planner_rounds_on_top_of_resume" in cfg:
+        return bool(cfg["planner_rounds_on_top_of_resume"])
+    return True
+
+
+def _scan_perch_1c_llm_trial_dirs() -> list[tuple[int, Path]]:
+    """Completed LLM aug trials under perch/aug_search (aug_r##_* with a trained head)."""
+    aug_root = META_LOGS / "perch" / "aug_search"
+    candidates: list[tuple[int, Path]] = []
+    if not aug_root.is_dir():
+        return candidates
+    for mem_dir in aug_root.iterdir():
+        if not mem_dir.is_dir() or mem_dir.name == "memory":
+            continue
+        if not _perch_mem_dir_has_head(mem_dir):
+            continue
+        trial_idx = _trial_index_from_aug_preset(mem_dir.name)
+        if trial_idx is None:
+            continue
+        candidates.append((trial_idx, mem_dir))
+    candidates.sort(key=lambda x: x[0])
+    return candidates
+
+
+def _resolve_1c_llm_run_cap(
+    search_cfg: dict,
+    *,
+    run_index_start: int,
+    run_idx_after_resume: int,
+    fixed_total: int | None = None,
+) -> tuple[int, int, int]:
+    """
+    Returns (n_new_trial_slots, total_cap_for_progress_labels, planner_rounds).
+
+    If planner_rounds_on_top_of_resume is true (default), each run adds
+    planner_rounds × experiments_per_round trials after the highest index
+    already on disk — experiment_memory.jsonl only informs the planner.
+    """
+    rounds = int(search_cfg.get("planner_rounds", search_cfg.get("iterations", 3)))
+    epr = int(search_cfg.get("experiments_per_round", search_cfg.get("batch_size", 3)))
+    n_new = rounds * epr
+    if _planner_rounds_on_top_of_resume(search_cfg):
+        base = max(run_idx_after_resume, run_index_start - 1)
+        total = base + n_new
+    elif fixed_total is not None:
+        total = int(fixed_total)
+    else:
+        total = max(run_idx_after_resume, run_index_start - 1) + n_new
+    return n_new, total, rounds
+
+
 def _merge_1c_runs_by_preset(runs: list[dict]) -> list[dict]:
     by_preset: dict[str, dict] = {}
     for run in runs:
@@ -3833,6 +3900,11 @@ def _stage_1c_search_cfg(cfg: dict) -> dict:
     search.setdefault("researcher_num_predict", 4096)
     if search.get("stream_debug") is None:
         search["stream_debug"] = False
+    if "planner_rounds_on_top_of_resume" not in search and cfg.get(
+        "planner_rounds_on_top_of_resume"
+    ) is not None:
+        search["planner_rounds_on_top_of_resume"] = cfg["planner_rounds_on_top_of_resume"]
+    search.setdefault("planner_rounds_on_top_of_resume", True)
     return search
 
 
@@ -3864,7 +3936,7 @@ def _run_stage_1c_llm_search(
     """Single-phase LLM aug search: propose → embed → train head → score."""
     from aug_researcher import AugResearcher
     from llm_client import LLMClient
-    from memory import ExperimentMemory
+    from memory import ExperimentMemory, resolve_researcher_history_max_runs
 
     planner_rounds = int(search_cfg.get("planner_rounds", search_cfg.get("iterations", 3)))
     experiments_per_round = int(search_cfg.get("experiments_per_round", 3))
@@ -3898,8 +3970,14 @@ def _run_stage_1c_llm_search(
         timeout_seconds=llm_timeout,
         stream_debug=stream_debug,
     )
-    memory = ExperimentMemory(mem_dir, ranking_metric=common["metric"])
+    history_cap = resolve_researcher_history_max_runs(config)
+    memory = ExperimentMemory(
+        mem_dir,
+        ranking_metric=common["metric"],
+        researcher_history_max_runs=history_cap,
+    )
     memory.set_stage(track="perch", stage="1c", label="Perch Stage 1c — Augmentation")
+    memory.announce_resumed_history(track="perch", stage="1c")
     researcher = AugResearcher(
         llm,
         memory,
@@ -3914,8 +3992,9 @@ def _run_stage_1c_llm_search(
     )
 
     runs: list[dict] = []
-    run_idx = int(common.get("run_index_start", 1)) - 1
-    total_runs = int(common.get("run_index_total", planner_rounds * experiments_per_round))
+    run_index_start = int(common.get("run_index_start", 1))
+    run_idx = run_index_start - 1
+    fixed_total = common.get("run_index_total")
     trial_kw = {
         k: v
         for k, v in common.items()
@@ -3937,6 +4016,14 @@ def _run_stage_1c_llm_search(
     if leader is None:
         leader = _Stage1cLeader()
     from aug_researcher import aug_dict_from_logged_spec, slug_from_spec
+
+    # Cap for progress labels; re-resolved after resume when run_idx moves forward.
+    n_new, total_runs, planner_rounds = _resolve_1c_llm_run_cap(
+        search_cfg,
+        run_index_start=run_index_start,
+        run_idx_after_resume=run_idx,
+        fixed_total=int(fixed_total) if fixed_total is not None else None,
+    )
 
     if resume_partial:
         resumed, next_idx = _collect_resumed_perch_1c_llm_runs(
@@ -3965,6 +4052,25 @@ def _run_stage_1c_llm_search(
                 flush=True,
             )
             run_idx = max(next_idx - 1, run_idx)
+        n_new, total_runs, planner_rounds = _resolve_1c_llm_run_cap(
+            search_cfg,
+            run_index_start=run_index_start,
+            run_idx_after_resume=run_idx,
+            fixed_total=int(fixed_total) if fixed_total is not None else None,
+        )
+    if _planner_rounds_on_top_of_resume(search_cfg):
+        print(
+            f"\n  [1c LLM] {planner_rounds} planner round(s) × {experiments_per_round} config(s) "
+            f"= {n_new} new trial(s) on top of index {run_idx} "
+            f"(progress cap {total_runs})",
+            flush=True,
+        )
+    else:
+        print(
+            f"\n  [1c LLM] {planner_rounds} round(s) × {experiments_per_round} config(s) "
+            f"(fixed budget, cap {total_runs})",
+            flush=True,
+        )
 
     for round_i in range(1, planner_rounds + 1):
         if run_idx >= total_runs:
@@ -4244,12 +4350,16 @@ def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
     final_winner: dict | None = None
 
     n_presets = len(preset_list) if include_presets else 0
-    n_llm = 0
-    if mode in ("llm", "llm_batch", "both"):
-        n_llm = int(search_cfg.get("planner_rounds", 3)) * int(
-            search_cfg.get("experiments_per_round", 3)
-        )
-    total_trials = n_presets + n_llm
+    planner_rounds = int(search_cfg.get("planner_rounds", 3))
+    epr = int(search_cfg.get("experiments_per_round", 3))
+    n_llm_new = planner_rounds * epr if mode in ("llm", "llm_batch", "both") else 0
+    resumed_llm = len(_scan_perch_1c_llm_trial_dirs())
+    if mode in ("llm", "llm_batch", "both") and _planner_rounds_on_top_of_resume(search_cfg):
+        total_trials = n_presets + resumed_llm + n_llm_new
+    elif mode in ("llm", "llm_batch", "both"):
+        total_trials = n_presets + n_llm_new
+    else:
+        total_trials = n_presets
     run_idx = 1
     leader = _Stage1cLeader()
 
@@ -4275,7 +4385,14 @@ def run_stage_1c_aug_search(config: dict, suite: SoundscapeEvalSuite) -> dict:
         run_idx += n_presets
 
     if mode in ("llm", "llm_batch", "both"):
-        print(f"\n  LLM custom configs (~{n_llm} trials)")
+        if _planner_rounds_on_top_of_resume(search_cfg):
+            print(
+                f"\n  LLM custom configs ({n_llm_new} new trial(s): "
+                f"{planner_rounds} round(s) × {epr} on top of "
+                f"{resumed_llm} resumed + {n_presets} preset(s))"
+            )
+        else:
+            print(f"\n  LLM custom configs (~{n_llm_new} trials, fixed budget)")
         common_llm = {
             **common,
             "run_index_start": run_idx,
@@ -4871,6 +4988,7 @@ def main():
     sys.path.insert(0, str(PROJECT_ROOT / "src"))
     import run_log
 
+    run_log.configure_terminal_from_config(config)
     metric = _meta_primary_metric(config)
     suite = _soundscape_suite(config)
     run_log.print_pipeline_roadmap(config, pipeline)
