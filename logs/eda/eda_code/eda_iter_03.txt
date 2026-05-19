@@ -1,0 +1,4 @@
+SECTION 7 — SOUNDSCAPES
+Common species between soundscape labels and train data: 47
+Top 10 common species:
+compau: 493

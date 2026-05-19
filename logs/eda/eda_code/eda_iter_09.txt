@@ -1,0 +1,3 @@
+Valid latitude/longitude values: 35549
+Invalid latitude/longitude values: 0
+Percentage of valid latitude/longitude values: 100.00%

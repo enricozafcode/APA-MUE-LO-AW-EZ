@@ -1,0 +1,75 @@
+# BirdCLEF+ 2026 — EDA Summary
+# Generated: 2026-05-19T15:20:13
+
+### 1. DATASET STRUCTURE
+
+The BirdCLEF+ 2026 dataset consists of several key files:
+- `train.csv`: Contains metadata for 35,549 training samples.
+- `taxonomy.csv`: Provides taxonomic information for 234 species.
+- `train_soundscapes_labels.csv`: Links soundscapes to species labels with 1478 entries.
+- `sample_submission.csv`: Template for submitting predictions.
+
+The dataset includes:
+- **Train Audio Clips**: 35,549 `.ogg` files in the `train_audio` directory.
+- **Soundscape Files**: 10,658 `.ogg` files in the `train_soundscapes` directory (no test soundscapes provided).
+
+### 2. CLASS DISTRIBUTION & IMBALANCE
+
+The dataset contains:
+- **Total Species**: 206 unique species.
+- **Taxonomic Classes**:
+  - Insecta: 199
+  - Reptilia: 1
+  - Amphibia: 451
+  - Mammalia: 99
+  - Aves: 34,799
+
+The distribution of recordings per species is highly imbalanced:
+- **Max Recordings per Species**: 499
+- **Min Recordings per Species**: 1
+- **Median Recordings per Species**: 126
+- **Species with < 10 Recordings**: 25
+
+### 3. MULTI-LABEL STRUCTURE
+
+The dataset includes:
+- **Fraction of Recordings with Secondary Labels**: 12.30%
+- **Top 10 Multi-label Species**:
+  - rubthr1: 499
+  - banana: 498
+  - fepowl: 497
+  - soulap1: 497
+  - houspa: 496
+  - coffal1: 495
+  - osprey: 495
+  - socfly1: 494
+  - compau: 493
+  - yeofly1: 493
+
+### 4. FOCAL COVERAGE GAP
+
+The dataset has:
+- **Focal Species Count**: 206 (all species are present in the focal audio clips)
+- **Total Species Count**: 206
+- **Focal Coverage Gap**: 0.00%
+
+### 5. DATA QUALITY SIGNALS
+
+The dataset includes:
+- **Rating Distribution**: Zero-rated (unrated, mostly iNat): 12,849 (36.1%)
+- **Recording Source Bias**: Collection split: iNat: 12,506, XC: 23,043
+
+### 6. AUDIO CHARACTERISTICS
+
+Audio samples encountered errors during processing:
+- Errors occurred with files from the `train_audio` directory, indicating issues with audio file handling or extraction.
+
+### 7. DATA & TRAINING IMPLICATIONS (data-only)
+
+Key dataset facts for training:
+- **Imbalance**: Significant imbalance in species recordings, with many species having very few samples.
+- **Noise**: Errors during audio processing suggest potential noise or corruption in the data.
+- **Label Sparsity**: Multi-label structure is sparse, affecting model complexity and performance.
+- **Rare Species**: Many species have fewer than 10 recordings, requiring careful handling to avoid overfitting.
+- **Soundscape vs Focal Coverage**: All species are represented in focal audio clips, but soundscapes may provide additional context for rare species.
+- **Augmentation Relevance**: Given the imbalance and sparsity, data augmentation techniques may be beneficial.

@@ -1,0 +1,34 @@
+## DATA LAYOUT (same on every machine — under project root)
+Project root = folder containing `src/` and `data/`. Discovered at runtime from __file__.
+Use ONLY the injected constants below — never absolute paths (/Users/..., Desktop/data, etc.).
+
+## INJECTED CONSTANTS (prepended automatically — do not redefine)
+DATA LOADING: `train = _load_csv(TRAIN_CSV)` → list of dicts (NOT pandas — no .empty, .dropna, row['col'] on DataFrame).
+
+Paths: `TRAIN_CSV`, `TAXONOMY_CSV`, `TRAIN_SOUNDSCAPES_LABELS_CSV`, `SAMPLE_SUBMISSION_CSV`,
+`TRAIN_AUDIO_DIR`, `TRAIN_SOUNDSCAPES_DIR`, `TEST_SOUNDSCAPES_DIR`, `DATA`, `PROJECT_ROOT`.
+
+Helpers (already defined — use these): `_load_csv`, `_sep`, `_parse_secondary_labels_row`,
+`_soundscape_species`, `_train_species_counts`, `_sample_ogg_files`.
+
+Imports already available: ast, random, Counter, Path.
+
+## FILES ON THIS MACHINE (for your awareness)
+- data/train.csv [FOUND] — 35549 rows; load via `_load_csv(TRAIN_CSV)`
+    columns: primary_label, secondary_labels, type, latitude, longitude, scientific_name, common_name, class_name, inat_taxon_id, author, license, rating, …
+- data/taxonomy.csv [FOUND] — 234 rows; load via `_load_csv(TAXONOMY_CSV)`
+    columns: primary_label, inat_taxon_id, scientific_name, common_name, class_name
+- data/train_soundscapes_labels.csv [FOUND] — 1478 rows; load via `_load_csv(TRAIN_SOUNDSCAPES_LABELS_CSV)`
+    columns: filename, start, end, primary_label
+- data/sample_submission.csv [FOUND] — 3 rows; load via `_load_csv(SAMPLE_SUBMISSION_CSV)`
+    columns: row_id, 1161364, 116570, 1176823, 1491113, 1595929, 209233, 22930, 22956, 22961, 22967, 22973, …
+
+- data/train_audio/ [FOUND] — use `TRAIN_AUDIO_DIR` in code
+    species subdirectories: 206
+    *.ogg files (scanned): 35549
+- data/train_soundscapes/ [FOUND] — use `TRAIN_SOUNDSCAPES_DIR` in code
+    *.ogg files (scanned): 10658
+- data/test_soundscapes/ [FOUND] — use `TEST_SOUNDSCAPES_DIR` in code
+    *.ogg files (scanned): 0
+
+If a CSV shows 0 rows or is MISSING, print that fact and skip ratios (never divide by len(rows) when rows is empty).

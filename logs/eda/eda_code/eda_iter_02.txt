@@ -1,0 +1,10 @@
+SECTION 6 — TAXONOMY
+Common species between train and taxonomy: 206
+Unique to train: 0
+Unique to taxonomy: 28
+Class distribution in train.csv:
+Insecta: 199
+Reptilia: 1
+Amphibia: 451
+Mammalia: 99
+Aves: 34799

@@ -1,0 +1,87 @@
+{
+  "project_root": "/Users/enricozafiris/Desktop/NIGHT 18051905",
+  "data_dir": "/Users/enricozafiris/Desktop/NIGHT 18051905/data",
+  "csv_files": {
+    "train.csv": {
+      "rel_path": "data/train.csv",
+      "exists": true,
+      "rows": 35549,
+      "columns": [
+        "primary_label",
+        "secondary_labels",
+        "type",
+        "latitude",
+        "longitude",
+        "scientific_name",
+        "common_name",
+        "class_name",
+        "inat_taxon_id",
+        "author",
+        "license",
+        "rating",
+        "\u2026"
+      ]
+    },
+    "taxonomy.csv": {
+      "rel_path": "data/taxonomy.csv",
+      "exists": true,
+      "rows": 234,
+      "columns": [
+        "primary_label",
+        "inat_taxon_id",
+        "scientific_name",
+        "common_name",
+        "class_name"
+      ]
+    },
+    "train_soundscapes_labels.csv": {
+      "rel_path": "data/train_soundscapes_labels.csv",
+      "exists": true,
+      "rows": 1478,
+      "columns": [
+        "filename",
+        "start",
+        "end",
+        "primary_label"
+      ]
+    },
+    "sample_submission.csv": {
+      "rel_path": "data/sample_submission.csv",
+      "exists": true,
+      "rows": 3,
+      "columns": [
+        "row_id",
+        "1161364",
+        "116570",
+        "1176823",
+        "1491113",
+        "1595929",
+        "209233",
+        "22930",
+        "22956",
+        "22961",
+        "22967",
+        "22973",
+        "\u2026"
+      ]
+    }
+  },
+  "dirs": {
+    "train_audio": {
+      "rel_path": "data/train_audio",
+      "exists": true,
+      "species_subdirs": 206,
+      "ogg_count": 35549
+    },
+    "train_soundscapes": {
+      "rel_path": "data/train_soundscapes",
+      "exists": true,
+      "ogg_count": 10658
+    },
+    "test_soundscapes": {
+      "rel_path": "data/test_soundscapes",
+      "exists": true,
+      "ogg_count": 0
+    }
+  }
+}

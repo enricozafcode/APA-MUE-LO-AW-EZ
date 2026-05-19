@@ -1,0 +1,21 @@
+SECTION 9 — AUDIO SAMPLES
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/y00678/XC568420.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/eulfly1/XC652547.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/houspa/iNat872358.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/varant1/XC291926.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/magant1/XC381935.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/strher2/XC238073.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/eulfly1/XC599027.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/saytan1/XC175784.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/gretho2/XC708305.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/picpig2/XC427744.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/coffal1/XC149033.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/swtman1/iNat1583206.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/gretho2/XC583892.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/saytan1/iNat769094.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/magtan2/XC694930.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/astcra1/iNat1493004.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/brcmar1/XC613987.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/gretho2/XC834082.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/baymac/XC443360.ogg: name 'librosa' is not defined
+Error processing file /Users/enricozafiris/Desktop/NIGHT 18051905/data/train_audio/houspa/iNat930782.ogg: name 'librosa' is not defined

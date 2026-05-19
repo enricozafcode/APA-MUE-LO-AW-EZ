@@ -62,7 +62,7 @@ submission/model.keras
 !logs/*.txt
 !logs/*.json
 # Still exclude heavy trees
-logs/eda/
+# logs/eda/
 logs/meta_agent/
 
 # Keep benchmark notebooks + small CSV summaries under notebooks/cache/

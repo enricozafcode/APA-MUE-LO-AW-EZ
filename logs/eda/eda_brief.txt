@@ -1,0 +1,6 @@
+# BirdCLEF+ 2026 — EDA Brief (2 sentences)
+# Generated: 2026-05-19T15:20:20
+
+Sentence 1: dataset scale (35,549 training samples); imbalance (max 499 recordings per species, min 1); multi-label prevalence (12.30% of recordings with secondary labels).
+
+Sentence 2: audio characteristics (errors during processing); focal vs soundscape coverage gaps (all species in focal clips, potential additional context from soundscapes for rare species).
