@@ -5,6 +5,11 @@ Autonomous research agent for the **BirdCLEF 2026** competition (APA course proj
 This repository is structured for **D1 (GitHub repository)** deliverables: source code, configuration, dependency file, experiment logs, and instructions so a reviewer can clone, install, start a local LLM, and run the agent with a short documented sequence.
 
 ---
+## Note on Code-Submission Run
+In order for our grader to be able to see that the agent improves overtime, we turned down the CNN iterations of the model to a minumum, so the different phases are still visible but likely without a lot of improvements due to the limited number of experiments. The Perch agent track runs on a limited number of iterations that likely will finish with more powerful resources (at least the architecture decision phases, maybe not the last final training and pseudo-labelling step). Please note that while producing our own submissions we often tweaked around these iterations, to see how much the agent improves with different iterations/experiment numbers.
+Short notice: A macro averge precsision of around 0.290 resulted in a score of 0.869 (MACRO AUC leaerboard score) and macro average precision of around 0.30 produced our best result of 0.88. 
+
+
 
 ## Repository contents
 
@@ -57,8 +62,7 @@ etc.
 Use **Python 3.11** explicitly when creating the venv:
 
 ```bash
-cd /path/to/this/repo
-python3.11 scripts/setup_project.py
+python scripts/setup_project.py
 ```
 The script creates `.venv` at the repo root and installs `requirements.txt`.
 
@@ -82,14 +86,19 @@ The default configuration uses **Ollama** with **`qwen2.5-coder:7b`** (fast code
 ollama pull qwen2.5-coder:7b
 ```
 
-To use a different model, edit `configs/agent_config.json` (`llm.model`, `researcher.model`, `llm_researcher.model`) and pull that tag in Ollama.
+To use a different model, edit `configs/agent_config.json` (`llm.model`, `researcher.model`, `llm_researcher.model`) and pull that tag in Ollama (some models may not work as good as others).
 
 ### 5. Run the agent (single command)
 
-With the venv activated and Ollama running:
+With the venv activated and Ollama running (adapt it to produce a log file if you do not want a truncated terminal log as it becomes really large):
 
 ```bash
 python src/meta_agent.py --config configs/agent_config.json
+```
+
+log command:
+```bash
+python src/meta_agent.py --config configs/agent_config.json 2>&1 | tee -a logs/meta_agent_terminal.log
 ```
 
 Equivalent if `python` in the venv is 3.11:
