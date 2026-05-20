@@ -1,16 +1,1 @@
-TO-Dos We Don't Want to Forget:
-
-TASK: Swap Ollama with llama.cpp
-
-The Goal:
-Transition our LLM backend from the Ollama wrapper to the raw llama-server for final production runs.
-
-The Benefit:
-By bypassing Ollama's API routing wrapper, llama.cpp will eliminate background overhead to significantly increase our code generation speed (tokens/sec). Furthermore, it allows us to override default hardware limits, giving us absolute control to manually dictate exactly how many layers of the neural network are allocated to our GPU versus our CPU, squeezing maximum performance out of our hardware during the time-constrained competition.
-
-Why are we doing this later?
-We are starting with Ollama right now because its automatic model handling allows us to rapidly prototype the agent's logic and test different models (like Qwen vs. Gemma) effortlessly. Once our agent's code generation and execution pipeline is flawless, we will take on the extra hustle of manual .gguf file management and command-line configurations in llama.cpp strictly for the final execution speed boost.
-
-
-
-Also we want to track error metrices across different llms for our projects usage. So how well do different LLMS perform in the task of code creation. 
+ALL CLEARED
