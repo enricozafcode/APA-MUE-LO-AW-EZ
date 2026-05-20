@@ -3,6 +3,7 @@
 Autonomous research agent for the **BirdCLEF 2026** competition (APA course project). An LLM **researcher** proposes experiments; a separate **coder** implements them; subprocesses train and evaluate models; results are stored in **experiment memory** and drive the next iteration. The pipeline searches cheaply on a data subset, picks a **CNN vs Perch** tournament winner, then runs full-data training and hardcoded pseudo-labelling for Kaggle submission.
 
 This repository is structured for **D1 (GitHub repository)** deliverables: source code, configuration, dependency file, experiment logs, and instructions so a reviewer can clone, install, start a local LLM, and run the agent with a short documented sequence.
+See our agent demonstration video here: https://www.youtube.com/watch?v=ZbqlASTRl54
 
 ---
 ## Note on Code-Submission Run
