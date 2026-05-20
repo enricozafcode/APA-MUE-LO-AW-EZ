@@ -6,7 +6,7 @@ This repository is structured for **D1 (GitHub repository)** deliverables: sourc
 
 ---
 ## Note on Code-Submission Run
-In order for our grader to be able to see that the agent improves overtime, we turned down the CNN iterations of the model to a minumum, so the different phases are still visible but likely without a lot of improvements due to the limited number of experiments. The Perch agent track runs on a limited number of iterations that likely will finish with more powerful resources (at least the architecture decision phases, maybe not the last final training and pseudo-labelling step). Please note that while producing our own submissions we often tweaked around these iterations, to see how much the agent improves with different iterations/experiment numbers.
+In order for our grader to be able to see that the agent improves overtime, we turned down the CNN track iterations of the model to a minumum and also included an older EDA run of the agent, so the different phases are still visible but CNN wthout a lot of improvement due to the limited number of experiments. The Perch agent track runs on a normal number of iterations that likely will finish with more powerful resources (at least the architecture decision phases, maybe not the last final training and pseudo-labelling step). Please note that while producing our own submissions we often tweaked around these iterations, to see how much the agent improves with different iterations/experiment numbers.
 Short notice: A macro averge precsision of around 0.290 resulted in a score of 0.869 (MACRO AUC leaerboard score) and macro average precision of around 0.30 produced our best result of 0.88. 
 
 
